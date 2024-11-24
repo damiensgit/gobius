@@ -1,5 +1,7 @@
 # Gobius
 
+![gobius logo](/logo.jpg)
+
 A high-performance, multi-GPU mining client for the [Arbius protocol](https://arbius.ai/), written in Go.
 
 Gobius enables decentralized machine learning by allowing miners to participate in the Arbius network - an on-chain, reproducible AI model execution platform similar to services like Midjourney or ChatGPT, but in a censorship-resistant way.
