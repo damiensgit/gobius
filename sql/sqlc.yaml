@@ -1,0 +1,45 @@
+version: "2"
+sql:
+  - engine: "sqlite"
+    queries: "query.sql"
+    schema: "sqlite/migrations"
+    gen:
+      go:
+        package: "db"
+        out: "sqlite"
+        overrides:
+          - column: "commitments.taskid"
+            go_type:
+              import: "gobius/common"
+              package: "task"
+              type: "TaskId"
+          - column: "commitments.commitment"
+            go_type:
+              import: "gobius/common"
+              package: "task"
+              type: "TaskId"
+          - column: "solutions.taskid"
+            go_type:
+              import: "gobius/common"
+              package: "task"
+              type: "TaskId"          
+          - column: "tasks.taskid"
+            go_type:
+              import: "gobius/common"
+              package: "task"
+              type: "TaskId"               
+          - column: "commitments.validator"
+            go_type:
+              import: "github.com/ethereum/go-ethereum/common"
+              package: "common"
+              type: "Address"
+          - column: "solutions.validator"
+            go_type:
+              import: "github.com/ethereum/go-ethereum/common"
+              package: "common"
+              type: "Address"
+          - column: "tasks.txhash"
+            go_type:
+              import: "github.com/ethereum/go-ethereum/common"
+              package: "common"
+              type: "Hash"

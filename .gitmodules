@@ -1,0 +1,3 @@
+[submodule "external/arbius"]
+	path = external/arbius
+	url = https://github.com/semperai/arbius.git
