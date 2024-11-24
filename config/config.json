@@ -1,0 +1,19 @@
+{
+    "baseTokenAddress": "0x4a24B101728e07A52053c13FB4dB2BcF490CAbc3",
+    "engineAddress": "0x9b51Ef044d3486A1fB0A2D55A6e0CeeAdd323E66",
+    "bulkTasksAddress": "0x216546dBEB669C8Eb85A9EE31669A096B6b1F9ab",
+    "models": {
+      "kandinsky2": {
+        "id": "0x98617a8cd4a11db63100ad44bea4e5e296aecfd78b2ef06aee3e364c7307f212",
+        "mineable": true,
+        "contracts": {},
+        "params": {
+          "addr": "0x0000000000000000000000000000000000000001",
+          "fee": "0",
+          "rate": "1000000000000000000",
+          "cid": "0x1220511fdf0e88fa9adba98a7693cca89b5d9f3181da4815b0f0500aa4315b38d17d"
+        }
+      }
+    }
+  }
+  
