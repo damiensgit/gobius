@@ -302,12 +302,16 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration) {
 						gm.services.Logger.Warn().Float64("split", gm.services.Config.ValidatorConfig.TreasurySplit).Msg("treasury split value is invalid, must be between 0 and 1")
 					}
 
-					aiusToTransfer := aiusToSell * gm.services.Config.ValidatorConfig.TreasurySplit
+					if gm.services.Config.ValidatorConfig.TreasuryAddress == (common.Address{}) {
+						gm.services.Logger.Warn().Msg("treasury address is zero address, skipping transfer")
+					} else {
 
-					if aiusToTransfer > 0.0005 {
+						aiusToTransfer := aiusToSell * gm.services.Config.ValidatorConfig.TreasurySplit
 
-						if success := gm.transferBasetokens(gm.services.Config.ValidatorConfig.TreasuryAddress, aiusToTransfer); success {
-							aiusToSell -= aiusToTransfer
+						if aiusToTransfer > 0.0005 {
+							if success := gm.transferBasetokens(gm.services.Config.ValidatorConfig.TreasuryAddress, aiusToTransfer); success {
+								aiusToSell -= aiusToTransfer
+							}
 						}
 					}
 				}
