@@ -11,7 +11,6 @@ type BaseConfig struct {
 	BaseTokenAddress common.Address    `json:"baseTokenAddress"`
 	EngineAddress    common.Address    `json:"engineAddress"`
 	BulkTasksAddress common.Address    `json:"bulkTasksAddress"`
-	BenTasksAddress  common.Address    `json:"benTasksAddress"`
 	Models           map[string]Model  `json:"models"`
 	BaseToken        *erc20.TokenERC20 `json:"-"`
 }
