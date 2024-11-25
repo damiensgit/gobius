@@ -37,21 +37,101 @@ Gobius enables decentralized machine learning by allowing miners to participate 
   - Configuration via JSON
   - Testnet support for development
 
-## Development Setup
+## Setup
 
 Windows, Linux and macOS are supported
 
 ### Prerequisites
 
-- Go 1.20 or later
+- [Go 1.22 or later](https://go.dev/dl/)
 - Git
 
-### Installation
+### System Setup
+
+1. Install Go:
+   ```bash
+   # Ubuntu/Debian
+   wget https://go.dev/dl/go1.22.9.linux-amd64.tar.gz
+   sudo rm -rf /usr/local/go && sudo tar -C /usr/local -xzf go1.20.14.linux-amd64.tar.gz
+   echo 'export PATH=$PATH:/usr/local/go/bin' >> ~/.bashrc
+   source ~/.bashrc
+
+   # macOS (using Homebrew)
+   brew install go
+
+   # windows
+   Download and install the latest windows installer from https://go.dev/dl/
+
+   # Verify installation
+   go version
+   ```
+
+### Building the Miner
+
+1. Clone and build:
+   ```bash
+   # Clone the repository
+   git clone --recursive https://github.com/damiensgit/gobius.git
+   cd gobius
+
+   # Build the miner (this will automatically download required packages)
+   go build
+   ```
+
+### Configuration Setup
+
+1. Copy the example configuration:
+   ```bash
+   cp config.example.json config.json
+   ```
+
+2. Edit config.json with your settings:
+   ```json
+   {
+     "rpc": "YOUR_RPC_ENDPOINT",  // e.g., "https://arb1.arbitrum.io/rpc"
+     "privatekey": "YOUR_PRIVATE_KEY",  // Your wallet private key (without 0x prefix)
+     // ... other optional settings ...
+   }
+   ```
+
+   > ⚠️ **Important**: Never share or commit your private key. Keep your config.json file secure.
+
+### Running the Miner
+
+Basic usage:
+```bash
+./gobius --config config.json
+```
+
+#### Command Line Flags
+
+| Flag | Description | Default | Required |
+|------|-------------|---------|----------|
+| `--config` | Path to the configuration file | "config.json" | No |
+| `--skipvalidation` | Skip safety checks and validation of the model and miner version | false | No |
+| `--loglevel` | Set logging verbosity (1 = default) | 1 | No |
+| `--testnet` | Run using testnet (1 = local, 2 = nova testnet) | 0 | No |
+| `--taskscanner` | Scan blocks for unsolved tasks in pst 12 hours | 0 | No |
+
+#### Example Commands
+
+```bash
+# Run with custom config file
+./miner --config myconfig.json
+
+# Run on testnet with increased logging
+./miner --testnet 2 --loglevel 2
+
+# Run task scanner
+./miner --taskscanner 1
+```
+
+## For Developers
 
 1. Clone the repository with submodules:
    ```bash
    # Clone with submodules
-   git clone --recursive https://github.com/<tbc>/gobius
+   git clone --recursive https://github.com/damiensgit/gobius.git
    cd gobius
 
    # Or if you've already cloned the repository:
@@ -61,10 +141,10 @@ Windows, Linux and macOS are supported
 2. Run the setup script:
    ```bash
    # Linux/MacOS
-   ./scripts/setup.sh
+   ./setup.sh
 
    # Windows
-   scripts\setup.bat
+   setup.bat
    ```
 
    This will install required tools in the `./bin` directory:
@@ -80,28 +160,6 @@ external/
 └── arbius/          # Arbius v4+ contracts
     └── contract/      # Smart contract source code, needed to create go bindings
 ```
-
-#### Working with Submodules
-
-1. **Initial clone with submodules**:
-   ```bash
-   git clone --recursive https://github.com/your/project
-   ```
-
-2. **Update submodules to their latest commits**:
-   ```bash
-   git submodule update --remote
-   ```
-
-3. **Initialize submodules (if cloned without --recursive)**:
-   ```bash
-   git submodule update --init --recursive
-   ```
-
-4. **Check submodule status**:
-   ```bash
-   git submodule status
-   ```
 
 ### Configuration
 
@@ -126,9 +184,6 @@ project/
 ├── contracts/        # Solidity smart contracts
 ├── external/         # Git submodules
 │   └── arbius/       # External contract dependencies
-├── scripts/         
-│   ├── setup.sh     # Unix setup script
-│   └── setup.bat    # Windows setup script
 └── tools/
     ├── solc/        # Solc installer
     └── abigen/      # Abigen installer
@@ -143,7 +198,7 @@ project/
    chmod +x scripts/setup.sh
    ```
 
-3. **Go version issues**: If you encounter Go-related errors, ensure you're using Go 1.20 or later:
+3. **Go version issues**: If you encounter Go-related errors, ensure you're using Go 1.22 or later:
    ```bash
    go version
    ```
