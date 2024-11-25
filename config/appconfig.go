@@ -30,21 +30,18 @@ type AppConfig struct {
 	EvilModeMinTime       int               `json:"evil_mode_min"` // for testing purposes
 	EvilModeRandInt       int               `json:"evil_mode_int"` // for testing purposes
 	WhitelistTasks        bool              `json:"whitelist_tasks"`
-	StealTasks            bool              `json:"steal_tasks"` // not the same as snipe strategy, this just steals tasks from a set of owners defined in snipe.Targets
 	NumWorkersPerGPU      int               `json:"num_workers_per_gpu"`
 	PriceOracleContract   ethcommon.Address `json:"price_oracle_contract"`
 
 	Miner SolverConfig `json:"solver"`
 
-	TelegramBot TelegramBot `json:"telegram"`
+	TelegramBot TelegramBot `json:"telegram"` // not used
 
 	ValidatorConfig ValidatorConfig `json:"validator_config"`
 
 	BatchTasks BatchTasks `json:"batchtasks"`
 	Strategies Strategies `json:"strategies"`
 	Blockchain Blockchain `json:"blockchain"`
-	Redis      Redis      `json:"redis"`
-	RPC        RPC        `json:"rpc"`
 	Claim      Claimer    `json:"claim"`
 	ML         ML         `json:"ml"`
 	IPFS       IPFS       `json:"ipfs"`
@@ -185,8 +182,7 @@ type Claimer struct {
 	// hoard claims
 	HoardMode bool `json:"hoard_mode"`
 	// max amount to hoard
-	HoardMaxQueueSize  int      `json:"hoard_max_queue_size"`
-	ClaimerPrivateKeys []string `json:"claimer_private_keys"`
+	HoardMaxQueueSize int `json:"hoard_max_queue_size"`
 }
 
 type ML struct {
@@ -269,7 +265,6 @@ func NewAppConfig(testnetType int) AppConfig {
 		ListenToTaskSubmitted: true,
 		CheckCommitment:       true,
 		WhitelistTasks:        true,
-		StealTasks:            false,
 		NumWorkersPerGPU:      1,
 		EvilMode:              false,
 		EvilModeMinTime:       2000,

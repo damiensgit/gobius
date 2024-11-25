@@ -25,7 +25,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -212,54 +211,8 @@ func (m *Miner) AvergeGPUTime() time.Duration {
 }
 
 func (m *Miner) SolveTask(taskId task.TaskId, tx *types.Transaction, gpu *task.GPU, validateOnly bool) ([]byte, error) {
-	// authCopy := new(bind.TransactOpts)
-	// *authCopy = *m.services.OwnerAccount.Auth
-	// // Assign the copied context to the copied auth object
-	// authCopy.Context = context.Background()
 
-	//startOfSolve := time.Now()
 	taskIdStr := taskId.String()
-
-	//m.services.Logger.Error().Uint64("nonce", m.validator.Nonce()).Msg("START OF SOLUTION SOLVE")
-
-	// from, err := types.Sender(types.NewEIP155Signer(tx.ChainId()), tx)
-	// if err != nil {
-	// 	from, _ = types.Sender(types.HomesteadSigner{}, tx)
-	// }
-
-	/*from, err := types.Sender(types.LatestSignerForChainID(tx.ChainId()), tx)
-	if err != nil {
-		return nil, err
-	}
-
-	var taskData *SubmitTaskParams
-
-	if from.String() != m.services.SenderOwnerAccount.Address.String() {
-		m.services.Logger.Debug().Str("sender", from.String()).Msg("using decoder to get submit task data")
-
-		if m.services.Config.WhitelistTasks {
-			if _, ok := whitelist[*tx.To()]; ok {
-				m.services.Logger.Debug().Str("taskid", taskIdStr).Str("txhash", tx.Hash().String()).Msgf("whitelisted task - skipping (to: %s)", tx.To().String())
-				return nil, nil
-			}
-		}
-
-		taskData, err = m.DecodeSubmitTask(tx, taskId)
-		if err != nil {
-			m.services.Logger.Error().Err(err).Str("taskid", taskIdStr).Str("txhash", tx.Hash().String()).Msgf("could not decode transaction: %s", common.Bytes2Hex(tx.Data()))
-			return nil, err
-		}
-		if !validateOnly && m.services.Config.StealTasks {
-			if taskData.Owner.String() != m.validator.ValidatorAddress().String() {
-				if _, ok := m.services.Config.Strategies.Snipe.Targets[taskData.Owner]; !ok {
-					m.services.Logger.Debug().Str("taskid", taskIdStr).Msgf("task owner %s not in sniper target list, skipping", taskData.Owner.String())
-					return nil, nil
-				}
-			}
-		}
-	} else {
-		taskData = m.services.AutoMineParams
-	}*/
 
 	taskData := m.services.AutoMineParams
 
@@ -268,39 +221,6 @@ func (m *Miner) SolveTask(taskId task.TaskId, tx *types.Transaction, gpu *task.G
 	//var input models.Inner
 	var result map[string]interface{}
 	err := json.Unmarshal(taskData.Input, &result)
-	//err = json.Unmarshal(taskData.Input, &input)
-	if err != nil {
-		data := string(taskData.Input)
-
-		// Remove the leading 0x
-		hexString := strings.TrimPrefix(data, "0x")
-
-		decoded, err := hex.DecodeString(hexString)
-		if err != nil {
-			hexStr := hex.EncodeToString(taskData.Input)
-			m.services.Logger.Error().Err(err).Str("txhash", tx.Hash().String()).Str("data", hexStr).Msg("could not decode input")
-			return nil, err
-		}
-		err = nil
-		var errHex error
-		// try decode upto 5 times
-		for i := 0; i < 5; i++ {
-			err = json.Unmarshal(decoded, &result)
-			if err != nil {
-				decoded, errHex = hex.DecodeString(string(decoded))
-				if errHex != nil {
-					return nil, errHex
-				}
-			} else {
-				break
-			}
-		}
-
-		if err != nil {
-			m.services.Logger.Error().Err(err).Str("txhash", tx.Hash().String()).Str("data", string(decoded)).Msg("could not unmarshal input")
-			return nil, err
-		}
-	}
 
 	m.services.Logger.Debug().Str("input", inputRaw).Msg("decoded information")
 
@@ -354,7 +274,6 @@ func (m *Miner) SolveTask(taskId task.TaskId, tx *types.Transaction, gpu *task.G
 			if err != nil {
 				return nil, err
 			}
-			//	m.services.Logger.Warn().Str("cid", "0x"+hex.EncodeToString(cid)).Msg("mock gpu cid")
 		} else {
 			cid, err = model.GetCID(gpu, taskIdStr, prompt)
 		}
@@ -1475,10 +1394,6 @@ func main() {
 					case "task":
 						kick := event.Raw.BlockNumber < currentBlockNumer-1
 						logger.Debug().Str("taskid", taskId.String()).Uint64("eventblock", event.Raw.BlockNumber).Uint64("currentblock", currentBlockNumer).Bool("eject?", kick).Msg("[Task Submitted]")
-
-						if !cfg.StealTasks && kick {
-							continue
-						}
 						addTaskToQueue(ts)
 					case "solutionsampler":
 						taskHashCache.Add(event.Id, event.Raw.TxHash)
