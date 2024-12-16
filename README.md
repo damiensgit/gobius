@@ -96,6 +96,16 @@ Windows, Linux and macOS are supported
 
    > ⚠️ **Important**: Never share or commit your private key. Keep your config.json file secure.
 
+### Deployed Contracts
+
+The miner makes use of a simple solidity contract that enables the submission of bulk claims and bulk commitments.
+
+See ```/contracts``` folder for details.
+
+There is a deployed contract on Arbitrum one available at ``0x216546dBEB669C8Eb85A9EE31669A096B6b1F9ab``, but you may deploy your own e.g. for event tracking.
+
+Use remix to deploy [this contract](contracts/BulkTasksMainnet.sol) and update the ./config/config.json field ``bulkTasksAddress`` with the new contract address.
+
 ### Running the Miner
 
 Basic usage:
