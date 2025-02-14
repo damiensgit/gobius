@@ -10,7 +10,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"gobius/arbius/engine"
+	"gobius/bindings/engine"
 	"gobius/client"
 	task "gobius/common"
 	"gobius/config"
@@ -42,21 +42,6 @@ import (
 
 //go:embed sql/sqlite/migrations/*.sql
 var embedMigrations embed.FS
-
-// Generate the required go file from the engine contract
-// This requires the official arbius project to be cloned and available TODO: make this better?
-////go:generate ./bin/solc-latest --base-path '..' --include-path '..\arbiusv3\contract\node_modules' --bin --abi ./contracts/V2_EngineV3.sol -o build --overwrite --evm-version london
-//go:generate ./bin/solc --base-path './external/arbius/' --include-path './external/arbius/contract/node_modules' --bin --abi ./contracts/V2_EngineV4.sol -o build --overwrite --evm-version london
-
-//go:generate abigen --bin=./build/V2_EngineV3.bin --pkg enginev3 --abi ./build/V2_EngineV3.abi --out ./arbius/engine/enginev3.go
-//go:generate abigen --bin=./build/IBaseToken.bin --pkg basetoken --abi ./build/IBaseToken.abi --out ./arbius/basetoken/basetoken.go
-
-//./bin/solc-latest --base-path './contracts' --bin --abi .\contracts\BulkTasksNova.sol -o build --overwrite --evm-version london
-//go:generate ./bin/solc-latest --include-path './contracts' --bin --abi ./contracts/DelegatedValidatorV2.sol -o build --overwrite --evm-version london
-//go:generate abigen --bin=./build/DelegatedValidatorV2.bin --pkg delegatedvalidator --abi ./build/DelegatedValidatorV2.abi --out ./arbius/delegatedminer/delegatedminer.go
-//abigen --bin=./build/BulkTasks.bin --pkg bulktasks --abi ./build/BulkTasks.abi --out ./arbius/bulktasks/bulktasks.go
-
-const WETH_ADDRESS = "0x722e8bdd2ce80a4422e880164f2079488e115365"
 
 type TaskSubmitted struct {
 	TaskId task.TaskId
@@ -965,22 +950,6 @@ func main() {
 			logger.Fatal().Err(err).Msg("Failed to subscribe to SolutionSubmitted events")
 		}
 	}
-
-	// httpClient := &http.Client{
-	// 	Timeout: time.Second * 10,
-	// }
-	// ct := geckoterminal.NewClient(httpClient)
-
-	// tokenAddresses := []string{strings.ToLower(cfg.BaseConfig.BaseTokenAddress.String()), WETH_ADDRESS}
-
-	// TODO: uncomment this when we have a way to get token prices
-	// prices, err := ct.SimpleTokenPrice("arbitrum-one", tokenAddresses)
-	// if err != nil {
-	// 	logger.Fatal().Err(err).Msg("error getting token prices")
-
-	// }
-
-	//	logger.Info().Float64("basetokenprice", prices[strings.ToLower(cfg.BaseConfig.BaseTokenAddress.String())]).Float64("eth", prices[WETH_ADDRESS]).Msg("current token prices")
 
 	taskIDs := list.New()
 	var mutex sync.Mutex

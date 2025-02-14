@@ -5,9 +5,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"gobius/account"
-	"gobius/arbius/basetoken"
-	"gobius/arbius/bulktasks"
-	"gobius/arbius/engine"
+	"gobius/bindings/basetoken"
+	"gobius/bindings/bulktasks"
+	"gobius/bindings/engine"
 	"gobius/client"
 	"gobius/config"
 	"gobius/erc20"
@@ -23,9 +23,9 @@ import (
 type servicesKey struct{}
 
 type Services struct {
-	Basetoken          *basetoken.Basetoken
+	Basetoken          *basetoken.BaseToken
 	Engine             *EngineWrapper
-	BulkTasks          *bulktasks.Bulktasks
+	BulkTasks          *bulktasks.BulkTasks
 	Eth                *erc20.TokenERC20
 	OwnerAccount       *account.Account
 	SenderOwnerAccount *account.Account
@@ -54,7 +54,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 	// TODO: need a cleaner way to handle this nonce update on first use - maybe move to NewAccount
 	senderOwnerAccount.UpdateNonce()
 
-	baseTokenContract, err := basetoken.NewBasetoken(cfg.BaseConfig.BaseTokenAddress, senderrpc.Client)
+	baseTokenContract, err := basetoken.NewBaseToken(cfg.BaseConfig.BaseTokenAddress, senderrpc.Client)
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +64,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 		return nil, err
 	}
 
-	bulkTasksContract, err := bulktasks.NewBulktasks(cfg.BaseConfig.BulkTasksAddress, senderrpc.Client)
+	bulkTasksContract, err := bulktasks.NewBulkTasks(cfg.BaseConfig.BulkTasksAddress, senderrpc.Client)
 	if err != nil {
 		return nil, err
 	}

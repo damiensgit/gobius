@@ -21,3 +21,4 @@ gobius
 local.db*
 bin/*
 .vscode/settings.json
+.task/

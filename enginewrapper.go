@@ -2,7 +2,7 @@ package main
 
 import (
 	"errors"
-	"gobius/arbius/engine"
+	"gobius/bindings/engine"
 	task "gobius/common"
 	"gobius/storage"
 	"gobius/utils"

@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"gobius/account"
-	"gobius/arbius/basetoken"
+	"gobius/bindings/basetoken"
 	"gobius/erc20"
 	"io"
 	"math/big"
@@ -38,7 +38,7 @@ var (
 type ParaswapManager struct {
 	account           *account.Account
 	baseToken         *erc20.TokenERC20
-	baseTokenContract *basetoken.Basetoken
+	baseTokenContract *basetoken.BaseToken
 	logger            *zerolog.Logger
 }
 
@@ -72,7 +72,7 @@ type TransactionResponse struct {
 	ChainID  int    `json:"chainId"`
 }
 
-func NewParaswapManager(account *account.Account, baseTokenContract *basetoken.Basetoken, baseToken *erc20.TokenERC20, logger *zerolog.Logger) *ParaswapManager {
+func NewParaswapManager(account *account.Account, baseTokenContract *basetoken.BaseToken, baseToken *erc20.TokenERC20, logger *zerolog.Logger) *ParaswapManager {
 	return &ParaswapManager{
 		account:           account,
 		baseToken:         baseToken,

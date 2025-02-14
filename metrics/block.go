@@ -3,7 +3,7 @@ package metrics
 import (
 	"context"
 	"fmt"
-	"gobius/arbius/engine"
+	"gobius/bindings/engine"
 	"gobius/client"
 	"gobius/config"
 	"log"

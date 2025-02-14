@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"gobius/account"
-	"gobius/arbius/engine"
+	"gobius/bindings/engine"
 	"gobius/client"
 	task "gobius/common"
 	"gobius/config"
@@ -1894,10 +1894,9 @@ func (tm *BatchTransactionManager) BulkTasks(account *account.Account, count int
 			// 1 in 10 it undershoots the gas limit
 			opts.GasLimit = uint64(1_500_000 + uint64(count)*185_000)
 			tasks := big.NewInt(int64(count))
-			if client == nil {
-				return tm.services.Engine.Engine.BulkSubmitTask(opts, tm.services.AutoMineParams.Version, tm.services.AutoMineParams.Owner, tm.services.AutoMineParams.Model, tm.services.AutoMineParams.Fee, tm.services.AutoMineParams.Input, tasks)
-				//return tm.services.BulkTasks.SubmitMultipleTasksEncoded(opts, tasks, tm.encodedTaskData)
-			} else {
+			//if client == nil {
+			return tm.services.Engine.Engine.BulkSubmitTask(opts, tm.services.AutoMineParams.Version, tm.services.AutoMineParams.Owner, tm.services.AutoMineParams.Model, tm.services.AutoMineParams.Fee, tm.services.AutoMineParams.Input, tasks)
+			/*} else {
 				opts.NoSend = true
 				tx, err := tm.services.BulkTasks.SubmitMultipleTasksEncoded(opts, tasks, tm.encodedTaskData)
 				if err != nil {
@@ -1905,8 +1904,7 @@ func (tm *BatchTransactionManager) BulkTasks(account *account.Account, count int
 				}
 
 				return client.SendSignedTransaction(tx)
-			}
-			//return tm.services.BulkTasks.SubmitMultipleTasks(opts, count/10)
+			}*/
 		})
 
 		if err != nil {
