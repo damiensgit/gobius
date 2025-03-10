@@ -75,9 +75,7 @@ type BatchSolution struct {
 }
 
 type BatchTransactionManager struct {
-	services *Services
-	//delegatedvalidatorContract *delegatedvalidator.Delegatedvalidator
-	//bulkContract
+	services                      *Services
 	cumulativeGasUsed             *GasMetrics // tracks how much gas we've spent
 	signalCommitmentEvent         common.Hash
 	solutionSubmittedEvent        common.Hash
@@ -145,10 +143,12 @@ func (tm *BatchTransactionManager) GetValidatorInfo() string {
 	return s
 }
 
-// TODO: refactor this bs
+// TODO: refactor this to be more efficient and not so messy
 func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float64, float64, float64, float64, error) {
 	var err error
 	var basePrice, ethPrice float64
+
+	modelId := tm.services.AutoMineParams.Model
 
 	if basefee == nil {
 		basefee, err = tm.services.OwnerAccount.Client.GetBaseFee()
@@ -186,14 +186,13 @@ func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float6
 
 	totalCostPerBatchUSD := (submitTasksBatchUSD + signalCommitmentBatchUSD + submitSolutionBatchUSD + claimTasksUSD)
 
-	//rewardInAIUS := tm.cumulativeGasUsed.rewardEMA.Average()
-	reward, err := tm.services.Engine.Engine.GetReward(nil)
+	totalReward, err := tm.services.Engine.GetModelReward(modelId)
 	if err != nil {
-		tm.services.Logger.Error().Err(err).Msg("could not get reward!")
+		tm.services.Logger.Error().Err(err).Msg("could not get model reward!")
 		return 0, 0, 0, 0, 0, err
 	}
 
-	rewardInAIUS := tm.services.Config.BaseConfig.BaseToken.ToFloat(reward) * 0.9
+	rewardInAIUS := tm.services.Config.BaseConfig.BaseToken.ToFloat(totalReward)
 
 	tm.cache.Set("reward", rewardInAIUS)
 
@@ -399,7 +398,6 @@ func (tm *BatchTransactionManager) processBatch(
 	profitLevel, baseFee, rewardInAIUS, ethPrice, basePrice float64) {
 
 	if err := appQuit.Err(); err != nil {
-		tm.services.Logger.Error().Msg("appQuit err not nil")
 		return
 	}
 
@@ -2116,38 +2114,38 @@ func (m *BatchTransactionManager) SubmitContestation(validator common.Address, t
 	return errors.New("validator not found")
 }
 
-func (m *BatchTransactionManager) Start(appQuit context.Context) error {
-	m.cumulativeGasUsed.Start()
+func (tm *BatchTransactionManager) Start(appQuit context.Context) error {
+	tm.cumulativeGasUsed.Start()
 
-	if m.services.Config.ValidatorConfig.StakeCheck {
-		stakeCheckInterval, err := time.ParseDuration(m.services.Config.ValidatorConfig.StakeCheckInterval)
+	if tm.services.Config.ValidatorConfig.StakeCheck {
+		stakeCheckInterval, err := time.ParseDuration(tm.services.Config.ValidatorConfig.StakeCheckInterval)
 		if err != nil {
 			return err
 		}
-		m.ProcessValidatorsStakes()
-
-		go m.processValidatorStakePoller(appQuit, m.wg, stakeCheckInterval)
+		tm.ProcessValidatorsStakes()
+		tm.wg.Add(1) // Added wg.Add(1) to match the Done in processValidatorStakePoller
+		go tm.processValidatorStakePoller(appQuit, tm.wg, stakeCheckInterval)
 	} else {
-		m.services.Logger.Warn().Msg("validator stake / balance checks are disabled!")
+		tm.services.Logger.Warn().Msg("validator stake / balance checks are disabled!")
 	}
 
-	switch m.batchMode {
+	switch tm.batchMode {
 	case 1:
-		if m.services.Config.Miner.UsePolling {
-			d, err := time.ParseDuration(m.services.Config.Miner.PollingTime)
+		if tm.services.Config.Miner.UsePolling {
+			d, err := time.ParseDuration(tm.services.Config.Miner.PollingTime)
 			if err != nil {
 				return err
 			}
-			m.wg.Add(1)
-			go m.processBatchPoller(appQuit, m.wg, d)
+			tm.wg.Add(1)
+			go tm.processBatchPoller(appQuit, tm.wg, d)
 		} else {
-			m.wg.Add(1)
-			go m.processBatchBlockTrigger(appQuit, m.wg)
+			tm.wg.Add(1)
+			go tm.processBatchBlockTrigger(appQuit, tm.wg)
 		}
 	case 0, 2:
-		if m.services.Config.Claim.Enabled {
-			m.wg.Add(1)
-			go m.batchClaimPoller(appQuit, m.wg, time.Duration(m.services.Config.Claim.Delay)*time.Second)
+		if tm.services.Config.Claim.Enabled {
+			tm.wg.Add(1)
+			go tm.batchClaimPoller(appQuit, tm.wg, time.Duration(tm.services.Config.Claim.Delay)*time.Second)
 		}
 	default:
 		// error
@@ -2257,4 +2255,84 @@ func NewBatchTransactionManager(ctx context.Context, wg *sync.WaitGroup) (*Batch
 	}
 
 	return btm, nil
+}
+
+// Add after the existing metrics interface implementation:
+
+func (tm *BatchTransactionManager) GetSessionTime() string {
+	sessionDuration := time.Since(tm.cumulativeGasUsed.sessionStartTime)
+	hours := int(sessionDuration.Hours())
+	minutes := int(sessionDuration.Minutes()) % 60
+	seconds := int(sessionDuration.Seconds()) % 60
+	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
+}
+
+func (tm *BatchTransactionManager) GetSolvedLastMinute() int64 {
+	return tm.services.TaskTracker.GetSolvedLastMinute()
+}
+
+func (tm *BatchTransactionManager) GetSuccessCount() int64 {
+	return tm.services.TaskTracker.GetSuccessCount()
+}
+
+func (tm *BatchTransactionManager) GetTotalCount() int64 {
+	return tm.services.TaskTracker.GetTotalCount()
+}
+
+func (tm *BatchTransactionManager) GetSuccessRate() float64 {
+	return tm.services.TaskTracker.GetSuccessRate()
+}
+
+func (tm *BatchTransactionManager) GetAverageSolutionRate() float64 {
+	return tm.services.TaskTracker.GetAverageSolutionRate()
+}
+
+func (tm *BatchTransactionManager) GetAverageSolutionsPerMin() float64 {
+	return tm.services.TaskTracker.GetAverageSolutionsPerMin()
+}
+
+func (tm *BatchTransactionManager) GetAverageSolvesPerMin() float64 {
+	return tm.services.TaskTracker.GetAverageSolvesPerMin()
+}
+
+func (tm *BatchTransactionManager) GetTokenIncomePerMin() float64 {
+	return tm.services.TaskTracker.GetAverageTasksPerPeriod() * tm.cumulativeGasUsed.rewardEMA.Average()
+}
+
+func (tm *BatchTransactionManager) GetTokenIncomePerHour() float64 {
+	return tm.GetTokenIncomePerMin() * 60
+}
+
+func (tm *BatchTransactionManager) GetTokenIncomePerDay() float64 {
+	return tm.GetTokenIncomePerHour() * 24
+}
+
+func (tm *BatchTransactionManager) GetIncomePerMin() float64 {
+	return tm.GetTokenIncomePerMin() * tm.cumulativeGasUsed.basePriceEMA.Average()
+}
+
+func (tm *BatchTransactionManager) GetIncomePerHour() float64 {
+	return tm.GetIncomePerMin() * 60
+}
+
+func (tm *BatchTransactionManager) GetIncomePerDay() float64 {
+	return tm.GetIncomePerHour() * 24
+}
+
+func (tm *BatchTransactionManager) GetProfitPerMin() float64 {
+	totalCostInUSD := tm.services.Config.BaseConfig.BaseToken.ToFloat(tm.cumulativeGasUsed.GetTotals()) * tm.cumulativeGasUsed.lastEthPrice
+	timeSinceSessionStart := time.Since(tm.cumulativeGasUsed.sessionStartTime).Minutes()
+	if timeSinceSessionStart <= 0 {
+		return 0
+	}
+	averageCostsPerMin := totalCostInUSD / timeSinceSessionStart
+	return tm.GetIncomePerMin() - averageCostsPerMin
+}
+
+func (tm *BatchTransactionManager) GetProfitPerHour() float64 {
+	return tm.GetProfitPerMin() * 60
+}
+
+func (tm *BatchTransactionManager) GetProfitPerDay() float64 {
+	return tm.GetProfitPerHour() * 24
 }

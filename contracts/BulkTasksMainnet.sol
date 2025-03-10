@@ -33,7 +33,6 @@ contract BulkTasks {
     function bulkSignalCommitment(bytes32[] calldata commitments_) public {
          assembly {
 
-            //0x506ea7decaf9a90acda804f400bf1238754038eaec53eebdcb1ea409029b0eff8afd00cf
             let input_data := mload(0x40) 
                   
             mstore(input_data, 0x506ea7de00000000000000000000000000000000000000000000000000000000) 

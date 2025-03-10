@@ -184,7 +184,6 @@ tasks:
       - task: build:votingescrow
       - task: build:enginev5
       - task: build:bulktasks
-      - task: build:basetoken
 
   clean:
     desc: Clean build artifacts

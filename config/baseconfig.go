@@ -10,9 +10,12 @@ import (
 type BaseConfig struct {
 	BaseTokenAddress common.Address    `json:"baseTokenAddress"`
 	EngineAddress    common.Address    `json:"engineAddress"`
+	VoterAddress     common.Address    `json:"voterAddress"`
+	VeStakingAddress common.Address    `json:"veStakingAddress"`
 	BulkTasksAddress common.Address    `json:"bulkTasksAddress"`
 	Models           map[string]Model  `json:"models"`
 	BaseToken        *erc20.TokenERC20 `json:"-"`
+	TestnetType      int               `json:"-"`
 }
 
 type Model struct {

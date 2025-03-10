@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"gobius/account"
 	"gobius/bindings/basetoken"
 	"gobius/bindings/bulktasks"
 	"gobius/bindings/engine"
+	"gobius/bindings/voter"
 	"gobius/client"
 	"gobius/config"
 	"gobius/erc20"
@@ -16,7 +18,10 @@ import (
 	"gobius/storage"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/rs/zerolog"
 )
 
@@ -25,6 +30,7 @@ type servicesKey struct{}
 type Services struct {
 	Basetoken          *basetoken.BaseToken
 	Engine             *EngineWrapper
+	Voter              *voter.Voter
 	BulkTasks          *bulktasks.BulkTasks
 	Eth                *erc20.TokenERC20
 	OwnerAccount       *account.Account
@@ -34,9 +40,8 @@ type Services struct {
 	Logger             *zerolog.Logger
 	TaskStorage        *storage.TaskStorageDB
 	AutoMineParams     *SubmitTaskParams
-	//Redis          *redis.Client
-	Paraswap    *paraswap.ParaswapManager
-	TaskTracker *metrics.TaskTracker
+	Paraswap           *paraswap.ParaswapManager
+	TaskTracker        *metrics.TaskTracker
 }
 
 func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients []*client.Client, sql *sql.DB, logger *zerolog.Logger, cfg *config.AppConfig, appContext context.Context) (context.Context, error) {
@@ -64,9 +69,67 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 		return nil, err
 	}
 
-	bulkTasksContract, err := bulktasks.NewBulkTasks(cfg.BaseConfig.BulkTasksAddress, senderrpc.Client)
+	voterContract, err := voter.NewVoter(cfg.BaseConfig.VoterAddress, rpc.Client)
 	if err != nil {
 		return nil, err
+	}
+
+	var bulkTasksContract *bulktasks.BulkTasks
+
+	if cfg.BaseConfig.TestnetType > 0 {
+		// TODO: this is a hack to check if the contract exists on testnet
+		if err := checkContractExists(cfg.BaseConfig.BulkTasksAddress, senderrpc.Client, logger); err != nil {
+
+			// on local testnet we can deploy the contract
+			// TODO: this is effectively disabled for now until we have a better way to handle it / rewrite contract
+			if cfg.BaseConfig.TestnetType == 999 {
+				ctxTimeout, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+				defer cancel()
+
+				// get the gas price
+				gasPrice, err := ownerAccount.Client.GetGasPrice()
+				if err != nil {
+					return nil, err
+				}
+
+				opts := ownerAccount.GetOpts(1_000_000, gasPrice, nil, nil)
+				// deploy the contract
+				var bulkTasksContractAddress common.Address
+				var tx *types.Transaction
+
+				logger.Info().Msg("deploying BulkTasks contract")
+
+				bulkTasksContractAddress, tx, bulkTasksContract, err = bulktasks.DeployBulkTasks(opts, senderrpc.Client)
+				if err != nil {
+					return nil, err
+				}
+
+				logger.Info().Msg("waiting for BulkTasks contract deployment")
+
+				receipt, err := bind.WaitMined(ctxTimeout, senderrpc.Client, tx)
+				if err != nil {
+					return nil, err
+				}
+
+				if receipt.Status != types.ReceiptStatusSuccessful {
+					return nil, fmt.Errorf("BulkTasks contract deployment failed")
+				}
+
+				logger.Info().Msgf("BulkTasks contract deployed at address %s (you must update the config with this address)", bulkTasksContractAddress.Hex())
+
+				cfg.BaseConfig.BulkTasksAddress = bulkTasksContractAddress
+			} else {
+				return nil, fmt.Errorf("BulkTasks contract not deployed or invalid at address %s: %w",
+					cfg.BaseConfig.BulkTasksAddress.Hex(), err)
+			}
+		}
+	}
+
+	if bulkTasksContract == nil {
+		bulkTasksContract, err = bulktasks.NewBulkTasks(cfg.BaseConfig.BulkTasksAddress, senderrpc.Client)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// cache the min claim time
@@ -85,14 +148,13 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 	// which means redis calls will fail even as we try to exit
 	ts := storage.NewTaskStorageDB(appContext, sql, minclaimTime, logger)
 
-	engineWrapper := NewEngineWrapper(engineContract, logger)
+	engineWrapper := NewEngineWrapper(engineContract, voterContract, logger)
 
 	paraswapManager := paraswap.NewParaswapManager(
 		senderOwnerAccount,
 		baseTokenContract,
 		cfg.BaseConfig.BaseToken,
-		logger,
-	)
+		logger)
 
 	taskMetrics := metrics.NewTaskTracker()
 
@@ -111,6 +173,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 	services := &Services{
 		Basetoken:          baseTokenContract,
 		Engine:             engineWrapper,
+		Voter:              voterContract,
 		BulkTasks:          bulkTasksContract,
 		Eth:                eth,
 		OwnerAccount:       ownerAccount,
@@ -127,4 +190,19 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 	ctx := context.WithValue(appContext, servicesKey{}, services)
 
 	return ctx, nil
+}
+
+// checkContractExists verifies that a contract exists at the specified address
+func checkContractExists(address common.Address, client *ethclient.Client, logger *zerolog.Logger) error {
+	// Check if the address has code (only contracts have code)
+	code, err := client.CodeAt(context.Background(), address, nil)
+	if err != nil {
+		return fmt.Errorf("failed to get code at address: %w", err)
+	}
+
+	if len(code) == 0 {
+		return fmt.Errorf("no contract code found at address")
+	}
+
+	return nil
 }

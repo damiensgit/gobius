@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"gobius/bindings/engine"
+	"gobius/bindings/voter"
 	task "gobius/common"
 	"gobius/storage"
 	"gobius/utils"
@@ -13,14 +14,21 @@ import (
 	"github.com/rs/zerolog"
 )
 
+var (
+	// as per the engine contract
+	RewardDenominator = big.NewInt(1e18).Mul(big.NewInt(2), big.NewInt(1e18))
+)
+
 type EngineWrapper struct {
 	Engine *engine.Engine
+	Voter  *voter.Voter
 	logger *zerolog.Logger
 }
 
-func NewEngineWrapper(engine *engine.Engine, logger *zerolog.Logger) *EngineWrapper {
+func NewEngineWrapper(engine *engine.Engine, voter *voter.Voter, logger *zerolog.Logger) *EngineWrapper {
 	return &EngineWrapper{
 		Engine: engine,
+		Voter:  voter,
 		logger: logger,
 	}
 }
@@ -263,4 +271,52 @@ func (m *EngineWrapper) CanTaskIdBeClaimed(claim storage.ClaimTask, cooldownTime
 		}
 	}
 	return true, nil
+}
+
+// V5:
+// get the reward for a specific model - this is used to calculate the reward for a task
+// follows the same logic as the engine contract
+func (m *EngineWrapper) GetModelReward(modelId [32]byte) (*big.Int, error) {
+	reward, err := m.Engine.GetReward(nil)
+	if err != nil {
+		m.logger.Error().Err(err).Msg("could not get reward!")
+		return nil, err
+	}
+
+	// get model rate from engine
+	modelRate, err := m.Engine.Models(nil, modelId)
+	if err != nil {
+		m.logger.Error().Err(err).Msg("could not get model rate!")
+		return nil, err
+	}
+
+	// as per engine contract: default to 1e18, so contract still works even if voter is not set
+	gaugeMultiplier := big.NewInt(1e18)
+
+	// in reality, this is will always be true on mainnet, but we check anyway as useful for
+	// local engine deployment without voter system
+	if m.Voter != nil {
+		isGauge, err := m.Voter.IsGauge(nil, modelId)
+		if err == nil && isGauge {
+			gaugeMultiplier, err = m.Voter.GetGaugeMultiplier(nil, modelId)
+			if err != nil {
+				gaugeMultiplier = big.NewInt(1e18)
+			}
+		} else {
+			gaugeMultiplier = big.NewInt(0)
+		}
+	}
+
+	// if model rate is 0 and gauge multiplier is 0, return 0
+	if modelRate.Rate.Cmp(big.NewInt(0)) > 0 && gaugeMultiplier.Cmp(big.NewInt(0)) > 0 {
+
+		// Calculate total reward with gauge multiplier
+		totalReward := new(big.Int).Mul(reward, modelRate.Rate)
+		totalReward = totalReward.Mul(totalReward, gaugeMultiplier)
+		totalReward = totalReward.Div(totalReward, RewardDenominator)
+
+		return totalReward, nil
+	} else {
+		return big.NewInt(0), nil
+	}
 }

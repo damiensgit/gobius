@@ -243,11 +243,6 @@ func (ts *TaskStorageDB) AddTasksToClaim(taskIds []task.TaskId, value float64) (
 	return claimTime, nil
 }
 
-// func (rc *TaskStorageDB) GetClaims(batchSize int) (ClaimTaskSlice, error) {
-
-// 	return claims, nil
-// }
-
 func (ts *TaskStorageDB) DeleteClaim(taskkey string) error {
 	return nil
 }

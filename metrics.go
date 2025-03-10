@@ -111,7 +111,7 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration) {
 		var err error
 		gm.lastBasePrice, gm.lastEthPrice, err = gm.services.Paraswap.GetPrices()
 		if err != nil {
-			gm.services.Logger.Error().Err(err).Msg("could not get prices from sushi api!")
+			gm.services.Logger.Error().Err(err).Msg("could not get prices from dex!")
 			continue
 		}
 
@@ -142,7 +142,16 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration) {
 			continue
 		}
 
-		gm.lastReward = gm.services.Config.BaseConfig.BaseToken.ToFloat(val) * 0.9 // remove 10% for the treasury
+		// TODO: this is a hack to get the model id from the auto mine params
+		modelId := gm.services.AutoMineParams.Model
+
+		totalReward, err := gm.services.Engine.GetModelReward(modelId)
+		if err != nil {
+			gm.services.Logger.Error().Err(err).Msg("could not get model reward!")
+			continue
+		}
+
+		gm.lastReward = gm.services.Config.BaseConfig.BaseToken.ToFloat(totalReward)
 		gm.AddReward(gm.lastReward)
 
 		totalCostInUSD := gm.services.Config.BaseConfig.BaseToken.ToFloat(gm.TotalGasUsed) * gm.lastEthPrice
@@ -326,7 +335,7 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration) {
 				}
 
 				if tx != nil {
-					gm.services.Logger.Info().Msg("✔️approving AIUS to be sold")
+					gm.services.Logger.Info().Msg("approving AIUS to be sold")
 
 					_, success, _, _ := gm.services.SenderOwnerAccount.WaitForConfirmedTx(gm.services.Logger, tx)
 
@@ -359,7 +368,6 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration) {
 			}
 
 		}
-
 	}
 }
 

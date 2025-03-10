@@ -3,6 +3,7 @@ package models
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,9 +19,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/mr-tron/base58"
+	"github.com/rs/zerolog"
 )
 
-type Inner struct {
+type Kadinsky2Inner struct {
 	Prompt string `json:"prompt"`
 	Width  int    `json:"width"`
 	Height int    `json:"height"`
@@ -28,7 +30,7 @@ type Inner struct {
 }
 
 type Kandinsky2Prompt struct {
-	Input Inner `json:"input"`
+	Input Kadinsky2Inner `json:"input"`
 }
 
 type Kandinsky2ModelResponse struct {
@@ -43,6 +45,7 @@ type Kandinsky2Model struct {
 	config  *config.AppConfig
 	//url     string
 	client *http.Client
+	logger *zerolog.Logger
 }
 
 // Ensure Kandinsky2Model implements the Model interface.
@@ -93,16 +96,12 @@ var Kandinsky2ModelTemplate = Model{
 	},
 }
 
-func NewKandinsky2Model(client ipfs.IPFSClient, appConfig *config.AppConfig) *Kandinsky2Model {
+func NewKandinsky2Model(client ipfs.IPFSClient, appConfig *config.AppConfig, logger *zerolog.Logger) *Kandinsky2Model {
 
-	// cog, found := appConfig.ML.Cog[Kandinsky2ModelTemplate.ID]
-	// // validate config:
-	// if !found {
-	// 	// TODO: change to error return
-	// 	panic("Kandinsky2Model is missing from config.ML.Cog")
-	// }
-
-	//url := cog.URL
+	if logger == nil {
+		nopLogger := zerolog.Nop()
+		logger = &nopLogger
+	}
 
 	http := &http.Client{
 		Timeout: time.Second * 30, // TODO: make this a config based setting - set timeout to 30 seconds
@@ -120,6 +119,7 @@ func NewKandinsky2Model(client ipfs.IPFSClient, appConfig *config.AppConfig) *Ka
 			},
 		},
 		client: http,
+		logger: logger,
 	}
 	// set this from config for now
 	// TODO: validate model exists in map before accessing
@@ -127,9 +127,7 @@ func NewKandinsky2Model(client ipfs.IPFSClient, appConfig *config.AppConfig) *Ka
 	return m
 }
 
-type InputHydrationResult interface{}
-
-func (m *Kandinsky2Model) HydrateInput(preprocessedInput map[string]interface{}) (InputHydrationResult, error) {
+func (m *Kandinsky2Model) HydrateInput(preprocessedInput map[string]interface{}, seed uint64) (InputHydrationResult, error) {
 	input := make(map[string]interface{})
 
 	// messy but works
@@ -214,7 +212,7 @@ func (m *Kandinsky2Model) HydrateInput(preprocessedInput map[string]interface{})
 	// This takes our mapped input and converts it to the expected format
 	// input json => map[string]interface{} => json => Kadinsky2Prompt
 	// This ensure that we have some type safety
-	var inner Inner
+	var inner Kadinsky2Inner
 
 	jsonBytes, err := json.Marshal(input)
 	if err != nil {
@@ -224,6 +222,7 @@ func (m *Kandinsky2Model) HydrateInput(preprocessedInput map[string]interface{})
 	if err != nil {
 		return nil, err
 	}
+	inner.Seed = seed
 
 	result := Kandinsky2Prompt{
 		Input: inner,
@@ -318,4 +317,30 @@ func (m *Kandinsky2Model) GetCID(gpu *common.GPU, taskid string, input interface
 
 	//cid := "0x" + hex.EncodeToString(cidBytes)
 	return cidBytes, nil
+}
+
+func (m *Kandinsky2Model) Validate(gpu *common.GPU, taskid string) error {
+	testPrompt := Kandinsky2Prompt{
+		Input: Kadinsky2Inner{
+			Prompt: "render a cat in the style of kandinsky",
+			Height: 768,
+			Width:  768,
+			Seed:   1337,
+		},
+	}
+
+	cid, err := m.GetCID(gpu, "startup-test-taskid", testPrompt)
+	if err != nil {
+		return err
+	}
+
+	expected := "0x12200f8c99111abf301ceb8965af7b111c77bcd6e1903c0c713c4b610665dd270be3"
+	cidStr := "0x" + hex.EncodeToString(cid)
+	if cidStr == expected {
+		m.logger.Info().Str("model", m.GetID()).Str("cid", cidStr).Str("expected", expected).Msg("model CID matches expected CID")
+	} else {
+		m.logger.Error().Str("model", m.GetID()).Str("cid", cidStr).Str("expected", expected).Msg("model CID does not match expected CID")
+		return errors.New("model CID does not match expected CID")
+	}
+	return nil
 }

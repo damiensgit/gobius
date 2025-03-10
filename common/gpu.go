@@ -35,7 +35,7 @@ const (
 	errorTimeout  = 5 * time.Minute
 )
 
-// atomically increment the error count and set the time since error to now
+// automatically increment the error count and set the time since error to now
 // ensuring thread safety
 func (g *GPU) IncrementErrorCount() {
 	g.mu.Lock()

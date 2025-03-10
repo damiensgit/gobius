@@ -361,6 +361,8 @@ func NewAppConfig(testnetType int) AppConfig {
 		panic("failed to unmarshal base config: " + err.Error())
 	}
 
+	cfg.BaseConfig.TestnetType = testnetType
+
 	cfg.BaseConfig.BaseToken = erc20.NewTokenERC20(cfg.BaseConfig.BaseTokenAddress, 18, "AIUS", "AIUS")
 
 	return cfg

@@ -1,24 +1,31 @@
 package models
 
 import (
+	"strings"
+
 	"gobius/common"
 	"gobius/config"
 	"gobius/ipfs"
+
+	"github.com/rs/zerolog"
 )
 
 type Model struct {
 	ID       string
-	Template interface{}
+	Template any
 	Mineable bool
 	Filters  []MiningFilter
 }
 
+type InputHydrationResult any
+
 // TODO: add context support to GetFiles and GetCID
 type ModelInterface interface {
-	GetFiles(gpu *common.GPU, taskid string, input interface{}) ([]ipfs.IPFSFile, error)
-	GetCID(gpu *common.GPU, taskid string, input interface{}) ([]byte, error)
+	GetFiles(gpu *common.GPU, taskid string, input any) ([]ipfs.IPFSFile, error)
+	GetCID(gpu *common.GPU, taskid string, input any) ([]byte, error)
 	GetID() string
-	HydrateInput(preprocessedInput map[string]interface{}) (InputHydrationResult, error)
+	HydrateInput(preprocessedInput map[string]any, seed uint64) (InputHydrationResult, error)
+	Validate(gpu *common.GPU, taskid string) error
 }
 
 type MiningFilter struct {
@@ -26,31 +33,56 @@ type MiningFilter struct {
 	MinTime int
 }
 
-type EnabledModel struct {
-	Models []ModelInterface
+// ModelFactory manages model registration and retrieval
+type ModelFactory struct {
+	registeredModels map[string]ModelInterface
 }
 
-func (em *EnabledModel) AddModel(m ModelInterface) {
-	em.Models = append(em.Models, m)
+// NewModelFactory creates a new model factory
+func NewModelFactory() *ModelFactory {
+	return &ModelFactory{
+		registeredModels: make(map[string]ModelInterface),
+	}
 }
 
-func (em *EnabledModel) FindModel(id string) ModelInterface {
-	// add 0x to the id if it's not there
-	if id[:2] != "0x" {
+// RegisterModel adds a model to the factory
+func (mf *ModelFactory) RegisterModel(model ModelInterface) {
+	modelID := model.GetID()
+	mf.registeredModels[modelID] = model
+}
+
+// GetModel retrieves a model by ID
+func (mf *ModelFactory) GetModel(id string) ModelInterface {
+	// Normalize ID format (add 0x prefix if missing)
+	if !strings.HasPrefix(id, "0x") {
 		id = "0x" + id
 	}
-	for _, m := range em.Models {
-		if m.GetID() == id {
-			return m
-		}
-	}
-	return nil
+
+	return mf.registeredModels[id]
 }
 
-var EnabledModels EnabledModel = EnabledModel{}
+// GetAllModels returns all registered models
+func (mf *ModelFactory) GetAllModels() []ModelInterface {
+	models := make([]ModelInterface, 0, len(mf.registeredModels))
+	for _, model := range mf.registeredModels {
+		models = append(models, model)
+	}
+	return models
+}
 
-// This will panic on config validation if the model is not found in the config
-func InitEnabledModels(client ipfs.IPFSClient, config *config.AppConfig) {
-	model := NewKandinsky2Model(client, config)
-	EnabledModels.AddModel(model)
+// Global factory instance
+var ModelRegistry *ModelFactory
+
+// InitModelRegistry initializes the model registry with available models
+func InitModelRegistry(client ipfs.IPFSClient, config *config.AppConfig, logger *zerolog.Logger) {
+	ModelRegistry = NewModelFactory()
+
+	// Register available models
+	modelQwen := NewQwenTestModel(client, config, logger)
+	ModelRegistry.RegisterModel(modelQwen)
+
+	modelKandinsky2 := NewKandinsky2Model(client, config, logger)
+	ModelRegistry.RegisterModel(modelKandinsky2)
+
+	// Register additional models here as needed
 }

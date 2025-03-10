@@ -127,3 +127,62 @@ func (t *TaskTracker) Solved() {
 	atomic.AddInt64(&t.solvedCount, 1)
 	atomic.AddInt64(&t.solvedCountTotal, 1)
 }
+
+func (t *TaskTracker) GetSolvedLastMinute() int64 {
+	return atomic.LoadInt64(&t.solvedCount)
+}
+
+func (t *TaskTracker) GetSuccessCount() int64 {
+	return atomic.LoadInt64(&t.successCount)
+}
+
+func (t *TaskTracker) GetTotalCount() int64 {
+	return atomic.LoadInt64(&t.successCount) + atomic.LoadInt64(&t.failCount)
+}
+
+func (t *TaskTracker) GetSuccessRate() float64 {
+	sc := atomic.LoadInt64(&t.successCount)
+	fc := atomic.LoadInt64(&t.failCount)
+	total := sc + fc
+	if total > 0 {
+		return float64(sc) / float64(total)
+	}
+	return 0
+}
+
+func (t *TaskTracker) GetAverageSolutionRate() float64 {
+	measurements := atomic.LoadInt64(&t.measurements)
+	if measurements > 0 {
+		return t.totalRatio / float64(measurements)
+	}
+	return 0
+}
+
+func (t *TaskTracker) GetAverageSolutionsPerMin() float64 {
+	sct := atomic.LoadInt64(&t.successCountTotal)
+	fct := atomic.LoadInt64(&t.failCountTotal)
+	measurements := atomic.LoadInt64(&t.measurements)
+	if measurements > 0 {
+		return float64(sct+fct) / float64(measurements)
+	}
+	return 0
+}
+
+func (t *TaskTracker) GetAverageSolvesPerMin() float64 {
+	solvecounttotal := atomic.LoadInt64(&t.solvedCountTotal)
+	measurements := atomic.LoadInt64(&t.measurements)
+	if measurements > 0 {
+		return float64(solvecounttotal) / float64(measurements)
+	}
+	return 0
+}
+
+func (t *TaskTracker) GetAverageTasksPerPeriod() float64 {
+	sct := atomic.LoadInt64(&t.successCountTotal)
+	fct := atomic.LoadInt64(&t.failCountTotal)
+	measurements := atomic.LoadInt64(&t.measurements)
+	if measurements > 0 {
+		return float64(sct+fct) / float64(measurements)
+	}
+	return 0
+}

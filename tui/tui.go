@@ -152,11 +152,12 @@ func (m UIinstance) footerView() string {
 }
 
 type LogViewWriter struct {
-	App *tea.Program
+	App      *tea.Program
+	Headless bool
 }
 
 func (tw *LogViewWriter) Write(p []byte) (n int, err error) {
-	if tw.App == nil {
+	if tw.App == nil || tw.Headless {
 		return os.Stderr.Write(p)
 	} else {
 		tw.App.Send(string(p))

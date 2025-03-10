@@ -7,7 +7,6 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"gobius/bindings/engine"
@@ -29,6 +28,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"gobius/metrics"
+
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -49,8 +51,15 @@ type TaskSubmitted struct {
 }
 
 const (
-	maxTasks        = 50 // Maximum number of tasks to store
-	maxExitAttempts = 3  // Maximum number of attempts to exit the application
+	maxTasks                = 50 // Maximum number of tasks to store
+	maxExitAttempts         = 3  // Maximum number of attempts to exit the application
+	appVersion              = "0.0.1"
+	taskSubmittedChannelBufferSize = 1024
+	appName                 = `
+┏┓┏┓┳┓┳┳┳┏┓
+┃┓┃┃┣┫┃┃┃┗┓
+┗┛┗┛┻┛┻┗┛┗┛
+`
 )
 
 func initLogging(file string, level zerolog.Level, consoleWriter io.Writer) (logFile io.WriteCloser, logger zerolog.Logger) {
@@ -81,9 +90,8 @@ func initLogging(file string, level zerolog.Level, consoleWriter io.Writer) (log
 	return fileLogger, logger
 }
 
-func setupCloseHandler(logger *zerolog.Logger) (ctx context.Context) {
+func setupCloseHandler(logger *zerolog.Logger) (ctx context.Context, cancel context.CancelFunc) {
 	// Create a cancellation context.
-	var cancel context.CancelFunc
 	ctx, cancel = context.WithCancel(context.Background())
 
 	c := make(chan os.Signal, 1)
@@ -96,20 +104,20 @@ func setupCloseHandler(logger *zerolog.Logger) (ctx context.Context) {
 
 			switch {
 			case exitCounter < 3 && exitCounter > 0:
-				logger.Error().Int("attempt", maxExitAttempts+1-exitCounter).Msgf("Already shutting down. Will force exit after %d more attempt(s).", exitCounter)
+				logger.Error().Int("attempt", maxExitAttempts+1-exitCounter).Msgf("already shutting down. will force exit after %d more attempt(s).", exitCounter)
 				exitCounter--
 			case exitCounter == 0:
-				logger.Error().Msgf("Ctrl+C pressed %d times. Forcing exit.", maxExitAttempts)
+				logger.Error().Msgf("ctrl+C pressed %d times. forcing exit.", maxExitAttempts)
 				os.Exit(0)
 			default:
-				logger.Info().Msg("Ctrl+C detected. Stopping process...")
+				logger.Info().Msg("ctrl+C detected. stopping process...")
 				cancel()
 				exitCounter--
 			}
 		}
 	}()
 
-	return ctx
+	return ctx, cancel
 }
 
 // type TaskManagerI interface {
@@ -121,7 +129,7 @@ func setupCloseHandler(logger *zerolog.Logger) (ctx context.Context) {
 // }
 
 // TODO: put this into base config ?
-var minerVersion = big.NewInt(3)
+var minerVersion = big.NewInt(5)
 
 type Miner struct {
 	services  *Services
@@ -130,6 +138,10 @@ type Miner struct {
 	gpura     *utils.RunningAverage
 	validator IValidator
 	wg        *sync.WaitGroup
+	// gpus will store GPU instances for metrics/TUI
+	gpus []*task.GPU
+	// TUI related fields
+	p *tea.Program
 	sync.RWMutex
 }
 
@@ -149,18 +161,8 @@ type IValidator interface {
 	SubmitContestation(validator common.Address, taskId task.TaskId) error
 }
 
-// type TransactionTask struct {
-// 	taskId    task.TaskId
-// 	taskType  int // 0 = commitment, 1 = solution
-// 	cid       []byte
-// 	commiment [32]byte
-// }
-
 // connects miner account to the engine contract
-// you can only have one miner account to one enginev2 for submitting tasks and solutions
-// you can have any account submit claims so that will be done elsewhere
 func NewMinerEngine(ctx context.Context, validator IValidator, wg *sync.WaitGroup) (*Miner, error) {
-
 	ra := utils.NewRunningAverage(15 * time.Minute)
 
 	// Get the services from the context
@@ -195,6 +197,26 @@ func (m *Miner) AvergeGPUTime() time.Duration {
 	return m.gpura.Average()
 }
 
+func (m *Miner) GetGPUInfo() []metrics.GPUInfo {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var gpuInfos []metrics.GPUInfo
+	for _, gpu := range m.gpus {
+		status := "Mining"
+		if !gpu.IsEnabled() {
+			status = "Error"
+		}
+
+		gpuInfos = append(gpuInfos, metrics.GPUInfo{
+			ID:        gpu.ID,
+			Status:    status,
+			SolveTime: m.gpura.Average(),
+		})
+	}
+	return gpuInfos
+}
+
 func (m *Miner) SolveTask(taskId task.TaskId, tx *types.Transaction, gpu *task.GPU, validateOnly bool) ([]byte, error) {
 
 	taskIdStr := taskId.String()
@@ -203,9 +225,13 @@ func (m *Miner) SolveTask(taskId task.TaskId, tx *types.Transaction, gpu *task.G
 
 	inputRaw := string(taskData.Input)
 
-	//var input models.Inner
 	var result map[string]interface{}
 	err := json.Unmarshal(taskData.Input, &result)
+
+	if err != nil {
+		m.services.Logger.Error().Err(err).Msg("could not unmarshal input")
+		return nil, err
+	}
 
 	m.services.Logger.Debug().Str("input", inputRaw).Msg("decoded information")
 
@@ -216,25 +242,20 @@ func (m *Miner) SolveTask(taskId task.TaskId, tx *types.Transaction, gpu *task.G
 	}
 
 	modelId := common.Bytes2Hex(taskInfo.Model[:])
-	model := models.EnabledModels.FindModel(modelId)
+	model := models.ModelRegistry.GetModel(modelId)
 	if model == nil {
 		m.services.Logger.Error().Str("model", modelId).Err(err).Msg("could not find model")
 		return nil, err
 	}
 
-	hydrated, err := model.HydrateInput(result)
+	hydrated, err := model.HydrateInput(result, taskId.TaskId2Seed())
 
-	prompt, ok := hydrated.(models.Kandinsky2Prompt)
-
-	if !ok {
-		m.services.Logger.Error().Msg("could not hydrate input")
+	if err != nil {
+		m.services.Logger.Error().Err(err).Msg("could not hydrate input")
 		return nil, err
 	}
 
-	// set the seed to the task id
-	prompt.Input.Seed = taskId.TaskId2Seed()
-
-	output, err := json.Marshal(prompt)
+	output, err := json.Marshal(hydrated)
 	if err != nil {
 		m.services.Logger.Error().Err(err).Msg("could not marshal output")
 		return nil, err
@@ -251,7 +272,7 @@ func (m *Miner) SolveTask(taskId task.TaskId, tx *types.Transaction, gpu *task.G
 	} else {
 		start := time.Now()
 		if gpu.Mock {
-			data, err := gpu.GetMockCid(taskIdStr, prompt)
+			data, err := gpu.GetMockCid(taskIdStr, hydrated)
 			if err != nil {
 				return nil, err
 			}
@@ -260,7 +281,7 @@ func (m *Miner) SolveTask(taskId task.TaskId, tx *types.Transaction, gpu *task.G
 				return nil, err
 			}
 		} else {
-			cid, err = model.GetCID(gpu, taskIdStr, prompt)
+			cid, err = model.GetCID(gpu, taskIdStr, hydrated)
 		}
 		elapsed := time.Since(start)
 		m.gpura.Add(elapsed)
@@ -313,52 +334,10 @@ func (m *Miner) SolveTask(taskId task.TaskId, tx *types.Transaction, gpu *task.G
 		return nil, err
 	}
 
-	go func() {
-		m.validator.SubmitSolution(validator, taskId, cid)
-		//m.services.Logger.Info().Str("taskid", taskIdStr).Str("totalsolvetime", time.Since(startOfSolve).String()).Msg("solution time")
-	}()
+	// Use a separate goroutine without WaitGroup tracking for solution submission
+	go m.validator.SubmitSolution(validator, taskId, cid)
 
 	return cid, nil
-}
-
-// TODO: move this into miner engine wrapper?
-// TODO: or better yet move to to model itself
-func validateModel(model models.ModelInterface, gpu *task.GPU, logger *zerolog.Logger) error {
-
-	// model, found := baseCfg.Models["kandinsky2"]
-	// if !found {
-	// 	panic("model not found - check config/config.json")
-	// }
-
-	// m := models.EnabledModels.FindModel(model.ID)
-	// if m == nil {
-	// 	panic("model not found in enabled models")
-	// }
-
-	testPrompt := models.Kandinsky2Prompt{
-		Input: models.Inner{
-			Prompt: "render a cat in the style of kandinsky",
-			Height: 768,
-			Width:  768,
-			Seed:   1337,
-		},
-	}
-
-	cid, err := model.GetCID(gpu, "startup-test-taskid", testPrompt)
-	if err != nil {
-		return err
-	}
-
-	expected := "0x12200f8c99111abf301ceb8965af7b111c77bcd6e1903c0c713c4b610665dd270be3"
-	cidStr := "0x" + hex.EncodeToString(cid)
-	if cidStr == expected {
-		logger.Info().Str("model", model.GetID()).Str("cid", cidStr).Str("expected", expected).Msg("model CID matches expected CID")
-	} else {
-		logger.Error().Str("model", model.GetID()).Str("cid", cidStr).Str("expected", expected).Msg("model CID does not match expected CID")
-		return errors.New("model CID does not match expected CID")
-	}
-
-	return nil
 }
 
 func average(times []time.Duration) time.Duration {
@@ -369,93 +348,11 @@ func average(times []time.Duration) time.Duration {
 	return total / time.Duration(len(times))
 }
 
-func findFastestPrompt(model models.ModelInterface, gpus []*task.GPU, logger *zerolog.Logger) error {
-
-	inputs := []string{
-		"1 pixel",
-		"1 red pixel center",
-		"1010101101010101010011111010101010101011010010111010010110101",
-		"0x101111101",
-		"black void",
-		"all black",
-		"mono black",
-		"black background black foreground black image",
-		"black",
-		"white",
-		"empty",
-		"box",
-		"square",
-		"red",
-		"single color",
-		"cat",
-		"dog",
-		"zero",
-		"0",
-		"generate nothing",
-		"do nothing",
-		"null",
-	}
-
-	logger.Info().Str("model", model.GetID()).Msg("Validating model")
-
-	testPrompt := models.Kandinsky2Prompt{
-		Input: models.Inner{
-			Height: 768,
-			Width:  768,
-		},
-	}
-
-	fastestTimeSeen := time.Duration(0)
-	fastestPrompt := ""
-
-	for _, input := range inputs {
-		var wg sync.WaitGroup
-		times := make([]time.Duration, len(gpus))
-
-		testPrompt.Input.Prompt = input
-
-		for i, gpu := range gpus {
-			wg.Add(1)
-
-			go func(i int, gpu *task.GPU) {
-				defer wg.Done()
-
-				start := time.Now()
-				_, err := model.GetCID(gpu, "startup-test-taskid", testPrompt)
-				if err != nil {
-					logger.Error().Err(err).Msg("Error generating CID")
-					return
-				}
-				timeTaken := time.Since(start)
-
-				times[i] = timeTaken
-
-				logger.Info().Int("gpu", gpu.ID).Str("input", input).Str("duration", timeTaken.String()).Msg("cid generated")
-			}(i, gpu)
-		}
-
-		wg.Wait()
-
-		averageTime := average(times)
-
-		logger.Info().Str("input", input).Str("average", averageTime.String()).Msg("all gpus completed input")
-
-		if fastestTimeSeen == 0 || averageTime < fastestTimeSeen {
-			fastestTimeSeen = averageTime
-			fastestPrompt = input
-		}
-	}
-
-	logger.Info().Str("fastest_prompt", fastestPrompt).Str("duration", fastestTimeSeen.String()).Msg("Fastest prompt found")
-
-	return nil
-}
-
 func validateGpus(model models.ModelInterface, gpus []*task.GPU, logger *zerolog.Logger) error {
 
 	//findFastestPrompt(modelToMine, gpus, &logger)
 
-	logger.Info().Str("model", model.GetID()).Msg("Validating model on gpu(s)")
+	logger.Info().Str("model", model.GetID()).Msg("validating model on gpu(s)")
 
 	mu := sync.Mutex{}
 	fastestTimeSeen := time.Duration(0)
@@ -471,7 +368,7 @@ func validateGpus(model models.ModelInterface, gpus []*task.GPU, logger *zerolog
 
 			start := time.Now()
 
-			err := validateModel(model, gpu, logger)
+			err := model.Validate(gpu, "startup-test-taskid")
 
 			if err != nil {
 				logger.Fatal().Msgf("error validating the model on gpu #%d: %s", gpu.ID, gpu.Url)
@@ -499,23 +396,17 @@ func validateGpus(model models.ModelInterface, gpus []*task.GPU, logger *zerolog
 	return nil
 }
 
-// TODO: config
-// TODO: add init methods
 func main() {
 	var appQuitWG sync.WaitGroup
 
-	// miner := NewMiner(4000 * time.Millisecond)
-	// miner.AddJob(NewTask())
-	// miner.isGPUIdle(250 * time.Millisecond)
 	configPath := flag.String("config", "config.json", "Path to the configuration file")
 	skipValidation := flag.Bool("skipvalidation", false, "Skip safety checks and validation of the model and miner version")
 	logLevel := flag.Int("loglevel", 1, "Skip safety checks and validation of the model and miner version")
 	testnetType := flag.Int("testnet", 0, "Run using testnet - 1 = local, 2 = nova testnet")
 	mockGPUs := flag.Int("mockgpus", 0, "mock gpus for testing")
 	taskScanner := flag.Int("taskscanner", 0, "scan blocks for unsolved tasks")
+	headless := flag.Bool("headless", true, "Run in headless mode without the dashboard UI")
 
-	//cmdtaskId := flag.String("taskid", "", "")
-	// cmdtxHash := flag.String("taskhash", "", "")
 	flag.Parse()
 
 	// Create a set of the flags that were set
@@ -523,6 +414,9 @@ func main() {
 	flag.Visit(func(f *flag.Flag) {
 		setFlags[f.Name] = true
 	})
+
+	fmt.Println(appName)
+	fmt.Printf("Version: %s\n\n", appVersion)
 
 	cfg, err := config.InitAppConfig(*configPath, *testnetType)
 	if err != nil {
@@ -536,9 +430,9 @@ func main() {
 	}
 
 	logWriter := &tui.LogViewWriter{
-		App: nil,
+		App:      nil,
+		Headless: *headless,
 	}
-	//	_ = writer
 
 	logFile, logger := initLogging(cfg.LogPath, zerolog.Level(*logLevel), logWriter)
 
@@ -548,7 +442,7 @@ func main() {
 		logger.Warn().Msg("TESTNET MODE ENABLED - DO NOT USE ON MAINNET")
 	}
 
-	appQuit := setupCloseHandler(&logger)
+	appQuit, appCancel := setupCloseHandler(&logger)
 
 	rpcClient, err := client.NewClient(cfg.Blockchain.RPCURL, appQuit, cfg.Blockchain.EthersGas, cfg.Blockchain.BasefeeX, cfg.Blockchain.ForceGas, cfg.Blockchain.GasOverride)
 
@@ -599,11 +493,6 @@ func main() {
 	if err := goose.Up(sqlite, "sql/sqlite/migrations"); err != nil {
 		logger.Fatal().Err(err).Msg("database migration error")
 	}
-
-	// _, err = sqlite.Exec("VACUUM")
-	// if err != nil {
-	// 	logger.Fatal().Err(err).Msg("error on database VACUUM")
-	// }
 
 	appContext, err := NewApplicationContext(rpcClient, txRpcClient, clients, sqlite, &logger, cfg, context.Background())
 
@@ -791,48 +680,31 @@ func main() {
 		logger.Fatal().Err(err).Msg("error connecting to IPFS")
 	}
 
-	models.InitEnabledModels(ipfsClient, cfg)
+	models.InitModelRegistry(ipfsClient, cfg, &logger)
 
-	modelToMine := models.EnabledModels.FindModel(cfg.Strategies.Model)
+	modelToMine := models.ModelRegistry.GetModel(cfg.Strategies.Model)
 	if modelToMine == nil {
 		logger.Error().Str("model", cfg.Strategies.Model).Msg("model specified in config was not found in enabled models")
 		return
 	}
-
-	// ui := tui.InitialModel(manager)
-
-	// go func() {
-	// 	p := tea.NewProgram(ui, tea.WithAltScreen())
-	// 	logWriter.App = p
-	// 	if _, err := p.Run(); err != nil {
-	// 		fmt.Printf("Alas, there's been an error: %v", err)
-	// 		os.Exit(1)
-	// 	}
-	// }()
-	// go func() {
-	// 	for {
-	// 		logger.Warn().Msg("[red]Hello, World![white]")
-	// 		time.Sleep(250 * time.Millisecond)
-	// 	}
-	// }()
 
 	miner, err := NewMinerEngine(appContext, manager, &appQuitWG)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("could not create miner engine")
 	}
 
-	logger.Info().Str("validator", "******").Str("strategy", cfg.Strategies.Strategy).Msg("⛏️ GOBIUS MINER STARTED! ⛏️")
-	//	logger.Info().Str("validator", miner.validator.ValidatorAddress().String()).Str("strategy", cfg.Strategies.Strategy).Msg("⛏️ GOBIUS MINER STARTED! ⛏️")
-
 	err = manager.Start(appQuit)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("could not create start batch manager")
 	}
 
+	logger.Info().Str("strategy", cfg.Strategies.Strategy).Msg("⛏️ GOBIUS MINER STARTED! ⛏️")
+	//	logger.Info().Str("validator", miner.validator.ValidatorAddress().String()).Str("strategy", cfg.Strategies.Strategy).Msg("⛏️ GOBIUS MINER STARTED! ⛏️")
+
 	gpusURLS, ok := cfg.ML.Cog[modelToMine.GetID()]
 
 	if !ok {
-		logger.Fatal().Str("model", modelToMine.GetID()).Msg("missing GPU URLs for model - have you set the correct model id?")
+		logger.Fatal().Str("model_id", modelToMine.GetID()).Msg("missing GPU URLs for model - have you set the correct model id?")
 	}
 
 	gpus := []*task.GPU{}
@@ -847,7 +719,7 @@ func main() {
 		validateGpus(modelToMine, gpus, &logger)
 
 		if !miner.services.Engine.VersionCheck() {
-			logger.Fatal().Int("minerversion", int(minerVersion.Int64())).Msg("Miner is out of date, please update to the latest version!")
+			logger.Fatal().Int("minerversion", int(minerVersion.Int64())).Msg("miner is out of date, please update to the latest version!")
 		}
 	} else {
 		logger.Warn().Msg("skipped model and miner version validation checks!")
@@ -861,22 +733,17 @@ func main() {
 		id++
 	}
 	if *mockGPUs > 0 {
-		logger.Warn().Msgf("Added %d mock GPUs", *mockGPUs)
+		logger.Warn().Msgf("added %d mock GPUs", *mockGPUs)
 	}
+
+	miner.gpus = gpus
 
 	// TODO: move these to a type
 	engineContract, err := engine.NewEngine(cfg.BaseConfig.EngineAddress, rpcClient.Client)
 
 	if err != nil {
-		logger.Fatal().Err(err).Msg("Could not create engine contract")
+		logger.Fatal().Err(err).Msg("could not create engine contract")
 	}
-
-	// TODO: move these to a type
-	// baseContract, err := basetoken.NewBasetoken(cfg.BaseConfig.BaseTokenAddress, rpcClient.Client)
-
-	// if err != nil {
-	// 	logger.Fatal().Err(err).Msg("Could not create engine contract")
-	// }
 
 	// TODO: this code only works for websocket/ipc node connections. Add polling support if this fails
 	headers := make(chan *types.Header)
@@ -885,13 +752,13 @@ func main() {
 	connectToHeaders := func() {
 		newHeadSub, err = rpcClient.Client.SubscribeNewHead(context.Background(), headers)
 		if err != nil {
-			logger.Fatal().Err(err).Msg("Failed to subscribe to new headers")
+			logger.Fatal().Err(err).Msg("failed to subscribe to new headers, RPC must be websocket/ipc only, not http(s)")
 		}
 	}
 
 	connectToHeaders()
 
-	sinkTaskSubmitted := make(chan *engine.EngineTaskSubmitted, 1028)
+	sinkTaskSubmitted := make(chan *engine.EngineTaskSubmitted, taskSubmittedChannelBufferSize)
 	var taskEventSub event.Subscription
 
 	// TODO: move these out of here!
@@ -906,7 +773,7 @@ func main() {
 
 		blockNo, err := rpcClient.Client.BlockNumber(appContext)
 		if err != nil {
-			logger.Fatal().Err(err).Msg("Failed to get latest block")
+			logger.Fatal().Err(err).Msg("failed to get latest block")
 		}
 
 		taskEventSub, err = engineContract.WatchTaskSubmitted(&bind.WatchOpts{
@@ -924,14 +791,81 @@ func main() {
 		logger.Warn().Msg("listening to TaskSubmitted events is disabled")
 	}
 
-	// sinkSignalCommitment := make(chan *enginev2.Enginev2SignalCommitment, 1028)
-	// signalCommitmentSub, err := engineContract.WatchSignalCommitment(&bind.WatchOpts{
-	// 	Start:   &blockNo,
-	// 	Context: appContext,
-	// }, sinkSignalCommitment, nil, nil)
-	// if err != nil {
-	// 	logger.Fatal().Err(err).Msg("Failed to subscribe to SignalCommitment events")
-	// }
+	var p *tea.Program
+	dashboard := tui.NewDashboard()
+	if !*headless {
+		p = tea.NewProgram(
+			dashboard,
+			tea.WithAltScreen(),
+			tea.WithMouseAllMotion(),
+		)
+
+		// Set the program in the log writer
+		logWriter.App = p
+
+		// Set the writer in the dashboard
+		dashboard.SetLogWriter(logWriter)
+
+		// Start dashboard updater
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+
+			for {
+				select {
+				case <-dashboard.GetQuitSignal():
+					appCancel() // Trigger app shutdown using the cancel function
+					return
+				case <-ticker.C:
+					// Update validator metrics
+					validatorMetrics := tui.ValidatorMetrics{
+						SessionTime:      manager.GetSessionTime(),
+						SolvedLastMinute: manager.GetSolvedLastMinute(),
+						SolutionsLastMinute: struct {
+							Success int64
+							Total   int64
+							Rate    float64
+						}{
+							Success: manager.GetSuccessCount(),
+							Total:   manager.GetTotalCount(),
+							Rate:    manager.GetSuccessRate(),
+						},
+						AverageSolutionRate:    manager.GetAverageSolutionRate(),
+						AverageSolutionsPerMin: manager.GetAverageSolutionsPerMin(),
+						AverageSolvesPerMin:    manager.GetAverageSolvesPerMin(),
+					}
+					p.Send(dashboard.UpdateValidatorMetrics(validatorMetrics))
+
+					// Update financial metrics
+					financialMetrics := tui.FinancialMetrics{
+						TokenIncomePerMin:  manager.GetTokenIncomePerMin(),
+						TokenIncomePerHour: manager.GetTokenIncomePerHour(),
+						TokenIncomePerDay:  manager.GetTokenIncomePerDay(),
+						IncomePerMin:       manager.GetIncomePerMin(),
+						IncomePerHour:      manager.GetIncomePerHour(),
+						IncomePerDay:       manager.GetIncomePerDay(),
+						ProfitPerMin:       manager.GetProfitPerMin(),
+						ProfitPerHour:      manager.GetProfitPerHour(),
+						ProfitPerDay:       manager.GetProfitPerDay(),
+					}
+					p.Send(dashboard.UpdateFinancialMetrics(financialMetrics))
+
+					// Update GPU metrics
+					dashboard.SendGPUMetrics(p, miner.GetGPUInfo())
+				}
+			}
+		}()
+
+		go func() {
+			if _, err := p.Run(); err != nil {
+				logger.Fatal().Err(err).Msg("failed to start dashboard")
+			}
+		}()
+
+	} else {
+		logger.Info().Msg("running in headless mode - dashboard disabled")
+	}
+
 	sinkSolutionSubmitted := make(chan *engine.EngineSolutionSubmitted, 1028)
 	var solutionSubmittedSub event.Subscription
 
@@ -1035,7 +969,12 @@ func main() {
 	for i := 0; i < numWorkers; i++ {
 		go func(workerId int, gpu *task.GPU, wg *sync.WaitGroup) {
 			logger.Info().Int("worker", workerId).Int("GPU", gpu.ID).Msg("started worker")
-			defer wg.Done()
+
+			// Move defer after the logger so we don't lose shutdown messages
+			defer func() {
+				logger.Info().Int("worker", workerId).Int("GPU", gpu.ID).Msg("worker finished")
+				wg.Done()
+			}()
 
 			// Ticker to periodically check the status of the GPU and re-enable it
 			ticker := time.NewTicker(time.Minute * 15) // check every 5 minutes
@@ -1047,9 +986,17 @@ func main() {
 					logger.Info().Int("worker", workerId).Int("GPU", gpu.ID).Msg("exiting worker")
 					return
 				case <-ticker.C:
+					// Check if we're shutting down before doing work
+					if appQuit.Err() != nil {
+						return
+					}
 					logger.Info().Int("worker", workerId).Int("GPU", gpu.ID).Msg("resetting gpu state")
 					gpu.ResetErrorState()
 				case <-newTask:
+					// Check if we're shutting down before doing work
+					if appQuit.Err() != nil {
+						return
+					}
 					if !gpu.IsEnabled() {
 						// If the GPU is not enabled, skip this iteration
 						continue
@@ -1069,20 +1016,6 @@ func main() {
 					sizeOfQ := taskIDs.Len()
 					mutex.Unlock()
 
-					// if cfg.Automine.Enabled {
-
-					// 	gpuAvgMiningTime := miner.AvergeGPUTime()
-					// 	gpuAvgMiningTime = gpuAvgMiningTime - (850 * time.Millisecond)
-					// 	logger.Warn().Int("worker", i).Str("when", gpuAvgMiningTime.String()).Msg("queuing task for automine")
-
-					// 	time.AfterFunc(gpuAvgMiningTime, func() {
-					// 		logger.Warn().Int("worker", i).Msg("submitting automine task")
-					// 		miner.ProcessAutomine(addTaskToQueue)
-					// 	})
-
-					// }
-
-					//.Uint64("eventblock", event.Raw.BlockNumber)
 					logger.Debug().Int("worker", workerId).Int("GPU", gpu.ID).Int64("jobid", jobid).Int("pending", sizeOfQ).Msg("starting job")
 					taskHandler(workerId, event, gpu, false)
 					logger.Debug().Int("worker", workerId).Int("GPU", gpu.ID).Int64("jobid", jobid).Msg("finished job")
@@ -1147,7 +1080,7 @@ func main() {
 				}
 				if sol.Blocktime == 0 {
 					taskId := task.TaskId(parsedLog.Id).String()
-					log.Println("Add unsolved task to queueueue:", taskId)
+					log.Println("Add unsolved task to queueue:", taskId)
 					services.TaskStorage.AddTask(taskId, currentlog.TxHash.String())
 				}
 			}
@@ -1165,180 +1098,204 @@ func main() {
 	switch cfg.Strategies.Strategy {
 
 	case "bulkmine":
+		appQuitWG.Add(1)
 		go func() {
-
+			defer appQuitWG.Done()
 			addTask := func(task *TaskSubmitted) bool {
+				// Don't add tasks if we're shutting down
+				if appQuit.Err() != nil {
+					return true
+				}
+
 				mutex.Lock()
 				taskIDs.PushFront(task)
 				mutex.Unlock()
 
 				select {
 				case newTask <- struct{}{}:
+					return false
 				case <-appQuit.Done():
 					logger.Info().Msg("shutting down task queue worker")
 					return true
 				}
-
-				return false
 			}
 			poppedCount := 0
 
 			for {
+				select {
+				case <-appQuit.Done():
+					logger.Info().Msg("bulkmine worker shutting down")
+					return
+				default:
+					if appQuit.Err() != nil {
+						return
+					}
 
-				//logger.Info().Msg("waiting for tasks to be added to storage queue!")
-
-				taskId, txHash, err := miner.services.TaskStorage.PopTask()
-				if err != nil {
-					if err == sql.ErrNoRows {
-						logger.Warn().Msgf("queue is empty, nothing to do, will sleep. popped so far: %d", poppedCount)
-						time.Sleep(2 * time.Second)
-						// The list is empty, continue to the next iteration
+					taskId, txHash, err := miner.services.TaskStorage.PopTask()
+					if err != nil {
+						if err == sql.ErrNoRows {
+							logger.Warn().Msgf("queue is empty, nothing to do, will sleep. popped so far: %d", poppedCount)
+							time.Sleep(2 * time.Second)
+							continue
+						}
+						logger.Error().Err(err).Msgf("could not pop task from storage, will sleep. popped so far: %d", poppedCount)
+						time.Sleep(5 * time.Second)
 						continue
 					}
-					logger.Error().Err(err).Msgf("could not pop task from storage, will sleep. popped so far: %d", poppedCount)
-					time.Sleep(5 * time.Second)
-					continue
+
+					_, found := taskHashCache.Get(taskId)
+					if found {
+						logger.Error().Msgf("trying to pop same task again: %s", taskId.String())
+						continue
+					}
+
+					taskHashCache.Add(taskId, struct{}{})
+
+					ts := &TaskSubmitted{
+						TaskId: taskId,
+						TxHash: txHash,
+					}
+					poppedCount++
+
+					logger.Info().Msgf("popped task: %s", taskId.String())
+
+					if addTask(ts) {
+						return
+					}
+					time.Sleep(10 * time.Millisecond)
 				}
-
-				_, found := taskHashCache.Get(taskId)
-				if found {
-					logger.Error().Msgf("trying to pop same task again: %s", taskId.String())
-					continue
-				}
-
-				taskHashCache.Add(taskId, struct{}{})
-
-				ts := &TaskSubmitted{
-					TaskId: taskId,
-					TxHash: txHash,
-				}
-				poppedCount++
-
-				logger.Info().Msgf("popped task: %s", taskId.String())
-
-				if addTask(ts) {
-					return
-				}
-				time.Sleep(10 * time.Millisecond)
 			}
 		}()
 
 	case "solutionsampler":
-
 		logger.Info().Msg("strategy is sample other solutions!")
 
 		connectToSolutionSubmittedEvents()
 
-		solutionSampler := func() {
-			ticker := time.NewTicker(time.Minute)
-			defer ticker.Stop()
+		appQuitWG.Add(1)
+		go func() {
+			defer func() {
+				logger.Info().Msg("solution sampler shutting down")
+				appQuitWG.Done()
+			}()
 
-			maxTaskSampleSize := numWorkers
-			tasksSamples := make([]*TaskSubmitted, 0, maxTaskSampleSize)
-			sampleIndex := 0
-			for {
-				select {
-				case <-appQuit.Done():
-					logger.Info().Msg("shutting down sampler")
-					return
-				case err := <-solutionSubmittedSub.Err():
-					// TODO: don't make this a fatal error - have some soft recovery
-					log.Printf("Error from solutionSubmittedSub: %v", err)
-					time.Sleep(time.Second * 5)
-					connectToSolutionSubmittedEvents()
+			solutionSampler := func() {
+				ticker := time.NewTicker(time.Minute)
+				defer ticker.Stop()
 
-				case event := <-sinkSolutionSubmitted:
+				maxTaskSampleSize := numWorkers
+				tasksSamples := make([]*TaskSubmitted, 0, maxTaskSampleSize)
+				sampleIndex := 0
+				for {
+					select {
+					case <-appQuit.Done():
+						logger.Info().Msg("shutting down sampler")
+						return
+					case err := <-solutionSubmittedSub.Err():
+						logger.Warn().Msgf("solution submitted sub error: %v, will retry in 5s", err)
 
-					taskHash, found := taskHashCache.Get(event.Task)
-					if !found {
-						continue
-					}
-					ts := &TaskSubmitted{
-						TaskId: event.Task,
-						TxHash: taskHash.(common.Hash),
-					}
+						time.Sleep(time.Second * 5)
+						connectToSolutionSubmittedEvents()
 
-					sampleIndex++
-					if len(tasksSamples) < maxTaskSampleSize {
-						tasksSamples = append(tasksSamples, ts)
-					} else {
-						j := rand.Intn(sampleIndex)
-						if j < maxTaskSampleSize {
-							tasksSamples[j] = ts
+					case event := <-sinkSolutionSubmitted:
+						taskHash, found := taskHashCache.Get(event.Task)
+						if !found {
+							continue
 						}
-					}
-				case <-ticker.C:
-					var wgWorkers sync.WaitGroup
+						ts := &TaskSubmitted{
+							TaskId: event.Task,
+							TxHash: taskHash.(common.Hash),
+						}
 
-					logger.Info().Int("samples", len(tasksSamples)).Msg("enough solution samples taken, processing...")
+						sampleIndex++
+						if len(tasksSamples) < maxTaskSampleSize {
+							tasksSamples = append(tasksSamples, ts)
+						} else {
+							j := rand.Intn(sampleIndex)
+							if j < maxTaskSampleSize {
+								tasksSamples[j] = ts
+							}
+						}
+					case <-ticker.C:
+						if appQuit.Err() != nil {
+							return
+						}
 
-					for i := 0; i < len(tasksSamples); i++ {
-						wgWorkers.Add(1)
-						go func(ts *TaskSubmitted, workerId int, gpu *task.GPU, wg *sync.WaitGroup) {
-							defer wgWorkers.Done()
-							taskIdAsString := ts.TaskId.String()
+						var wgWorkers sync.WaitGroup
+						logger.Info().Int("samples", len(tasksSamples)).Msg("enough solution samples taken, processing...")
 
-							logger.Info().Int("workerid", workerId).Str("task", taskIdAsString).Msg("processing sampled task")
-
-							tx, _, err := rpcClient.Client.TransactionByHash(appContext, ts.TxHash)
-							if err != nil {
-								logger.Error().Err(err).Msg("could not get transaction from hash")
+						for i := 0; i < len(tasksSamples); i++ {
+							if appQuit.Err() != nil {
+								wgWorkers.Wait()
 								return
 							}
-							cid, err := miner.SolveTask(ts.TaskId, tx, gpu, true)
-							if err != nil {
-								logger.Error().Err(err).Msg("solve failed")
-								return
-							}
-							if cid == nil {
-								logger.Info().Msg("solve didn't return a cid for task")
-								return
-							}
+							wgWorkers.Add(1)
+							go func(ts *TaskSubmitted, workerId int, gpu *task.GPU, wg *sync.WaitGroup) {
+								defer wg.Done()
+								taskIdAsString := ts.TaskId.String()
 
-							res, err := engineContract.Solutions(nil, ts.TaskId)
-							if err != nil {
-								logger.Err(err).Msg("error getting solution information")
-								return
-							}
+								logger.Info().Int("workerid", workerId).Str("task", taskIdAsString).Msg("processing sampled task")
 
-							if res.Blocktime > 0 {
-
-								solversCid := common.Bytes2Hex(res.Cid[:])
-								ourCid := common.Bytes2Hex(cid)
-								logger.Info().Msgf("checking cids: %s and %s", ourCid, solversCid)
-
-								if ourCid != solversCid {
-									logger.Warn().Msg("=======================================================================")
-									logger.Warn().Msg("  WARNING: our solution cid does not match the solvers cid!")
-									logger.Warn().Msg("  our cid: " + ourCid)
-									logger.Warn().Msg("  ther cid: " + solversCid)
-									logger.Warn().Str("validator", res.Validator.String()).Msg("  solvers address")
-									logger.Warn().Msg("========================================================================")
+								tx, _, err := rpcClient.Client.TransactionByHash(appContext, ts.TxHash)
+								if err != nil {
+									logger.Error().Err(err).Msg("could not get transaction from hash")
+									return
 								}
-							}
+								cid, err := miner.SolveTask(ts.TaskId, tx, gpu, true)
+								if err != nil {
+									logger.Error().Err(err).Msg("solve failed")
+									return
+								}
+								if cid == nil {
+									logger.Info().Msg("solve didn't return a cid for task")
+									return
+								}
 
-						}(tasksSamples[i], i, gpus[i/cfg.NumWorkersPerGPU], &wgWorkers)
+								res, err := engineContract.Solutions(nil, ts.TaskId)
+								if err != nil {
+									logger.Err(err).Msg("error getting solution information")
+									return
+								}
+
+								if res.Blocktime > 0 {
+									solversCid := common.Bytes2Hex(res.Cid[:])
+									ourCid := common.Bytes2Hex(cid)
+									logger.Info().Msgf("checking cids: %s and %s", ourCid, solversCid)
+
+									if ourCid != solversCid {
+										logger.Warn().Msg("=======================================================================")
+										logger.Warn().Msg("  WARNING: our solution cid does not match the solvers cid!")
+										logger.Warn().Msg("  our cid: " + ourCid)
+										logger.Warn().Msg("  ther cid: " + solversCid)
+										logger.Warn().Str("validator", res.Validator.String()).Msg("  solvers address")
+										logger.Warn().Msg("========================================================================")
+									}
+								}
+							}(tasksSamples[i], i, gpus[i/cfg.NumWorkersPerGPU], &wgWorkers)
+						}
+						wgWorkers.Wait()
+						logger.Info().Msg("GPUS FINISHED NOW")
+						tasksSamples = tasksSamples[:0] // reset samples
+						sampleIndex = 0
 					}
-					wgWorkers.Wait()
-					logger.Info().Msg("GPUS FINISHED NOW")
-					tasksSamples = tasksSamples[:0] // reset samples
-					sampleIndex = 0
 				}
 			}
-		}
-
-		go solutionSampler()
+			solutionSampler()
+		}()
 	}
 
 	if cfg.ListenToTaskSubmitted {
-
+		appQuitWG.Add(1)
 		go func() {
+			defer appQuitWG.Done()
 			maxBackoff := time.Second * 30
 			currentBackoff := time.Second
 			for {
 				select {
+				case <-appQuit.Done():
+					return
 				case err := <-taskEventSub.Err():
-					log.Printf("Error from taskEventSub: %v - redialling in: %s\n", err, currentBackoff.String())
+					logger.Warn().Msgf("task event sub error: %v, will retry in %s", err, currentBackoff.String())
 
 					time.Sleep(currentBackoff)
 					currentBackoff *= 2
@@ -1348,9 +1305,6 @@ func main() {
 					}
 
 					connectToEvents()
-				// case <-appContext.Done():
-				// 	logger.Info().Msg("Shutting down")
-				// 	return
 				case event := <-sinkTaskSubmitted:
 					taskId := task.TaskId(event.Id)
 
@@ -1386,7 +1340,7 @@ func main() {
 			if err == nil {
 				continue
 			}
-			log.Printf("Error from newHeadSub: %v - redialling in: %s\n", err, currentBackoffHeader.String())
+			logger.Warn().Msgf("new head sub error: %v, will retry in %s", err, currentBackoffHeader.String())
 			newHeadSub.Unsubscribe()
 
 			time.Sleep(currentBackoffHeader)
@@ -1414,7 +1368,20 @@ func main() {
 		}
 	}
 exit_app:
-	logger.Info().Msg("Waiting for application workers to finish")
+	logger.Info().Msg("waiting for application workers to finish")
+
+	// Signal all workers to stop and give them time to finish current tasks
+	time.Sleep(5000 * time.Millisecond)
+
+	// Wait for all workers to finish
 	appQuitWG.Wait()
+
+	// Now that all tasks are complete, properly cleanup the TUI
+	if !*headless && p != nil {
+		time.Sleep(100 * time.Millisecond) // Give a moment for the final frame to render
+		p.Quit()
+		p.Wait()
+	}
+
 	logger.Info().Msg("bye! 👋")
 }
