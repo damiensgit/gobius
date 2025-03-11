@@ -152,12 +152,12 @@ tasks:
           OUT_DIR: "{{.BINDINGS_DIR}}/engine"
 
   build:bulktasks:
-    desc: Build BulkTasksMainnet contract
+    desc: Build BulkTasks contract
     deps: [build:dir]
     cmds:
       - task: _build:contract
         vars:
-          NAME: BulkTasksMainnet
+          NAME: BulkTasks
           PKG: bulktasks
           TYPE: BulkTasks
           OUT_DIR: "{{.BINDINGS_DIR}}/bulktasks"

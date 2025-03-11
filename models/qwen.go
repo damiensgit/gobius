@@ -66,7 +66,7 @@ var QwenTestModelTemplate = Model{
 				{
 					"variable":    "seed",
 					"type":        "int",
-					"required":    true,
+					"required":    false,
 					"default":     500,
 					"description": "Seed for the random number generator.",
 				},
@@ -88,6 +88,16 @@ func NewQwenTestModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logge
 		logger = &nopLogger
 	}
 
+	model, ok := appConfig.BaseConfig.Models["qwen"]
+	if !ok {
+		return nil
+	}
+
+	if model.ID == "" {
+		logger.Error().Str("model", "qwen").Msg("qwen model ID is empty")
+		return nil
+	}
+
 	http := &http.Client{
 		Timeout: time.Second * 30,
 	}
@@ -107,7 +117,7 @@ func NewQwenTestModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logge
 		logger: logger,
 	}
 	// set this from config for now
-	m.Model.ID = appConfig.BaseConfig.Models["qwentest"].ID
+	m.Model.ID = model.ID
 	return m
 }
 
@@ -383,7 +393,7 @@ func (m *QwenTestModel) Validate(gpu *common.GPU, taskid string) error {
 		return err
 	}
 
-	expected := "0x12200f8c99111abf301ceb8965af7b111c77bcd6e1903c0c713c4b610665dd270be3"
+	expected := "0x122041fa6dba0027cf73097b4c75cae5f16122b4f1cfe85616bdccb6eaea711e7238"
 	cidStr := "0x" + hex.EncodeToString(cid)
 	if cidStr == expected {
 		m.logger.Info().Str("model", m.GetID()).Str("cid", cidStr).Str("expected", expected).Msg("model CID matches expected CID")

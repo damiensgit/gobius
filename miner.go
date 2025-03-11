@@ -51,11 +51,11 @@ type TaskSubmitted struct {
 }
 
 const (
-	maxTasks                = 50 // Maximum number of tasks to store
-	maxExitAttempts         = 3  // Maximum number of attempts to exit the application
-	appVersion              = "0.0.1"
+	maxTasks                       = 50 // Maximum number of tasks to store
+	maxExitAttempts                = 3  // Maximum number of attempts to exit the application
+	appVersion                     = "0.0.1"
 	taskSubmittedChannelBufferSize = 1024
-	appName                 = `
+	appName                        = `
 ┏┓┏┓┳┓┳┳┳┏┓
 ┃┓┃┃┣┫┃┃┃┗┓
 ┗┛┗┛┻┛┻┗┛┗┛
@@ -401,7 +401,7 @@ func main() {
 
 	configPath := flag.String("config", "config.json", "Path to the configuration file")
 	skipValidation := flag.Bool("skipvalidation", false, "Skip safety checks and validation of the model and miner version")
-	logLevel := flag.Int("loglevel", 1, "Skip safety checks and validation of the model and miner version")
+	logLevel := flag.Int("loglevel", 1, "Set the logging level")
 	testnetType := flag.Int("testnet", 0, "Run using testnet - 1 = local, 2 = nova testnet")
 	mockGPUs := flag.Int("mockgpus", 0, "mock gpus for testing")
 	taskScanner := flag.Int("taskscanner", 0, "scan blocks for unsolved tasks")
@@ -750,7 +750,10 @@ func main() {
 	var newHeadSub ethereum.Subscription
 
 	connectToHeaders := func() {
-		newHeadSub, err = rpcClient.Client.SubscribeNewHead(context.Background(), headers)
+		ctx, cancel := context.WithTimeout(appContext, 5*time.Second)
+		defer cancel()
+
+		newHeadSub, err = rpcClient.Client.SubscribeNewHead(ctx, headers)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("failed to subscribe to new headers, RPC must be websocket/ipc only, not http(s)")
 		}
@@ -771,6 +774,9 @@ func main() {
 
 	connectToEvents := func() {
 
+		ctx, cancel := context.WithTimeout(appContext, 5*time.Second)
+		defer cancel()
+
 		blockNo, err := rpcClient.Client.BlockNumber(appContext)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("failed to get latest block")
@@ -778,7 +784,7 @@ func main() {
 
 		taskEventSub, err = engineContract.WatchTaskSubmitted(&bind.WatchOpts{
 			Start:   &blockNo,
-			Context: appContext,
+			Context: ctx,
 		}, sinkTaskSubmitted, nil, nil, nil)
 		if err != nil {
 			logger.Fatal().Err(err).Msg("failed to subscribe to TaskSubmitted events")
@@ -1369,10 +1375,6 @@ func main() {
 	}
 exit_app:
 	logger.Info().Msg("waiting for application workers to finish")
-
-	// Signal all workers to stop and give them time to finish current tasks
-	time.Sleep(5000 * time.Millisecond)
-
 	// Wait for all workers to finish
 	appQuitWG.Wait()
 

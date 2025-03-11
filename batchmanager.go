@@ -1741,7 +1741,7 @@ func (m *BatchTransactionManager) singleSignalCommitment(taskId task.TaskId, com
 func (m *BatchTransactionManager) singleSubmitSolution(taskId task.TaskId, cid []byte) error {
 
 	taskIdStr := taskId.String()
-	m.services.Logger.Info().Str("taskid", taskIdStr).Msg("sending solution")
+	m.services.Logger.Info().Str("taskid", taskIdStr).Msg("sending single solution")
 
 	start := time.Now()
 	tx, err := m.services.SenderOwnerAccount.NonceManagerWrapper(8, 250, 1.5, false, func(opts *bind.TransactOpts) (interface{}, error) {
@@ -1751,7 +1751,7 @@ func (m *BatchTransactionManager) singleSubmitSolution(taskId task.TaskId, cid [
 		// }
 		// m.services.Logger.Info().Int("nonce", nonce).Str("taskId", taskId.String()).Msg("NonceManagerWrapper [sending solution]")
 
-		opts.GasLimit = 0 //400_000
+		opts.GasLimit = 400_000
 
 		return m.services.Engine.Engine.SubmitSolution(opts, taskId, cid)
 	})
@@ -2012,7 +2012,7 @@ func (m *BatchTransactionManager) ProcessValidatorsStakes() {
 
 	balAsFloat := m.services.Eth.ToFloat(bal)
 
-	// check if the Ether balance is less than 0.01 Ether
+	// check if the Ether balance is less than configured threshold
 	if balAsFloat < m.services.Config.ValidatorConfig.EthLowThreshold {
 		m.services.Logger.Warn().Float64("threshold", m.services.Config.ValidatorConfig.EthLowThreshold).Msg("⚠️ balance is below threshold")
 	}
@@ -2173,13 +2173,12 @@ func NewBatchTransactionManager(ctx context.Context, wg *sync.WaitGroup) (*Batch
 	solutionSubmittedEvent := engineAbi.Events["SolutionSubmitted"].ID
 	taskSubmittedEvent := engineAbi.Events["TaskSubmitted"].ID
 
-	// TODO: cache these values at load time
 	minClaimSolutionTimeBig, err := services.Engine.Engine.MinClaimSolutionTime(nil)
 	if err != nil {
 		return nil, err
 	}
 
-	fmt.Println("minClaimSolutionTimeBig", minClaimSolutionTimeBig.String())
+	//fmt.Println("minClaimSolutionTimeBig", minClaimSolutionTimeBig.String())
 
 	minContestationVotePeriodTimeBig, err := services.Engine.Engine.MinContestationVotePeriodTime(nil)
 	if err != nil {

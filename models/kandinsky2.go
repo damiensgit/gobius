@@ -103,6 +103,16 @@ func NewKandinsky2Model(client ipfs.IPFSClient, appConfig *config.AppConfig, log
 		logger = &nopLogger
 	}
 
+	model, ok := appConfig.BaseConfig.Models["kandinsky2"]
+	if !ok {
+		return nil
+	}
+
+	if model.ID == "" {
+		logger.Error().Str("model", "kandinsky2").Msg("kandinsky2 model ID is empty")
+		return nil
+	}
+
 	http := &http.Client{
 		Timeout: time.Second * 30, // TODO: make this a config based setting - set timeout to 30 seconds
 	}
@@ -111,7 +121,6 @@ func NewKandinsky2Model(client ipfs.IPFSClient, appConfig *config.AppConfig, log
 		Model:  Kandinsky2ModelTemplate,
 		config: appConfig,
 		ipfs:   client,
-		//url:    url[0],
 		Filters: []MiningFilter{
 			{
 				MinFee:  0,
@@ -121,9 +130,7 @@ func NewKandinsky2Model(client ipfs.IPFSClient, appConfig *config.AppConfig, log
 		client: http,
 		logger: logger,
 	}
-	// set this from config for now
-	// TODO: validate model exists in map before accessing
-	m.Model.ID = appConfig.BaseConfig.Models["kandinsky2"].ID
+	m.Model.ID = model.ID
 	return m
 }
 

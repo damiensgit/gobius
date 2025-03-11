@@ -82,7 +82,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 
 			// on local testnet we can deploy the contract
 			// TODO: this is effectively disabled for now until we have a better way to handle it / rewrite contract
-			if cfg.BaseConfig.TestnetType == 999 {
+			if cfg.BaseConfig.TestnetType > 0 {
 				ctxTimeout, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 				defer cancel()
 
@@ -99,7 +99,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 
 				logger.Info().Msg("deploying BulkTasks contract")
 
-				bulkTasksContractAddress, tx, bulkTasksContract, err = bulktasks.DeployBulkTasks(opts, senderrpc.Client)
+				bulkTasksContractAddress, tx, bulkTasksContract, err = bulktasks.DeployBulkTasks(opts, senderrpc.Client, cfg.BaseConfig.BaseTokenAddress, cfg.BaseConfig.EngineAddress)
 				if err != nil {
 					return nil, err
 				}
@@ -144,8 +144,8 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 	// 120 = jitter offset in seconds for the min claim time
 	minclaimTime := time.Duration(minClaimSolTimeBig.Uint64()+120) * time.Second
 
-	// TODO: fix this context - using appcontext isnt suitable as it is cancelled on quit signal
-	// which means redis calls will fail even as we try to exit
+	logger.Error().Msgf("DEBUG MIN CLAIM TIME %s", minclaimTime)
+
 	ts := storage.NewTaskStorageDB(appContext, sql, minclaimTime, logger)
 
 	engineWrapper := NewEngineWrapper(engineContract, voterContract, logger)

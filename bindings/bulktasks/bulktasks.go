@@ -31,8 +31,8 @@ var (
 
 // BulkTasksMetaData contains all meta data concerning the BulkTasks contract.
 var BulkTasksMetaData = &bind.MetaData{
-	ABI: "[{\"inputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"constructor\"},{\"inputs\":[{\"internalType\":\"bytes32[]\",\"name\":\"commitments_\",\"type\":\"bytes32[]\"}],\"name\":\"bulkSignalCommitment\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"bytes32[]\",\"name\":\"_taskids\",\"type\":\"bytes32[]\"}],\"name\":\"claimSolutions\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"}]",
-	Bin: "0x608060405234801561001057600080fd5b50734a24b101728e07a52053c13fb4db2bcf490cabc373ffffffffffffffffffffffffffffffffffffffff1663095ea7b3739b51ef044d3486a1fb0a2d55a6e0ceeadd323e667fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff6040518363ffffffff1660e01b8152600401610094929190610137565b6020604051808303816000875af11580156100b3573d6000803e3d6000fd5b505050506040513d601f19601f820116820180604052508101906100d7919061019d565b506101ca565b600073ffffffffffffffffffffffffffffffffffffffff82169050919050565b6000610108826100dd565b9050919050565b610118816100fd565b82525050565b6000819050919050565b6101318161011e565b82525050565b600060408201905061014c600083018561010f565b6101596020830184610128565b9392505050565b600080fd5b60008115159050919050565b61017a81610165565b811461018557600080fd5b50565b60008151905061019781610171565b92915050565b6000602082840312156101b3576101b2610160565b5b60006101c184828501610188565b91505092915050565b610241806101d96000396000f3fe608060405234801561001057600080fd5b50600436106100365760003560e01c80631023ad7c1461003b57806350ec55e114610057575b600080fd5b610055600480360381019061005091906101be565b610073565b005b610071600480360381019061006c91906101be565b6100e1565b005b6040517f77286d1700000000000000000000000000000000000000000000000000000000815236600101835b818110156100da5760208160048501376000806024856000739b51ef044d3486a1fb0a2d55a6e0ceeadd323e665af15060208101905061009f565b5050505050565b6040517f506ea7de00000000000000000000000000000000000000000000000000000000815236600101835b818110156101485760208160048501376000806024856000739b51ef044d3486a1fb0a2d55a6e0ceeadd323e665af15060208101905061010d565b5050505050565b600080fd5b600080fd5b600080fd5b600080fd5b600080fd5b60008083601f84011261017e5761017d610159565b5b8235905067ffffffffffffffff81111561019b5761019a61015e565b5b6020830191508360208202830111156101b7576101b6610163565b5b9250929050565b600080602083850312156101d5576101d461014f565b5b600083013567ffffffffffffffff8111156101f3576101f2610154565b5b6101ff85828601610168565b9250925050925092905056fea26469706673582212209ac2b3860861b35960caca6e35e86149b527ba7995d5c085517c7bd49e4997b864736f6c63430008130033",
+	ABI: "[{\"inputs\":[{\"internalType\":\"address\",\"name\":\"basetoken_\",\"type\":\"address\"},{\"internalType\":\"address\",\"name\":\"engine_\",\"type\":\"address\"}],\"stateMutability\":\"nonpayable\",\"type\":\"constructor\"},{\"inputs\":[],\"name\":\"basetoken\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"bytes32[]\",\"name\":\"commitments_\",\"type\":\"bytes32[]\"}],\"name\":\"bulkSignalCommitment\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[{\"internalType\":\"bytes32[]\",\"name\":\"_taskids\",\"type\":\"bytes32[]\"}],\"name\":\"claimSolutions\",\"outputs\":[],\"stateMutability\":\"nonpayable\",\"type\":\"function\"},{\"inputs\":[],\"name\":\"engine\",\"outputs\":[{\"internalType\":\"address\",\"name\":\"\",\"type\":\"address\"}],\"stateMutability\":\"view\",\"type\":\"function\"}]",
+	Bin: "0x608060405234801561001057600080fd5b50604051610664380380610664833981810160405281019061003291906101fe565b816000806101000a81548173ffffffffffffffffffffffffffffffffffffffff021916908373ffffffffffffffffffffffffffffffffffffffff16021790555080600160006101000a81548173ffffffffffffffffffffffffffffffffffffffff021916908373ffffffffffffffffffffffffffffffffffffffff16021790555060008054906101000a900473ffffffffffffffffffffffffffffffffffffffff1673ffffffffffffffffffffffffffffffffffffffff1663095ea7b3600160009054906101000a900473ffffffffffffffffffffffffffffffffffffffff167fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff6040518363ffffffff1660e01b8152600401610150929190610266565b6020604051808303816000875af115801561016f573d6000803e3d6000fd5b505050506040513d601f19601f8201168201806040525081019061019391906102c7565b5050506102f4565b600080fd5b600073ffffffffffffffffffffffffffffffffffffffff82169050919050565b60006101cb826101a0565b9050919050565b6101db816101c0565b81146101e657600080fd5b50565b6000815190506101f8816101d2565b92915050565b600080604083850312156102155761021461019b565b5b6000610223858286016101e9565b9250506020610234858286016101e9565b9150509250929050565b610247816101c0565b82525050565b6000819050919050565b6102608161024d565b82525050565b600060408201905061027b600083018561023e565b6102886020830184610257565b9392505050565b60008115159050919050565b6102a48161028f565b81146102af57600080fd5b50565b6000815190506102c18161029b565b92915050565b6000602082840312156102dd576102dc61019b565b5b60006102eb848285016102b2565b91505092915050565b610361806103036000396000f3fe608060405234801561001057600080fd5b506004361061004c5760003560e01c806302546ffc146100515780631023ad7c1461006f57806350ec55e11461008b578063c9d4623f146100a7575b600080fd5b6100596100c5565b6040516100669190610254565b60405180910390f35b610089600480360381019061008491906102de565b6100e9565b005b6100a560048036038101906100a091906102de565b61016b565b005b6100af6101ed565b6040516100bc9190610254565b60405180910390f35b60008054906101000a900473ffffffffffffffffffffffffffffffffffffffff1681565b6000600160009054906101000a900473ffffffffffffffffffffffffffffffffffffffff1690506040517f77286d1700000000000000000000000000000000000000000000000000000000815236600101845b818110156101635760208160048501376000806024856000885af15060208101905061013c565b505050505050565b6000600160009054906101000a900473ffffffffffffffffffffffffffffffffffffffff1690506040517f506ea7de00000000000000000000000000000000000000000000000000000000815236600101845b818110156101e55760208160048501376000806024856000885af1506020810190506101be565b505050505050565b600160009054906101000a900473ffffffffffffffffffffffffffffffffffffffff1681565b600073ffffffffffffffffffffffffffffffffffffffff82169050919050565b600061023e82610213565b9050919050565b61024e81610233565b82525050565b60006020820190506102696000830184610245565b92915050565b600080fd5b600080fd5b600080fd5b600080fd5b600080fd5b60008083601f84011261029e5761029d610279565b5b8235905067ffffffffffffffff8111156102bb576102ba61027e565b5b6020830191508360208202830111156102d7576102d6610283565b5b9250929050565b600080602083850312156102f5576102f461026f565b5b600083013567ffffffffffffffff81111561031357610312610274565b5b61031f85828601610288565b9250925050925092905056fea26469706673582212202945122ff1687bc95e77ee677ac9b41c0fa6d27fb87ba608d7510a54a22c68a264736f6c63430008130033",
 }
 
 // BulkTasksABI is the input ABI used to generate the binding from.
@@ -44,7 +44,7 @@ var BulkTasksABI = BulkTasksMetaData.ABI
 var BulkTasksBin = BulkTasksMetaData.Bin
 
 // DeployBulkTasks deploys a new Ethereum contract, binding an instance of BulkTasks to it.
-func DeployBulkTasks(auth *bind.TransactOpts, backend bind.ContractBackend) (common.Address, *types.Transaction, *BulkTasks, error) {
+func DeployBulkTasks(auth *bind.TransactOpts, backend bind.ContractBackend, basetoken_ common.Address, engine_ common.Address) (common.Address, *types.Transaction, *BulkTasks, error) {
 	parsed, err := BulkTasksMetaData.GetAbi()
 	if err != nil {
 		return common.Address{}, nil, nil, err
@@ -53,7 +53,7 @@ func DeployBulkTasks(auth *bind.TransactOpts, backend bind.ContractBackend) (com
 		return common.Address{}, nil, nil, errors.New("GetABI returned nil")
 	}
 
-	address, tx, contract, err := bind.DeployContract(auth, *parsed, common.FromHex(BulkTasksBin), backend)
+	address, tx, contract, err := bind.DeployContract(auth, *parsed, common.FromHex(BulkTasksBin), backend, basetoken_, engine_)
 	if err != nil {
 		return common.Address{}, nil, nil, err
 	}
@@ -200,6 +200,68 @@ func (_BulkTasks *BulkTasksTransactorRaw) Transfer(opts *bind.TransactOpts) (*ty
 // Transact invokes the (paid) contract method with params as input values.
 func (_BulkTasks *BulkTasksTransactorRaw) Transact(opts *bind.TransactOpts, method string, params ...interface{}) (*types.Transaction, error) {
 	return _BulkTasks.Contract.contract.Transact(opts, method, params...)
+}
+
+// Basetoken is a free data retrieval call binding the contract method 0x02546ffc.
+//
+// Solidity: function basetoken() view returns(address)
+func (_BulkTasks *BulkTasksCaller) Basetoken(opts *bind.CallOpts) (common.Address, error) {
+	var out []interface{}
+	err := _BulkTasks.contract.Call(opts, &out, "basetoken")
+
+	if err != nil {
+		return *new(common.Address), err
+	}
+
+	out0 := *abi.ConvertType(out[0], new(common.Address)).(*common.Address)
+
+	return out0, err
+
+}
+
+// Basetoken is a free data retrieval call binding the contract method 0x02546ffc.
+//
+// Solidity: function basetoken() view returns(address)
+func (_BulkTasks *BulkTasksSession) Basetoken() (common.Address, error) {
+	return _BulkTasks.Contract.Basetoken(&_BulkTasks.CallOpts)
+}
+
+// Basetoken is a free data retrieval call binding the contract method 0x02546ffc.
+//
+// Solidity: function basetoken() view returns(address)
+func (_BulkTasks *BulkTasksCallerSession) Basetoken() (common.Address, error) {
+	return _BulkTasks.Contract.Basetoken(&_BulkTasks.CallOpts)
+}
+
+// Engine is a free data retrieval call binding the contract method 0xc9d4623f.
+//
+// Solidity: function engine() view returns(address)
+func (_BulkTasks *BulkTasksCaller) Engine(opts *bind.CallOpts) (common.Address, error) {
+	var out []interface{}
+	err := _BulkTasks.contract.Call(opts, &out, "engine")
+
+	if err != nil {
+		return *new(common.Address), err
+	}
+
+	out0 := *abi.ConvertType(out[0], new(common.Address)).(*common.Address)
+
+	return out0, err
+
+}
+
+// Engine is a free data retrieval call binding the contract method 0xc9d4623f.
+//
+// Solidity: function engine() view returns(address)
+func (_BulkTasks *BulkTasksSession) Engine() (common.Address, error) {
+	return _BulkTasks.Contract.Engine(&_BulkTasks.CallOpts)
+}
+
+// Engine is a free data retrieval call binding the contract method 0xc9d4623f.
+//
+// Solidity: function engine() view returns(address)
+func (_BulkTasks *BulkTasksCallerSession) Engine() (common.Address, error) {
+	return _BulkTasks.Contract.Engine(&_BulkTasks.CallOpts)
 }
 
 // BulkSignalCommitment is a paid mutator transaction binding the contract method 0x50ec55e1.

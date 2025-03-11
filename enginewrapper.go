@@ -166,10 +166,10 @@ func (m *EngineWrapper) VersionCheck() bool {
 	}
 
 	if version.Cmp(minerVersion) <= 0 {
-		m.logger.Info().Int("version", int(version.Int64())).Msg("Miner version is up to date")
+		m.logger.Info().Int("version", int(version.Int64())).Msg("miner version is up to date")
 		return true
 	} else {
-		m.logger.Warn().Int("version", int(version.Int64())).Msg("Miner version is out of date")
+		m.logger.Warn().Int("version", int(version.Int64())).Msg("miner version is out of date")
 	}
 
 	return false

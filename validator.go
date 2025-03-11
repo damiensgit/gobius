@@ -300,6 +300,41 @@ func (v *Validator) ProcessValidatorStake(baseTokenBalance *big.Int) {
 		return
 	}
 
+	// moved this to earlier to ensure we have correct allowance EVEN if we dont need to deposit (fixes issue on sepolia where min stake is 0)
+	// get the allowance
+	allowanceAddress := v.services.Config.BaseConfig.EngineAddress
+
+	allowance, err := v.services.Basetoken.Allowance(nil, v.services.SenderOwnerAccount.Address, allowanceAddress)
+	if err != nil {
+		v.services.Logger.Err(err).Msg("failed to get allowance")
+		return
+	}
+
+	// FormatFixed is used because we cant represent the full amount in float64
+	v.services.Logger.Info().Msgf("allowance amount: %s", v.services.Config.BaseConfig.BaseToken.FormatFixed(allowance))
+
+	// check if the allowance is less than the balance
+	if allowance.Cmp(baseTokenBalance) < 0 {
+		v.services.Logger.Info().Msgf("will need to increase allowance")
+
+		allowanceAmount := new(big.Int).Sub(abi.MaxUint256, allowance)
+
+		opts := v.services.SenderOwnerAccount.GetOpts(0, big.NewInt(1000000000), nil, nil)
+		// increase the allowance
+		tx, err := v.services.Basetoken.Approve(opts, allowanceAddress, allowanceAmount)
+		if err != nil {
+			v.services.Logger.Err(err).Msg("failed to approve allowance")
+			return
+		}
+		// Wait for the transaction to be mined
+		_, success, _, _ := v.services.SenderOwnerAccount.WaitForConfirmedTx(v.services.Logger, tx)
+		if !success {
+			return
+		}
+
+		v.services.Logger.Info().Str("txhash", tx.Hash().String()).Msgf("allowance increased")
+	}
+
 	stakedAmount.Sub(stakedAmount, validatorPending)
 	stakedAmountFloat := v.services.Config.BaseConfig.BaseToken.ToFloat(stakedAmount)
 	validatorMinFloat := v.services.Config.BaseConfig.BaseToken.ToFloat(validatorMin)
@@ -367,40 +402,6 @@ func (v *Validator) ProcessValidatorStake(baseTokenBalance *big.Int) {
 			depositAmountAsFloat,
 		)
 		return
-	}
-
-	// get the allowance
-	allowanceAddress := v.services.Config.BaseConfig.EngineAddress
-
-	allowance, err := v.services.Basetoken.Allowance(nil, v.services.SenderOwnerAccount.Address, allowanceAddress)
-	if err != nil {
-		v.services.Logger.Err(err).Msg("failed to get allowance")
-		return
-	}
-
-	// FormatFixed is used because we cant represent the full amount in float64
-	v.services.Logger.Info().Msgf("allowance amount: %s", v.services.Config.BaseConfig.BaseToken.FormatFixed(allowance))
-
-	// check if the allowance is less than the balance
-	if allowance.Cmp(baseTokenBalance) < 0 {
-		v.services.Logger.Info().Msgf("will need to increase allowance")
-
-		allowanceAmount := new(big.Int).Sub(abi.MaxUint256, allowance)
-
-		opts := v.services.SenderOwnerAccount.GetOpts(0, big.NewInt(1000000000), nil, nil)
-		// increase the allowance
-		tx, err := v.services.Basetoken.Approve(opts, allowanceAddress, allowanceAmount)
-		if err != nil {
-			v.services.Logger.Err(err).Msg("failed to approve allowance")
-			return
-		}
-		// Wait for the transaction to be mined
-		_, success, _, _ := v.services.SenderOwnerAccount.WaitForConfirmedTx(v.services.Logger, tx)
-		if !success {
-			return
-		}
-
-		v.services.Logger.Info().Str("txhash", tx.Hash().String()).Msgf("allowance increased")
 	}
 
 	tx, err := v.services.SenderOwnerAccount.NonceManagerWrapper(3, 425, 1.5, true, func(opts *bind.TransactOpts) (interface{}, error) {

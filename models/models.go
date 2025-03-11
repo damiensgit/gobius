@@ -79,10 +79,15 @@ func InitModelRegistry(client ipfs.IPFSClient, config *config.AppConfig, logger 
 
 	// Register available models
 	modelQwen := NewQwenTestModel(client, config, logger)
-	ModelRegistry.RegisterModel(modelQwen)
+	// only register if not nil e.g. is it is available in the config for this network
+	if modelQwen != nil {
+		ModelRegistry.RegisterModel(modelQwen)
+	}
 
 	modelKandinsky2 := NewKandinsky2Model(client, config, logger)
-	ModelRegistry.RegisterModel(modelKandinsky2)
+	if modelKandinsky2 != nil {
+		ModelRegistry.RegisterModel(modelKandinsky2)
+	}
 
 	// Register additional models here as needed
 }
