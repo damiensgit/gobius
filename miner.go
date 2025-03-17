@@ -38,6 +38,7 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	lru "github.com/hashicorp/golang-lru"
 	"github.com/pressly/goose/v3"
+	"github.com/rivo/tview"
 	"github.com/rs/zerolog"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
@@ -56,9 +57,9 @@ const (
 	appVersion                     = "0.0.1"
 	taskSubmittedChannelBufferSize = 1024
 	appName                        = `
-┏┓┏┓┳┓┳┳┳┏┓
-┃┓┃┃┣┫┃┃┃┗┓
-┗┛┗┛┻┛┻┗┛┗┛
+   ┏┓┏┓┳┓┳┳┳┏┓     
+   ┃┓┃┃┣┫┃┃┃┗┓    
+   ┗┛┗┛┻┛┻┗┛┗┛    
 `
 )
 
@@ -83,7 +84,6 @@ func initLogging(file string, level zerolog.Level, consoleWriter io.Writer) (log
 	}
 
 	multi := zerolog.MultiLevelWriter(zerolog.ConsoleWriter{Out: consoleWriter, TimeFormat: "15:04:05.000000000"}, fileLogger)
-	//multi := zerolog.MultiLevelWriter(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05.000000000"}, fileLogger)
 
 	logger = zerolog.New(multi).Level(level).With().Timestamp().Logger()
 
@@ -396,6 +396,29 @@ func validateGpus(model models.ModelInterface, gpus []*task.GPU, logger *zerolog
 	return nil
 }
 
+// basic log output router to direct logging to either console or tui if avail
+type logrouter struct {
+	view     *tui.CustomTextView
+	Headless atomic.Bool
+	writer   io.Writer
+}
+
+func (tw *logrouter) SetView(view *tui.CustomTextView) {
+	tw.view = view
+	tw.writer = tview.ANSIWriter(view)
+}
+
+func (tw *logrouter) Write(p []byte) (n int, err error) {
+	isHeadless := tw.Headless.Load()
+	if tw.view == nil || isHeadless {
+		return os.Stderr.Write(p)
+	} else {
+		//return tw.writer.Write(p)
+		//return .Write(p)q
+		return fmt.Fprintf(tw.writer, "%s", p)
+	}
+}
+
 func main() {
 	var appQuitWG sync.WaitGroup
 
@@ -429,10 +452,16 @@ func main() {
 		*logLevel = int(cfg.LogLevel)
 	}
 
-	logWriter := &tui.LogViewWriter{
-		App:      nil,
-		Headless: *headless,
+	// logWriter := &tui.LogViewWriter{
+	// 	App:      nil,
+	// 	Headless: *headless,
+	// }
+
+	logWriter := &logrouter{
+		view:     nil,
+		Headless: atomic.Bool{},
 	}
+	logWriter.Headless.Store(*headless)
 
 	logFile, logger := initLogging(cfg.LogPath, zerolog.Level(*logLevel), logWriter)
 
@@ -456,7 +485,7 @@ func main() {
 		txRpcClient, err = client.NewClient(cfg.Blockchain.SenderRPCURL, appQuit, cfg.Blockchain.EthersGas, cfg.Blockchain.BasefeeX, cfg.Blockchain.ForceGas, cfg.Blockchain.GasOverride)
 
 		if err != nil {
-			logger.Error().Err(err).Msgf("error connecting to RPC: %s", cfg.Blockchain.SenderRPCURL)
+			logger.Error().Err(err).Msgf("error connecting to sender RPC: %s", cfg.Blockchain.SenderRPCURL)
 			return
 		}
 	}
@@ -466,7 +495,7 @@ func main() {
 		c, err := client.NewClient(curl, appQuit, cfg.Blockchain.EthersGas, cfg.Blockchain.BasefeeX, cfg.Blockchain.ForceGas, cfg.Blockchain.GasOverride)
 
 		if err != nil {
-			logger.Error().Err(err).Msgf("error connecting to RPC: %s", curl)
+			logger.Error().Err(err).Msgf("error connecting to client RPC: %s", curl)
 			return
 		}
 
@@ -672,9 +701,16 @@ func main() {
 		return
 	}
 
-	// Use the mock IPFS client for now
-	// TODO: change this based on strategy in config
-	ipfsClient, err := ipfs.NewMockIPFSClient(*cfg, true)
+	var ipfsClient ipfs.IPFSClient
+
+	switch cfg.IPFS.Strategy {
+	case "mock":
+		ipfsClient, err = ipfs.NewMockIPFSClient(*cfg, true)
+	case "http_client":
+		ipfsClient, err = ipfs.NewHttpIPFSClient(*cfg, true)
+	default:
+		logger.Fatal().Str("strategy", cfg.IPFS.Strategy).Msg("invalid IPFS strategy")
+	}
 
 	if err != nil {
 		logger.Fatal().Err(err).Msg("error connecting to IPFS")
@@ -797,7 +833,36 @@ func main() {
 		logger.Warn().Msg("listening to TaskSubmitted events is disabled")
 	}
 
-	var p *tea.Program
+	dashboard := tui.NewDashboard()
+
+	if !*headless {
+		// Update our log router to use the logviewer
+		logWriter.SetView(dashboard.LogViewer.CustomTextView)
+		go func() {
+
+			dashboard.Run()
+			// disable writing to log viwer on exit
+			// we don't set the view to nil as this is unsafe instead we use a atomic bool
+			logWriter.Headless.Store(true)
+			appCancel()
+			// ticker := time.NewTicker(time.Second)
+			// defer ticker.Stop()
+
+			// for {
+			// 	select {
+			// 	case <-dashboard.GetQuitSignal():
+			// 		appCancel() // Trigger app shutdown using the cancel function
+			// 		return
+			// 	case <-ticker.C:
+
+			// 	}
+			// }
+		}()
+
+	} else {
+		logger.Info().Msg("running in headless mode; dashboard disabled")
+	}
+	/*var p *tea.Program
 	dashboard := tui.NewDashboard()
 	if !*headless {
 		p = tea.NewProgram(
@@ -870,7 +935,7 @@ func main() {
 
 	} else {
 		logger.Info().Msg("running in headless mode - dashboard disabled")
-	}
+	}*/
 
 	sinkSolutionSubmitted := make(chan *engine.EngineSolutionSubmitted, 1028)
 	var solutionSubmittedSub event.Subscription
@@ -1379,11 +1444,11 @@ exit_app:
 	appQuitWG.Wait()
 
 	// Now that all tasks are complete, properly cleanup the TUI
-	if !*headless && p != nil {
-		time.Sleep(100 * time.Millisecond) // Give a moment for the final frame to render
-		p.Quit()
-		p.Wait()
-	}
+	// if !*headless && p != nil {
+	// 	time.Sleep(100 * time.Millisecond) // Give a moment for the final frame to render
+	// 	p.Quit()
+	// 	p.Wait()
+	// }
 
 	logger.Info().Msg("bye! 👋")
 }

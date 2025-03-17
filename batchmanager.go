@@ -163,8 +163,12 @@ func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float6
 
 	basePrice, ethPrice, err = tm.services.Paraswap.GetPrices()
 	if err != nil {
-		tm.services.Logger.Error().Err(err).Msg("could not get prices from paraswap!")
-		return 0, 0, 0, 0, 0, err
+		tm.services.Logger.Error().Err(err).Msg("could not get prices from oracle!")
+		//return 0, 0, 0, 0, 0, err
+		// TODO: for local offline testing we need to handle this!
+		// if our oracle is offline for extended period of time the miner will be come inactive as it wont be able to process
+		// various tasks
+		basePrice, ethPrice = 30, 2000
 	}
 
 	tm.cache.Set("base_price", basePrice)
@@ -2198,7 +2202,6 @@ func NewBatchTransactionManager(ctx context.Context, wg *sync.WaitGroup) (*Batch
 	if err != nil {
 		return nil, err
 	}
-	//	}
 
 	var accounts []*account.Account
 

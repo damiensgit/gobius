@@ -66,11 +66,13 @@ func NewMetricsManager(ctx context.Context, d time.Duration) *GasMetrics {
 		services:         services,
 	}
 
-	var err error
-	gm.lastBasePrice, gm.lastEthPrice, err = gm.services.Paraswap.GetPrices()
-	if err != nil {
-		panic(err)
-	}
+	// TODO: removed below query as this isnt fault tolerant: we must be able to load miner even if our oracle has issues/offline/blocked etc
+	// Also TODO: make this onchain?
+	// var err error
+	// gm.lastBasePrice, gm.lastEthPrice, err = gm.services.Paraswap.GetPrices()
+	// if err != nil {
+	// 	panic(err)
+	// }
 
 	return gm
 }

@@ -375,7 +375,7 @@ func getBatchPricingInfo(ctx context.Context) error {
 
 	basePrice, ethPrice, err := services.Paraswap.GetPrices()
 	if err != nil {
-		services.Logger.Error().Err(err).Msg("could not get prices from sushi api!")
+		services.Logger.Error().Err(err).Msg("could not get prices from oracle api!")
 	}
 
 	basefee, err := services.OwnerAccount.Client.GetBaseFee()

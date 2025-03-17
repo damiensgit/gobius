@@ -136,7 +136,7 @@ const (
 // Add back after UpdateType constants
 type StateUpdate struct {
 	Type    UpdateType
-	Payload interface{}
+	Payload any
 }
 
 // First, let's create a struct to hold our utilization data
@@ -952,10 +952,10 @@ type LogViewer struct {
 
 func (w *LogViewer) Write(p []byte) (n int, err error) {
 	// Ensure logs appear immediately in the TextView
-	fmt.Fprintf(w.TextView, "%s", p)
-
-	return len(p), nil
-	// return tview.ANSIWriter(w.TextView).Write(p)
+	//fmt.Fprintf(w.TextView, "%s", p)
+	return w.TextView.Write(p)
+	//return len(p), nil
+	//return tview.ANSIWriter(w.TextView).Write(p)
 }
 
 func NewLogsViewer(theme *Theme) *LogViewer {
@@ -966,7 +966,8 @@ func NewLogsViewer(theme *Theme) *LogViewer {
 		SetTitleAlign(tview.AlignCenter).
 		SetBorder(true).
 		SetTitleColor(theme.Colors.Primary).
-		SetBorderColor(theme.Colors.Border)
+		SetBorderColor(theme.Colors.Border).
+		SetScrollable(true).ScrollToEnd()
 
 	return &LogViewer{
 		CustomTextView: logsView,
@@ -1307,6 +1308,10 @@ func NewDashboard() *Dashboard {
 	return d
 }
 
+func (d *Dashboard) GetLogger() zerolog.Logger {
+	return d.logger
+}
+
 func (d *Dashboard) initializeComponents() {
 	// Initialize Title Bar components
 	d.leftTitle = tview.NewTextView()
@@ -1491,11 +1496,11 @@ func (d *Dashboard) setupLayout() {
 	//isSmall := false
 	// Detect screen size and show/hide warning
 	d.app.SetBeforeDrawFunc(func(screen tcell.Screen) bool {
-		width, height := screen.Size()
-		// minWidth := 50
+		//width, height := screen.Size()
+		//// minWidth := 50
 		// minHeight := 15
 
-		d.logger.Info().Msgf("🔥 Info log with color %d, %d", width, height)
+		//d.logger.Info().Msgf("🔥 Info log with color %d, %d", width, height)
 
 		// if width < minWidth || height < minHeight {
 		// 	if !isSmall {
@@ -1724,6 +1729,8 @@ func main() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
 
+		logger := dashboard.GetLogger()
+
 		count := 0
 
 		for {
@@ -1755,14 +1762,15 @@ func main() {
 					Payload: gpus,
 				}
 
-				// Update logs
-				dashboard.updates <- StateUpdate{
-					Type: UpdateLog,
-					Payload: fmt.Sprintf("[#%06x]%s[white] New log entry at %s\n",
-						dashboard.theme.Colors.Primary.Hex(),
-						string(dashboard.theme.Symbols.Bullet),
-						time.Now().Format("15:04:05")),
-				}
+				// // Update logs
+				// dashboard.updates <- StateUpdate{
+				// 	Type: UpdateLog,
+				// 	Payload: fmt.Sprintf("[#%06x]%s[white] New log entry at %s\n",
+				// 		dashboard.theme.Colors.Primary.Hex(),
+				// 		string(dashboard.theme.Symbols.Bullet),
+				// 		time.Now().Format("15:04:05")),
+				// }
+				logger.Info().Msgf("New log entry at %s", time.Now().Format("15:04:05"))
 
 				// Update metrics
 				dashboard.updates <- StateUpdate{
