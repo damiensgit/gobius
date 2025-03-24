@@ -161,14 +161,18 @@ func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float6
 	basefeeinEth := tm.services.Eth.ToFloat(basefee)
 	basefeeinGwei := basefeeinEth * 1000000000
 
-	basePrice, ethPrice, err = tm.services.Paraswap.GetPrices()
-	if err != nil {
-		tm.services.Logger.Error().Err(err).Msg("could not get prices from oracle!")
-		//return 0, 0, 0, 0, 0, err
-		// TODO: for local offline testing we need to handle this!
-		// if our oracle is offline for extended period of time the miner will be come inactive as it wont be able to process
-		// various tasks
+	if tm.services.Config.BaseConfig.TestnetType > 0 {
 		basePrice, ethPrice = 30, 2000
+	} else {
+		basePrice, ethPrice, err = tm.services.Paraswap.GetPrices()
+		if err != nil {
+			tm.services.Logger.Error().Err(err).Msg("could not get prices from oracle!")
+			//return 0, 0, 0, 0, 0, err
+			// TODO: for local offline testing we need to handle this!
+			// if our oracle is offline for extended period of time the miner will be come inactive as it wont be able to process
+			// various tasks
+			basePrice, ethPrice = 30, 2000
+		}
 	}
 
 	tm.cache.Set("base_price", basePrice)

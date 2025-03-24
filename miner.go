@@ -63,7 +63,7 @@ const (
 `
 )
 
-func initLogging(file string, level zerolog.Level, consoleWriter io.Writer) (logFile io.WriteCloser, logger zerolog.Logger) {
+func initLogging(file string, level zerolog.Level) (logFile io.WriteCloser, logger zerolog.Logger) {
 	// logFile, err := os.OpenFile(file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	// if err != nil {
 	// 	log.Fatalf("Failed opening log file: %s", err)
@@ -79,11 +79,7 @@ func initLogging(file string, level zerolog.Level, consoleWriter io.Writer) (log
 		MaxAge:     5, // days
 	}
 
-	if consoleWriter == nil {
-		consoleWriter = os.Stderr
-	}
-
-	multi := zerolog.MultiLevelWriter(zerolog.ConsoleWriter{Out: consoleWriter, TimeFormat: "15:04:05.000000000"}, fileLogger)
+	multi := zerolog.MultiLevelWriter(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05.000000000"}, fileLogger)
 
 	logger = zerolog.New(multi).Level(level).With().Timestamp().Logger()
 
@@ -398,25 +394,91 @@ func validateGpus(model models.ModelInterface, gpus []*task.GPU, logger *zerolog
 
 // basic log output router to direct logging to either console or tui if avail
 type logrouter struct {
-	view     *tui.CustomTextView
-	Headless atomic.Bool
-	writer   io.Writer
+	view           *tui.CustomTextView
+	Headless       atomic.Bool
+	writer         io.Writer
+	logCh          chan []byte
+	originalStdout io.Writer
+	originalStderr io.Writer
 }
 
+func NewLogRouter() (*logrouter, func()) {
+	// Save original values
+	originalStdout := os.Stdout
+	originalStderr := os.Stderr
+
+	router := &logrouter{
+		view:           nil,
+		Headless:       atomic.Bool{},
+		originalStdout: originalStdout,
+		originalStderr: originalStderr,
+		logCh:          make(chan []byte, 16*4096),
+	}
+	router.Start()
+
+	// Create a single pipe
+	r, w, _ := os.Pipe()
+
+	// Replace both stdout and stderr with the same pipe writer
+	os.Stdout = w
+	os.Stderr = w
+
+	// Create exit channel
+	exit := make(chan bool)
+
+	// Start a single goroutine to handle both outputs
+	go func() {
+		io.Copy(router, r)
+		exit <- true
+	}()
+
+	// Return router and cleanup function
+	return router, func() {
+		w.Close()
+		<-exit
+		os.Stdout = originalStdout
+		os.Stderr = originalStderr
+	}
+}
+
+// TODO: fix issue with concurrent writers causing weird UI issues here
 func (tw *logrouter) SetView(view *tui.CustomTextView) {
 	tw.view = view
 	tw.writer = tview.ANSIWriter(view)
 }
 
+// TODO: as above this issue occurs when concurrent writers are using this
+// FIX: try buffered channel for concurrent -> seq. access?
 func (tw *logrouter) Write(p []byte) (n int, err error) {
 	isHeadless := tw.Headless.Load()
 	if tw.view == nil || isHeadless {
-		return os.Stderr.Write(p)
+		return tw.originalStderr.Write(p)
 	} else {
-		//return tw.writer.Write(p)
-		//return .Write(p)q
-		return fmt.Fprintf(tw.writer, "%s", p)
+		// Queue log message in channel
+		logCopy := make([]byte, len(p))
+		copy(logCopy, p)
+		select {
+		case tw.logCh <- logCopy:
+			return len(p), nil
+		default:
+			// Channel full, fallback to stderr
+			return tw.originalStderr.Write(p)
+		}
 	}
+}
+
+func (tw *logrouter) Start() {
+	go func() {
+		for msg := range tw.logCh {
+			// Re-check state before writing to view
+			if tw.view != nil && !tw.Headless.Load() {
+				fmt.Fprintf(tw.writer, "%s", msg)
+			} else {
+				// State changed while message was in queue
+				tw.originalStderr.Write(msg)
+			}
+		}
+	}()
 }
 
 func main() {
@@ -457,13 +519,10 @@ func main() {
 	// 	Headless: *headless,
 	// }
 
-	logWriter := &logrouter{
-		view:     nil,
-		Headless: atomic.Bool{},
-	}
-	logWriter.Headless.Store(*headless)
+	logWriter, cleanup := NewLogRouter()
+	defer cleanup()
 
-	logFile, logger := initLogging(cfg.LogPath, zerolog.Level(*logLevel), logWriter)
+	logFile, logger := initLogging(cfg.LogPath, zerolog.Level(*logLevel))
 
 	defer logFile.Close()
 
@@ -842,7 +901,7 @@ func main() {
 
 			dashboard.Run()
 			// disable writing to log viwer on exit
-			// we don't set the view to nil as this is unsafe instead we use a atomic bool
+			// we don't set the view to nil as this is unsafe instead we use an atomic bool
 			logWriter.Headless.Store(true)
 			appCancel()
 			// ticker := time.NewTicker(time.Second)
@@ -857,6 +916,67 @@ func main() {
 
 			// 	}
 			// }
+		}()
+
+		go func() {
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+
+			count := 0
+
+			for {
+				select {
+				case <-ticker.C:
+
+					// Update GPUs
+					var gpuMetrics []metrics.GPUInfo
+					for i := 0; i < len(gpus); i++ {
+						gpu := gpus[i]
+						// // add a random +/- solve time to the gpu
+						// rndSolveTime := solveTimes[i%len(solveTimes)] + rand.Float64()*0.5 - 0.25
+						// gpu.AddSolveTime(rndSolveTime)
+						//status := gpuStates[(count+i)%len(gpuStates)]
+						gpuMetrics = append(gpuMetrics, metrics.GPUInfo{
+							ID:         gpu.ID,
+							Status:     gpu.Status,
+							SolveTime:  time.Duration(1 * time.Second),
+							SolveTimes: []float64{1.0},
+							MaxSolves:  12,
+						})
+					}
+					count++
+
+					dashboard.Updates <- tui.StateUpdate{
+						Type:    tui.UpdateGPUs,
+						Payload: gpuMetrics,
+					}
+
+					// // Update metrics
+					// dashboard.updates <- StateUpdate{
+					// 	Type: UpdateValidatorMetrics,
+					// 	Payload: ValidatorMetrics{
+					// 		SessionTime:      time.Hour.String(),
+					// 		SolvedLastMinute: int64(count % 10),
+					// 	},
+					// }
+
+					// // Update financial metrics
+					// dashboard.updates <- StateUpdate{
+					// 	Type: UpdateFinancialMetrics,
+					// 	Payload: FinancialMetrics{
+					// 		TokenIncomePerMin:  float64(count) * 0.1,
+					// 		TokenIncomePerHour: float64(count) * 6.0,
+					// 		TokenIncomePerDay:  float64(count) * 144.0,
+					// 		IncomePerMin:       float64(count) * 0.5,
+					// 		IncomePerHour:      float64(count) * 30.0,
+					// 		IncomePerDay:       float64(count) * 720.0,
+					// 		ProfitPerMin:       float64(count) * 0.3,
+					// 		ProfitPerHour:      float64(count) * 18.0,
+					// 		ProfitPerDay:       float64(count) * 432.0,
+					// 	},
+					// }
+				}
+			}
 		}()
 
 	} else {
@@ -1017,8 +1137,11 @@ func main() {
 		if err != nil {
 			logger.Error().Err(err).Str("task", taskIdAsString).Msg("solve task failed, adding task back to queue")
 			errored = atomic.AddInt64(&erroredTasks, 1)
+			gpu.Status = "Error"
 		} else {
 			solved = atomic.AddInt64(&solvedTasks, 1)
+			gpu.Status = "Idle"
+
 		}
 		total := solved + errored
 		elapsedSeconds := float64(elapsed) / float64(time.Second)
@@ -1046,6 +1169,8 @@ func main() {
 				logger.Info().Int("worker", workerId).Int("GPU", gpu.ID).Msg("worker finished")
 				wg.Done()
 			}()
+
+			gpu.Status = "Idle"
 
 			// Ticker to periodically check the status of the GPU and re-enable it
 			ticker := time.NewTicker(time.Minute * 15) // check every 5 minutes
@@ -1078,6 +1203,9 @@ func main() {
 						mutex.Unlock()
 						continue
 					}
+
+					gpu.Status = "Mining"
+
 					// Pop the latest task from the front of the deque
 					element := taskIDs.Front()
 					event := element.Value.(*TaskSubmitted)

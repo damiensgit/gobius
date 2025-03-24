@@ -14,6 +14,7 @@ type GPU struct {
 	ErrorCount     int
 	TimeSinceError time.Time
 	Mock           bool
+	Status         string
 	mu             sync.RWMutex
 }
 
@@ -24,6 +25,7 @@ func NewGPU(id int, url string) *GPU {
 		Url:        url,
 		Enabled:    true,
 		ErrorCount: 0,
+		Status:     "Idle",
 
 		// Set the time since error to some default value so that we don't immediately disable the GPU
 		TimeSinceError: time.Now(),

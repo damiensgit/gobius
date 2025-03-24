@@ -110,6 +110,7 @@ func (p *ParaswapManager) GetPrices() (aiusPrice float64, ethPrice float64, err 
 	return aiusPrice, ethPrice, nil
 }
 
+// TODO: make this a context bound http call via NewRequestWithContext
 func (p *ParaswapManager) GetPrice(srcToken, destToken *erc20.TokenERC20, amount *big.Int) (*PriceResponse, error) {
 	params := url.Values{}
 	params.Add("srcToken", srcToken.Address.String())

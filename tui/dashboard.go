@@ -46,7 +46,7 @@ type Dashboard struct {
 	metricsView        *MetricsView
 	helpView           *HelpViewer
 	theme              *Theme
-	updates            chan StateUpdate
+	Updates            chan StateUpdate
 	mu                 sync.RWMutex
 	validatorMetrics   ValidatorMetrics
 	financialMetrics   FinancialMetrics
@@ -67,7 +67,7 @@ func NewDashboard() *Dashboard {
 	d := &Dashboard{
 		app:     tview.NewApplication().EnableMouse(true),
 		theme:   theme,
-		updates: make(chan StateUpdate, 100),
+		Updates: make(chan StateUpdate, 100),
 	}
 
 	d.initializeComponents()
@@ -129,18 +129,17 @@ func (d *Dashboard) initializeComponents() {
 [#4a28ff]██[gray]║   [#4a28ff]██[gray]║[#4a28ff]██[gray]║   [#4a28ff]██[gray]║[#4a28ff]██[gray]╔══[#4a28ff]██[gray]╗[#4a28ff]██[gray]║[#4a28ff]██[gray]║   [#4a28ff]██[gray]║╚════[#4a28ff]██[gray]║
 [gray]╚[#4a28ff]██████[gray]╔╝╚[#4a28ff]██████[gray]╔╝[#4a28ff]██████[gray]╔╝[#4a28ff]██[gray]║╚[#4a28ff]██████[gray]╔╝[#4a28ff]███████[gray]║
 [gray] ╚═════╝  ╚═════╝ ╚═════╝ ╚═╝ ╚═════╝ ╚══════╝[white]
-
-[::][yellow]v1.0.0[white]                                    
+                                          [yellow]v1.0.0[white]                                    
 
 [::]Copyright© 2025 Gobius Developers
 [::]Portions Copyright© 2025 Arbius Developers
 
                                                                       
  Help Information:
- • Press '1' - '3' to switch between views
- • Press 'ctrl+c' or'q' to quit
+ • Press '1' thru '3' to switch between views
+ • Press 'ctrl+c' or 'q' to quit
  • Press 'v' in dashboard to change GPU view mode
- • Press complete digits of pi to get a surprise
+ • Press complete digits of pi in order, to get a surprise
 `)
 
 	// Initialize other components as before
@@ -373,7 +372,7 @@ func (d *Dashboard) checkScreenSize() {
 
 func (d *Dashboard) startUpdateHandler() {
 	go func() {
-		for update := range d.updates {
+		for update := range d.Updates {
 			d.app.QueueUpdateDraw(func() {
 				switch update.Type {
 				case UpdateGPUs:
@@ -511,13 +510,13 @@ func main() {
 				}
 				count++
 
-				dashboard.updates <- StateUpdate{
+				dashboard.Updates <- StateUpdate{
 					Type:    UpdateGPUs,
 					Payload: gpus,
 				}
 
 				// Update logs
-				dashboard.updates <- StateUpdate{
+				dashboard.Updates <- StateUpdate{
 					Type: UpdateLog,
 					Payload: fmt.Sprintf("[#%06x]%s[white] New log entry at %s\n",
 						dashboard.theme.Colors.Primary.Hex(),
@@ -526,7 +525,7 @@ func main() {
 				}
 
 				// Update metrics
-				dashboard.updates <- StateUpdate{
+				dashboard.Updates <- StateUpdate{
 					Type: UpdateValidatorMetrics,
 					Payload: ValidatorMetrics{
 						SessionTime:      time.Hour.String(),
@@ -535,7 +534,7 @@ func main() {
 				}
 
 				// Update financial metrics
-				dashboard.updates <- StateUpdate{
+				dashboard.Updates <- StateUpdate{
 					Type: UpdateFinancialMetrics,
 					Payload: FinancialMetrics{
 						TokenIncomePerMin:  float64(count) * 0.1,
