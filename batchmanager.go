@@ -30,7 +30,7 @@ import (
 const profitEstimateBatchSize = 200
 
 type CacheItem struct {
-	Value      interface{}
+	Value      any
 	LastUpdate time.Time
 }
 
@@ -47,7 +47,7 @@ func NewCache(ttl time.Duration) *Cache {
 	}
 }
 
-func (c *Cache) Get(key string) (interface{}, bool) {
+func (c *Cache) Get(key string) (any, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -59,7 +59,7 @@ func (c *Cache) Get(key string) (interface{}, bool) {
 	return item.Value, true
 }
 
-func (c *Cache) Set(key string, value interface{}) {
+func (c *Cache) Set(key string, value any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -2170,6 +2170,16 @@ func (tm *BatchTransactionManager) Start(appQuit context.Context) error {
 		tm.services.Logger.Warn().Msg("validator stake / balance checks are disabled!")
 	}
 
+	if tm.services.Config.IPFS.IncentiveClaim {
+		claimInterval, err := time.ParseDuration(tm.services.Config.IPFS.ClaimInterval)
+		if err != nil {
+			return err
+		}
+
+		tm.wg.Add(1)
+		go tm.startIpfsClaimProcessor(appQuit, tm.wg, claimInterval)
+	}
+
 	switch tm.batchMode {
 	case 1:
 		if tm.services.Config.Miner.UsePolling {
@@ -2190,6 +2200,7 @@ func (tm *BatchTransactionManager) Start(appQuit context.Context) error {
 		}
 	default:
 		// error
+		return errors.New("invalid batch mode")
 	}
 
 	return nil
@@ -2376,10 +2387,10 @@ func (tm *BatchTransactionManager) GetProfitPerDay() float64 {
 	return tm.GetProfitPerHour() * 24
 }
 
-// ProcessIPFSClaims queries the database for stored IPFS CIDs, gets signatures
+// ProcessIpfsClaims queries the database for stored IPFS CIDs, gets signatures
 // from the oracle and submits claims on-chain
 // TODO: add support for querying other public IPFS providers for the Cid first to improve propagation speed before claiming
-func (tm *BatchTransactionManager) ProcessIPFSClaims(ctx context.Context) error {
+func (tm *BatchTransactionManager) ProcessIpfsClaims(ctx context.Context) error {
 	tm.Lock()
 	defer tm.Unlock()
 
@@ -2387,16 +2398,16 @@ func (tm *BatchTransactionManager) ProcessIPFSClaims(ctx context.Context) error 
 	// TODO: make batch size configurable
 	ipfsEntries, err := tm.services.TaskStorage.GetIpfsCids(10)
 	if err != nil {
-		tm.services.Logger.Error().Err(err).Msg("failed to get unclaimed IPFS entries")
+		tm.services.Logger.Error().Err(err).Msg("failed to get unclaimed ipfs entries")
 		return err
 	}
 
 	if len(ipfsEntries) == 0 {
-		tm.services.Logger.Debug().Msg("no unclaimed IPFS entries to process")
+		tm.services.Logger.Debug().Msg("no unclaimed ipfs entries to process")
 		return nil
 	}
 
-	tm.services.Logger.Info().Int("count", len(ipfsEntries)).Msg("processing IPFS claim entries")
+	tm.services.Logger.Info().Int("count", len(ipfsEntries)).Msg("processing ipfs claim entries")
 
 	oracleClient := tm.services.IpfsOracle
 
@@ -2449,7 +2460,7 @@ func (tm *BatchTransactionManager) ProcessIPFSClaims(ctx context.Context) error 
 		tm.services.Logger.Debug().
 			Str("taskId", taskIdStr).
 			Str("cid", "0x"+cidHex).
-			Msg("getting signatures for CID")
+			Msg("getting signatures for cid")
 
 		// Get signatures from oracle
 		signatures, err := oracleClient.GetSignaturesForCID(ctx, cidHex)
@@ -2458,7 +2469,7 @@ func (tm *BatchTransactionManager) ProcessIPFSClaims(ctx context.Context) error 
 				Err(err).
 				Str("taskId", taskIdStr).
 				Str("cid", "0x"+cidHex).
-				Msg("failed to get signatures for CID")
+				Msg("failed to get signatures for cid")
 			continue
 		}
 
@@ -2466,7 +2477,7 @@ func (tm *BatchTransactionManager) ProcessIPFSClaims(ctx context.Context) error 
 			tm.services.Logger.Warn().
 				Str("taskId", taskIdStr).
 				Str("cid", "0x"+cidHex).
-				Msg("no signatures returned for CID")
+				Msg("no signatures returned for cid")
 			continue
 		}
 
@@ -2477,7 +2488,7 @@ func (tm *BatchTransactionManager) ProcessIPFSClaims(ctx context.Context) error 
 			Int("signatureCount", len(signatures)).
 			Bool("priorityWindow", isWithinPriorityWindow).
 			Str("incentiveAmount", incentiveAmount.String()).
-			Msg("submitting IPFS claim on-chain")
+			Msg("submitting ipfs claim on-chain")
 
 		// TODO: Add call to the actual contract method to claim the IPFS incentive
 		// Pass the signatures array and the validator address
@@ -2496,32 +2507,32 @@ func (tm *BatchTransactionManager) ProcessIPFSClaims(ctx context.Context) error 
 			tm.services.Logger.Error().
 				Str("taskId", taskIdStr).
 				Str("cid", "0x"+cidHex).
-				Msg("failed to submit IPFS claim on-chain")
+				Msg("failed to submit ipfs claim on-chain")
 		}
 	}
 
 	return nil
 }
 
-// StartIPFSClaimProcessor starts a background process to periodically check for and process IPFS claims
-func (tm *BatchTransactionManager) StartIPFSClaimProcessor(appQuit context.Context, wg *sync.WaitGroup) {
+// StartIpfsClaimProcessor starts a background process to periodically check for and process IPFS claims
+func (tm *BatchTransactionManager) startIpfsClaimProcessor(appQuit context.Context, wg *sync.WaitGroup, claimInterval time.Duration) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ticker := time.NewTicker(10 * time.Second) // Check every 10 seconds
+		ticker := time.NewTicker(claimInterval)
 		defer ticker.Stop()
 
-		tm.services.Logger.Info().Msg("started IPFS claim processor")
+		tm.services.Logger.Info().Msgf("started ipfs claim processor with interval %s", claimInterval)
 
 		for {
 			select {
 			case <-appQuit.Done():
-				tm.services.Logger.Info().Msg("shutting down IPFS claim processor")
+				tm.services.Logger.Info().Msg("shutting down ipfs claim processor")
 				return
 			case <-ticker.C:
-				if err := tm.ProcessIPFSClaims(appQuit); err != nil {
+				if err := tm.ProcessIpfsClaims(appQuit); err != nil {
 					if err != context.Canceled {
-						tm.services.Logger.Error().Err(err).Msg("error processing IPFS claims")
+						tm.services.Logger.Error().Err(err).Msg("error processing ipfs claims")
 					}
 				}
 			}

@@ -200,10 +200,12 @@ type Cog struct {
 }
 
 type IPFS struct {
-	Strategy   string     `json:"strategy"`
-	HTTPClient HTTPClient `json:"http_client"`
-	OracleURL  string     `json:"oracle_url"`
-	Timeout    string     `json:"timeout"`
+	Strategy       string     `json:"strategy"`
+	HTTPClient     HTTPClient `json:"http_client"`
+	IncentiveClaim bool       `json:"incentive_claim"` // set to true to claim the incentive for pinning ipfs content
+	ClaimInterval  string     `json:"claim_interval"`  // how often to claim the incentive for pinning ipfs content
+	OracleURL      string     `json:"oracle_url"`
+	Timeout        string     `json:"timeout"`
 }
 
 type HTTPClient struct {
@@ -345,6 +347,12 @@ func NewAppConfig(testnetType int) AppConfig {
 		},
 		Strategies: Strategies{
 			Strategy: "nop",
+		},
+		IPFS: IPFS{
+			Strategy:       "nop",
+			IncentiveClaim: false,
+			OracleURL:      "",
+			Timeout:        "10s",
 		},
 	}
 
