@@ -4,6 +4,7 @@
   "bulkTasksAddress": "0xDab3896E694F7E9678a2E30fBc9eaa0D6999ADF7",
   "voterAddress": "0x2eB59677c170df0fD2D07159c11757720744E3DC",
   "veStakingAddress": "0xA3C730Dd2AFf11a5ec589BEa3767A258bF353fa0",
+  "arbiusRouterAddress": "0x6BfA2f533d7D3331D411E7a0358164D9644f0425",
   "models": {
     "qwen": {
       "id": "0x7cd06b3facb05c072fb359904a7381e8f28218f410830f85018f3922621ed33a",
