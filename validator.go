@@ -12,7 +12,22 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 )
+
+type IValidator interface {
+	SignalCommitment(validator common.Address, taskId task.TaskId, commitment [32]byte) error
+	SubmitSolution(validator common.Address, taskId task.TaskId, cid []byte) error
+	GetNextValidatorAddress() common.Address
+	InitiateValidatorWithdraw(validator common.Address, amount float64) error
+	ValidatorWithdraw(validator common.Address) error
+	CancelValidatorWithdraw(validator common.Address, count int64) error
+	BulkClaim(taskIds [][32]byte) (*types.Receipt, error)
+	BatchCommitments() error
+	BatchSolutions() error
+	VoteOnContestation(validator common.Address, taskId task.TaskId, yeah bool) error
+	SubmitContestation(validator common.Address, taskId task.TaskId) error
+}
 
 type Validator struct {
 	services  *Services

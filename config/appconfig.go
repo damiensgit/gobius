@@ -202,6 +202,8 @@ type Cog struct {
 type IPFS struct {
 	Strategy   string     `json:"strategy"`
 	HTTPClient HTTPClient `json:"http_client"`
+	OracleURL  string     `json:"oracle_url"`
+	Timeout    string     `json:"timeout"`
 }
 
 type HTTPClient struct {

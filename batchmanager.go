@@ -1353,16 +1353,31 @@ func (tm *BatchTransactionManager) processBulkClaimFast(account *account.Account
 
 	// Get the event SolutionClaimed topic ID
 	eventTopic := event.Events["SolutionClaimed"].ID
+	rewardsPaidTopic := event.Events["RewardsPaid"].ID
+
+	var totalValidatorReward *big.Int = big.NewInt(0)
 
 	for _, log := range receipt.Logs {
-
-		if len(log.Topics) > 0 && log.Topics[0] == eventTopic {
-			parsed, err := tm.services.Engine.Engine.ParseSolutionClaimed(*log)
-			if err != nil {
-				tm.services.Logger.Error().Err(err).Msg("could not parse solution claimed event")
-				continue
+		if len(log.Topics) > 0 {
+			// Check for SolutionClaimed event
+			if log.Topics[0] == eventTopic {
+				parsed, err := tm.services.Engine.Engine.ParseSolutionClaimed(*log)
+				if err != nil {
+					tm.services.Logger.Error().Err(err).Msg("could not parse solution claimed event")
+					continue
+				}
+				tasksClaimed = append(tasksClaimed, task.TaskId(parsed.Task))
 			}
-			tasksClaimed = append(tasksClaimed, task.TaskId(parsed.Task))
+
+			// Check for RewardsPaid event to sum validatorReward
+			if log.Topics[0] == rewardsPaidTopic {
+				parsed, err := tm.services.Engine.Engine.ParseRewardsPaid(*log)
+				if err != nil {
+					tm.services.Logger.Error().Err(err).Msg("could not parse rewards paid event")
+					continue
+				}
+				totalValidatorReward.Add(totalValidatorReward, parsed.ValidatorReward)
+			}
 		}
 	}
 
@@ -1465,7 +1480,6 @@ func (tm *BatchTransactionManager) processBulkClaim(account *account.Account, ta
 
 	// Use the Map function to extract the TaskId from each struct
 	taskIds := utils.Map(tasksToClaim, func(s storage.ClaimTask) [32]byte {
-		//value, _ := task.ConvertTaskIdString2Bytes(s.ID)
 		return s.ID
 	})
 
@@ -1494,21 +1508,41 @@ func (tm *BatchTransactionManager) processBulkClaim(account *account.Account, ta
 
 	// Get the event SolutionClaimed topic ID
 	eventTopic := event.Events["SolutionClaimed"].ID
+	rewardsPaidTopic := event.Events["RewardsPaid"].ID
+
+	var totalValidatorReward *big.Int = big.NewInt(0)
 
 	for _, log := range receipt.Logs {
-
-		if len(log.Topics) > 0 && log.Topics[0] == eventTopic {
-			parsed, err := tm.services.Engine.Engine.ParseSolutionClaimed(*log)
-			if err != nil {
-				tm.services.Logger.Error().Err(err).Msg("could not parse solution claimed event")
-				continue
+		if len(log.Topics) > 0 {
+			// Check for SolutionClaimed event
+			if log.Topics[0] == eventTopic {
+				parsed, err := tm.services.Engine.Engine.ParseSolutionClaimed(*log)
+				if err != nil {
+					tm.services.Logger.Error().Err(err).Msg("could not parse solution claimed event")
+					continue
+				}
+				tasksClaimed = append(tasksClaimed, task.TaskId(parsed.Task))
 			}
-			tasksClaimed = append(tasksClaimed, task.TaskId(parsed.Task))
+
+			// Check for RewardsPaid event to sum validatorReward
+			if log.Topics[0] == rewardsPaidTopic {
+				parsed, err := tm.services.Engine.Engine.ParseRewardsPaid(*log)
+				if err != nil {
+					tm.services.Logger.Error().Err(err).Msg("could not parse rewards paid event")
+					continue
+				}
+				totalValidatorReward.Add(totalValidatorReward, parsed.ValidatorReward)
+			}
 		}
 	}
 
 	if len(tasksClaimed) == 0 {
 		tm.services.Logger.Warn().Msg("⚠️ successful bulk claim transaction but no tasks were claimed: check for contestations/cooldown issues ⚠️")
+	}
+
+	if totalValidatorReward.Cmp(big.NewInt(0)) > 0 {
+		totalValidatorRewardInAius := tm.services.Config.BaseConfig.BaseToken.ToFloat(totalValidatorReward)
+		tm.services.Logger.Info().Float64("validator_reward", totalValidatorRewardInAius).Msg("total validator reward for bulk claim")
 	}
 
 	claimsToDelete = make([]task.TaskId, 0)
@@ -1534,7 +1568,7 @@ func (tm *BatchTransactionManager) processBulkClaim(account *account.Account, ta
 	}
 
 	if len(claimsToDelete) > 0 {
-		tm.services.Logger.Info().Int("claimed", len(claimsToDelete)).Msg("deleting claims from storage")
+		tm.services.Logger.Info().Int("claimed", len(claimsToDelete)).Msg("deleting claimed tasks from storage")
 		tm.services.TaskStorage.DeleteClaims(claimsToDelete)
 	}
 
@@ -1596,7 +1630,6 @@ func (tm *BatchTransactionManager) BatchSolutions() error {
 	copySolutions := make([]BatchSolution, len(tm.solutions))
 	copy(copySolutions, tm.solutions)
 	tm.solutions = []BatchSolution{}
-
 	tm.Unlock()
 
 	for _, solution := range copySolutions {
@@ -2341,4 +2374,157 @@ func (tm *BatchTransactionManager) GetProfitPerHour() float64 {
 
 func (tm *BatchTransactionManager) GetProfitPerDay() float64 {
 	return tm.GetProfitPerHour() * 24
+}
+
+// ProcessIPFSClaims queries the database for stored IPFS CIDs, gets signatures
+// from the oracle and submits claims on-chain
+// TODO: add support for querying other public IPFS providers for the Cid first to improve propagation speed before claiming
+func (tm *BatchTransactionManager) ProcessIPFSClaims(ctx context.Context) error {
+	tm.Lock()
+	defer tm.Unlock()
+
+	// Get all IPFS entries from the database that haven't been claimed (oldest first)
+	// TODO: make batch size configurable
+	ipfsEntries, err := tm.services.TaskStorage.GetIpfsCids(10)
+	if err != nil {
+		tm.services.Logger.Error().Err(err).Msg("failed to get unclaimed IPFS entries")
+		return err
+	}
+
+	if len(ipfsEntries) == 0 {
+		tm.services.Logger.Debug().Msg("no unclaimed IPFS entries to process")
+		return nil
+	}
+
+	tm.services.Logger.Info().Int("count", len(ipfsEntries)).Msg("processing IPFS claim entries")
+
+	oracleClient := tm.services.IpfsOracle
+
+	for _, entry := range ipfsEntries {
+		// Check if we should stop processing
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		cidHex := fmt.Sprintf("%x", entry.Cid)
+		taskIdStr := entry.TaskId.String()
+
+		// Check if incentive is still available on-chain
+		incentiveAmount, err := tm.services.ArbiusRouter.Incentives(nil, entry.TaskId)
+		if err != nil {
+			tm.services.Logger.Error().
+				Err(err).
+				Str("taskId", taskIdStr).
+				Msg("failed to check incentive availability")
+			continue
+		}
+
+		if incentiveAmount.Cmp(big.NewInt(0)) == 0 {
+			tm.services.Logger.Info().
+				Str("taskId", taskIdStr).
+				Str("cid", "0x"+cidHex).
+				Msg("incentive already claimed for this task")
+
+			// Mark as claimed in database to avoid reprocessing
+			if err := tm.services.TaskStorage.DeleteIpfsCid(entry.TaskId); err != nil {
+				tm.services.Logger.Error().Err(err).Str("taskId", taskIdStr).Msg("failed to mark entry as claimed")
+			}
+			continue
+		}
+
+		// Check if within 60 second priority window
+		isWithinPriorityWindow := time.Since(entry.Added) <= 60*time.Second
+
+		// If outside 60 seconds and not our validator, may want to be more strategic
+		if !isWithinPriorityWindow {
+			tm.services.Logger.Info().
+				Str("taskId", taskIdStr).
+				Str("cid", "0x"+cidHex).
+				Dur("age", time.Since(entry.Added)).
+				Msg("outside 60 second priority window, still attempting claim")
+		}
+
+		tm.services.Logger.Debug().
+			Str("taskId", taskIdStr).
+			Str("cid", "0x"+cidHex).
+			Msg("getting signatures for CID")
+
+		// Get signatures from oracle
+		signatures, err := oracleClient.GetSignaturesForCID(ctx, cidHex)
+		if err != nil {
+			tm.services.Logger.Error().
+				Err(err).
+				Str("taskId", taskIdStr).
+				Str("cid", "0x"+cidHex).
+				Msg("failed to get signatures for CID")
+			continue
+		}
+
+		if len(signatures) == 0 {
+			tm.services.Logger.Warn().
+				Str("taskId", taskIdStr).
+				Str("cid", "0x"+cidHex).
+				Msg("no signatures returned for CID")
+			continue
+		}
+
+		// Submit on-chain claim with signatures
+		tm.services.Logger.Info().
+			Str("taskId", taskIdStr).
+			Str("cid", "0x"+cidHex).
+			Int("signatureCount", len(signatures)).
+			Bool("priorityWindow", isWithinPriorityWindow).
+			Str("incentiveAmount", incentiveAmount.String()).
+			Msg("submitting IPFS claim on-chain")
+
+		// TODO: Add call to the actual contract method to claim the IPFS incentive
+		// Pass the signatures array and the validator address
+		// var receipt *types.Receipt
+		// var claimErr error
+
+		// For now, simulate a successful claim
+		success := true
+
+		if success {
+			// Mark as claimed in database
+			if err := tm.services.TaskStorage.DeleteIpfsCid(entry.TaskId); err != nil {
+				tm.services.Logger.Error().Err(err).Str("taskId", taskIdStr).Msg("failed to mark entry as claimed")
+			}
+		} else {
+			tm.services.Logger.Error().
+				Str("taskId", taskIdStr).
+				Str("cid", "0x"+cidHex).
+				Msg("failed to submit IPFS claim on-chain")
+		}
+	}
+
+	return nil
+}
+
+// StartIPFSClaimProcessor starts a background process to periodically check for and process IPFS claims
+func (tm *BatchTransactionManager) StartIPFSClaimProcessor(appQuit context.Context, wg *sync.WaitGroup) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(10 * time.Second) // Check every 10 seconds
+		defer ticker.Stop()
+
+		tm.services.Logger.Info().Msg("started IPFS claim processor")
+
+		for {
+			select {
+			case <-appQuit.Done():
+				tm.services.Logger.Info().Msg("shutting down IPFS claim processor")
+				return
+			case <-ticker.C:
+				if err := tm.ProcessIPFSClaims(appQuit); err != nil {
+					if err != context.Canceled {
+						tm.services.Logger.Error().Err(err).Msg("error processing IPFS claims")
+					}
+				}
+			}
+		}
+	}()
 }

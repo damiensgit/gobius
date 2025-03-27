@@ -113,7 +113,7 @@ func TestQueue(t *testing.T) {
 		ticker := time.NewTicker(1 * time.Second)
 		for range ticker.C {
 
-			totalTasks, err := queries.TotalQueuedTasks(ctx)
+			totalTasks, err := queries.TotalPendingTasks(ctx)
 			log.Println("Tasks queued:", totalTasks, err)
 
 			totalTasksToMake := 200
@@ -167,8 +167,8 @@ func popTaskFromQueue(ctx context.Context, sqlite *sql.DB, queries *Queries) (ta
 		}
 	}
 
-	qtx.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
-		Taskid: poppedTask,
+	_, _ = qtx.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		Taskid: poppedTask.Taskid,
 		Status: 1,
 	})
 
@@ -177,7 +177,7 @@ func popTaskFromQueue(ctx context.Context, sqlite *sql.DB, queries *Queries) (ta
 	}
 	log.Println("popTaskFromQueue time:", time.Since(start))
 
-	return poppedTask, nil
+	return poppedTask.Taskid, nil
 }
 
 func deleteTask(ctx context.Context, sqlite *sql.DB, queries *Queries, taskId task.TaskId) error {
@@ -284,7 +284,7 @@ func TestDb(t *testing.T) {
 		log.Println("AddTask time:", time.Since(start))
 	*/
 
-	queued, err := queries.TotalQueuedTasks(ctx)
+	queued, err := queries.TotalPendingTasks(ctx)
 	assert.NoError(t, err, "err in TotalQueuedTasks")
 	log.Println(queued, len(addedTasks))
 
@@ -359,7 +359,7 @@ func TestDb(t *testing.T) {
 	for _, v := range commies {
 		log.Println(v.Taskid, v.Commitment, v.Validator)
 		//err := qtx.UpdateTaskCommitment(ctx, v.Taskid)
-		err = qtx.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
+		_, err = qtx.UpdateTaskStatus(ctx, UpdateTaskStatusParams{
 			Taskid: v.Taskid,
 			Status: 2,
 		})
@@ -453,7 +453,7 @@ func TestPopTask(t *testing.T) {
 	totalTasksToPop := 15
 
 	addedTasks := make([]task.TaskId, 0)
-	for i := 0; i < totalTasksToMake; i++ {
+	for range totalTasksToMake {
 		taskid := generateRandom32Bytes()
 		addedTasks = append(addedTasks, taskid)
 	}
@@ -474,11 +474,11 @@ func TestPopTask(t *testing.T) {
 	tx.Rollback()
 	log.Println("AddTask time:", time.Since(start))
 
-	queued, err := queries.TotalQueuedTasks(ctx)
+	queued, err := queries.TotalPendingTasks(ctx)
 	assert.NoError(t, err, "err in TotalQueuedTasks")
 	log.Println(queued, len(addedTasks))
 
-	for i := 0; i < totalTasksToPop; i++ {
+	for range totalTasksToPop {
 		start = time.Now()
 		taskId, err := popTaskFromQueue(ctx, sqlite, queries)
 		assert.NoError(t, err, "err in popTaskFromQueue")

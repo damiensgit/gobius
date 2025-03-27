@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"gobius/account"
+	"gobius/bindings/arbiusrouterv1"
 	"gobius/bindings/basetoken"
 	"gobius/bindings/bulktasks"
 	"gobius/bindings/engine"
@@ -13,6 +14,7 @@ import (
 	"gobius/client"
 	"gobius/config"
 	"gobius/erc20"
+	"gobius/ipfs"
 	"gobius/metrics"
 	"gobius/paraswap"
 	"gobius/storage"
@@ -31,6 +33,7 @@ type Services struct {
 	Basetoken          *basetoken.BaseToken
 	Engine             *EngineWrapper
 	Voter              *voter.Voter
+	ArbiusRouter       ipfs.ArbiusRouterContract
 	BulkTasks          *bulktasks.BulkTasks
 	Eth                *erc20.TokenERC20
 	OwnerAccount       *account.Account
@@ -42,9 +45,10 @@ type Services struct {
 	AutoMineParams     *SubmitTaskParams
 	Paraswap           *paraswap.ParaswapManager
 	TaskTracker        *metrics.TaskTracker
+	IpfsOracle         ipfs.OracleClient
 }
 
-func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients []*client.Client, sql *sql.DB, logger *zerolog.Logger, cfg *config.AppConfig, appContext context.Context) (context.Context, error) {
+func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients []*client.Client, sql *sql.DB, logger *zerolog.Logger, cfg *config.AppConfig, ipfsOracle ipfs.OracleClient, appContext context.Context) (context.Context, error) {
 
 	ownerAccount, err := account.NewAccount(cfg.Blockchain.PrivateKey, rpc, appContext, cfg.Blockchain.CacheNonce)
 	if err != nil {
@@ -72,6 +76,18 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 	voterContract, err := voter.NewVoter(cfg.BaseConfig.VoterAddress, rpc.Client)
 	if err != nil {
 		return nil, err
+	}
+
+	// if we are on sepolia or mainnet we can use a real contract otherwise we mock (determined by config)
+	var arbiusRouter ipfs.ArbiusRouterContract
+	if cfg.BaseConfig.ArbiusRouterAddress == (common.Address{}) {
+		arbiusRouter = ipfs.NewMockRouterContract()
+	} else {
+		arbiusRouterContract, err := arbiusrouterv1.NewArbiusRouterV1(cfg.BaseConfig.ArbiusRouterAddress, rpc.Client)
+		if err != nil {
+			return nil, err
+		}
+		arbiusRouter = ipfs.NewRouterContractWrapper(arbiusRouterContract, rpc)
 	}
 
 	var bulkTasksContract *bulktasks.BulkTasks
@@ -144,7 +160,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 	// 120 = jitter offset in seconds for the min claim time
 	minclaimTime := time.Duration(minClaimSolTimeBig.Uint64()+120) * time.Second
 
-	logger.Error().Msgf("DEBUG MIN CLAIM TIME %s", minclaimTime)
+	logger.Info().Msgf("Minimum claim time is %s", minclaimTime)
 
 	ts := storage.NewTaskStorageDB(appContext, sql, minclaimTime, logger)
 
@@ -185,6 +201,8 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 		AutoMineParams:     st,
 		Paraswap:           paraswapManager,
 		TaskTracker:        taskMetrics,
+		IpfsOracle:         ipfsOracle,
+		ArbiusRouter:       arbiusRouter,
 	}
 
 	ctx := context.WithValue(appContext, servicesKey{}, services)

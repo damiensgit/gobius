@@ -51,7 +51,7 @@ func (ts *TaskStorageDB) GetPendingSolutionsCountPerValidator() (map[common.Addr
 	mapValToCounts := map[common.Address]int64{}
 
 	for _, v := range valData {
-		ts.logger.Println("Validator:", v.Validator, "Solution Pending Count:", v.SolutionCount)
+		//ts.logger.Println("Validator:", v.Validator, "Solution Pending Count:", v.SolutionCount)
 		mapValToCounts[v.Validator] = v.SolutionCount
 	}
 
@@ -204,15 +204,6 @@ func (ts *TaskStorageDB) DeleteProcessedSolutions(taskIds []task.TaskId) error {
 	return nil
 }
 
-// func (ts *TaskStorageDB) AddTaskToClaim(taskId task.TaskId) (time.Time, error) {
-// 	// as per enginev2 spec. 2000 seconds claim time + a little bit of buffer e.g. ~35mins
-// 	// this value can be changed so we read it from the contract at load time
-// 	claimTime := time.Now().Add(ts.minclaimtime)
-// 	claimTimeAsUnixString := strconv.FormatInt(claimTime.Unix(), 10)
-
-// 	return claimTime, err
-// }
-
 func (ts *TaskStorageDB) AddTasksToClaim(taskIds []task.TaskId, value float64) (time.Time, error) {
 	start := time.Now()
 
@@ -324,41 +315,6 @@ func (ts *TaskStorageDB) AddTasks(tasks []task.TaskId, txhash common.Hash, gasPe
 	return nil
 }
 
-// // removes and returns a task from the list
-// func (ts *TaskStorageDB) PopTaskOld() (task.TaskId, common.Hash, error) {
-// 	start := time.Now()
-
-// 	tx, err := ts.sqlite.BeginTx(ts.ctx, &sql.TxOptions{Isolation: sql.LevelSerializable, ReadOnly: false})
-// 	if err != nil {
-// 		return task.TaskId{}, common.Hash{}, err
-// 	}
-// 	qtx := ts.queries.WithTx(tx)
-
-// 	defer tx.Rollback()
-
-// 	row, err := qtx.PopTaskOld(ts.ctx)
-// 	if err != nil {
-// 		return task.TaskId{}, common.Hash{}, err
-// 	}
-
-// 	count, err := qtx.SetTaskQueuedStatus(ts.ctx, row.Taskid)
-// 	if err != nil {
-// 		return task.TaskId{}, common.Hash{}, err
-// 	}
-
-// 	if count == 0 {
-// 		log.Println("no rows affected by set task queue status")
-// 		return task.TaskId{}, common.Hash{}, sql.ErrNoRows
-// 	}
-
-// 	if err := tx.Commit(); err != nil {
-// 		return task.TaskId{}, common.Hash{}, err
-// 	}
-// 	log.Println("popTaskFromQueue time:", time.Since(start))
-
-// 	return row.Taskid, row.Txhash, nil
-// }
-
 func beginImmediate(db *sql.DB) (*sql.Tx, error) {
 	tx, err := db.Begin()
 	if err == nil {
@@ -449,4 +405,39 @@ func (ts *TaskStorageDB) UpdateTaskStatusAndCost(tasks []task.TaskId, status int
 	ts.logger.Println("UpdateTaskStatusAndCost time:", time.Since(start))
 
 	return nil
+}
+
+func (ts *TaskStorageDB) AddIpfsCid(taskId task.TaskId, cid []byte) error {
+	err := ts.queries.AddIPFSCid(ts.ctx, db.AddIPFSCidParams{
+		Taskid: taskId,
+		Cid:    cid,
+	})
+
+	return err
+}
+
+func (ts *TaskStorageDB) GetIpfsCids(batchSize int) (TaskIpfsCidDataSlice, error) {
+	ipfsCidsFromDb, err := ts.queries.GetIPFSCids(ts.ctx, int64(batchSize))
+
+	if err != nil {
+		return nil, err
+	}
+
+	ipfsCids := make(TaskIpfsCidDataSlice, len(ipfsCidsFromDb))
+
+	for i, item := range ipfsCidsFromDb {
+		ipfsCids[i] = TaskIpfsCidData{
+			TaskId: item.Taskid,
+			Cid:    item.Cid,
+			Added:  item.Added,
+		}
+	}
+
+	return ipfsCids, nil
+}
+
+func (ts *TaskStorageDB) DeleteIpfsCid(taskId task.TaskId) error {
+	_, err := ts.queries.DeletedIPFSCid(ts.ctx, taskId)
+
+	return err
 }

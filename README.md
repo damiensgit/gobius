@@ -101,9 +101,22 @@ go install github.com/go-task/task/v3/cmd/task@latest
 
    # Build bulk tasks contract
    task build:bulktasks
+   
+   # Build SQL schema bindings
+   task build:sqlc
    ```
 
 The bindings will be generated in the `./bindings` directory with appropriate subdirectories for each contract.
+
+### SQL Schema Requirements
+
+To build SQL bindings, you'll need [sqlc](https://sqlc.dev/) installed:
+
+```bash
+go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
+```
+
+The SQL schema and configuration are located in the `./sql` directory. Running `task build:sqlc` will generate Go code from your SQL schema.
 
 ### Configuration Setup
 

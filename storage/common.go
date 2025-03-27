@@ -2,6 +2,7 @@ package storage
 
 import (
 	task "gobius/common"
+	"time"
 )
 
 type TaskData struct {
@@ -56,3 +57,11 @@ func (t ClaimTaskSlice) SplitIntoChunks(chunkSize int) []ClaimTaskSlice {
 	}
 	return chunks
 }
+
+type TaskIpfsCidData struct {
+	TaskId task.TaskId
+	Cid    []byte
+	Added  time.Time
+}
+
+type TaskIpfsCidDataSlice []TaskIpfsCidData

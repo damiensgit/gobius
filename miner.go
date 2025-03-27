@@ -30,7 +30,6 @@ import (
 
 	"gobius/metrics"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -38,37 +37,67 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	lru "github.com/hashicorp/golang-lru"
 	"github.com/pressly/goose/v3"
-	"github.com/rivo/tview"
 	"github.com/rs/zerolog"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
+// Embed section
+// this stores the migrations for the database
+//
 //go:embed sql/sqlite/migrations/*.sql
 var embedMigrations embed.FS
 
+// Constants section
+const (
+	maxTasks                       = 50 // Maximum number of tasks to store
+	maxExitAttempts                = 3  // Maximum number of attempts to exit the application
+	appVersionMajor                = 1
+	appVersionMinor                = 0
+	appVersionPatch                = 0
+	taskSubmittedChannelBufferSize = 1024
+	appName                        = `
+   ┏┓┏┓┳┓┳┳┳┏┓     
+   ┃┓┃┃┣┫┃┃┃┗┓    v%d.%02d.%02d / engine v%d
+   ┗┛┗┛┻┛┻┗┛┗┛    
+
+`
+)
+
+// Variables section
+// TODO: put this into base config ?
+var minerEngineVersion = big.NewInt(5)
+
+// Types section
 type TaskSubmitted struct {
 	TaskId task.TaskId
 	TxHash common.Hash
 }
 
-const (
-	maxTasks                       = 50 // Maximum number of tasks to store
-	maxExitAttempts                = 3  // Maximum number of attempts to exit the application
-	appVersion                     = "0.0.1"
-	taskSubmittedChannelBufferSize = 1024
-	appName                        = `
-   ┏┓┏┓┳┓┳┳┳┏┓     
-   ┃┓┃┃┣┫┃┃┃┗┓    
-   ┗┛┗┛┻┛┻┗┛┗┛    
-`
-)
+type Miner struct {
+	services  *Services
+	ctx       context.Context
+	mu        sync.Mutex
+	gpura     *utils.RunningAverage
+	validator IValidator
+	wg        *sync.WaitGroup
+	gpus      []*task.GPU // gpus will store GPU instances for metrics/TUI
+	sync.RWMutex
+}
+
+// zerologAdapter adapts a zerolog.Logger to satisfy goose.Logger interface
+type zerologAdapter struct {
+	logger zerolog.Logger
+}
+
+func (z *zerologAdapter) Printf(format string, v ...interface{}) {
+	z.logger.Info().Msgf(format, v...)
+}
+
+func (z *zerologAdapter) Fatalf(format string, v ...interface{}) {
+	z.logger.Fatal().Msgf(format, v...)
+}
 
 func initLogging(file string, level zerolog.Level) (logFile io.WriteCloser, logger zerolog.Logger) {
-	// logFile, err := os.OpenFile(file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	// if err != nil {
-	// 	log.Fatalf("Failed opening log file: %s", err)
-	// }
-
 	//zerolog.TimeFieldFormat = zerolog.TimeFormatUnixMs
 	zerolog.TimeFieldFormat = time.RFC3339Nano
 
@@ -114,47 +143,6 @@ func setupCloseHandler(logger *zerolog.Logger) (ctx context.Context, cancel cont
 	}()
 
 	return ctx, cancel
-}
-
-// type TaskManagerI interface {
-// 	GetCurrentReward() (*big.Int, error)
-// 	GetTotalTasks() int64
-// 	GetClaims() int64
-// 	GetSolutions() int64
-// 	GetCommitments() int64
-// }
-
-// TODO: put this into base config ?
-var minerVersion = big.NewInt(5)
-
-type Miner struct {
-	services  *Services
-	ctx       context.Context
-	mu        sync.Mutex
-	gpura     *utils.RunningAverage
-	validator IValidator
-	wg        *sync.WaitGroup
-	// gpus will store GPU instances for metrics/TUI
-	gpus []*task.GPU
-	// TUI related fields
-	p *tea.Program
-	sync.RWMutex
-}
-
-type IValidator interface {
-	SignalCommitment(validator common.Address, taskId task.TaskId, commitment [32]byte) error
-	SubmitSolution(validator common.Address, taskId task.TaskId, cid []byte) error
-	//ValidatorDeposit(depositAmount *big.Int) (*types.Transaction, error)
-	GetNextValidatorAddress() common.Address
-	//ValidatorAddress() common.Address
-	InitiateValidatorWithdraw(validator common.Address, amount float64) error
-	ValidatorWithdraw(validator common.Address) error
-	CancelValidatorWithdraw(validator common.Address, count int64) error
-	BulkClaim(taskIds [][32]byte) (*types.Receipt, error)
-	BatchCommitments() error
-	BatchSolutions() error
-	VoteOnContestation(validator common.Address, taskId task.TaskId, yeah bool) error
-	SubmitContestation(validator common.Address, taskId task.TaskId) error
 }
 
 // connects miner account to the engine contract
@@ -392,95 +380,6 @@ func validateGpus(model models.ModelInterface, gpus []*task.GPU, logger *zerolog
 	return nil
 }
 
-// basic log output router to direct logging to either console or tui if avail
-type logrouter struct {
-	view           *tui.CustomTextView
-	Headless       atomic.Bool
-	writer         io.Writer
-	logCh          chan []byte
-	originalStdout io.Writer
-	originalStderr io.Writer
-}
-
-func NewLogRouter() (*logrouter, func()) {
-	// Save original values
-	originalStdout := os.Stdout
-	originalStderr := os.Stderr
-
-	router := &logrouter{
-		view:           nil,
-		Headless:       atomic.Bool{},
-		originalStdout: originalStdout,
-		originalStderr: originalStderr,
-		logCh:          make(chan []byte, 16*4096),
-	}
-	router.Start()
-
-	// Create a single pipe
-	r, w, _ := os.Pipe()
-
-	// Replace both stdout and stderr with the same pipe writer
-	os.Stdout = w
-	os.Stderr = w
-
-	// Create exit channel
-	exit := make(chan bool)
-
-	// Start a single goroutine to handle both outputs
-	go func() {
-		io.Copy(router, r)
-		exit <- true
-	}()
-
-	// Return router and cleanup function
-	return router, func() {
-		w.Close()
-		<-exit
-		os.Stdout = originalStdout
-		os.Stderr = originalStderr
-	}
-}
-
-// TODO: fix issue with concurrent writers causing weird UI issues here
-func (tw *logrouter) SetView(view *tui.CustomTextView) {
-	tw.view = view
-	tw.writer = tview.ANSIWriter(view)
-}
-
-// TODO: as above this issue occurs when concurrent writers are using this
-// FIX: try buffered channel for concurrent -> seq. access?
-func (tw *logrouter) Write(p []byte) (n int, err error) {
-	isHeadless := tw.Headless.Load()
-	if tw.view == nil || isHeadless {
-		return tw.originalStderr.Write(p)
-	} else {
-		// Queue log message in channel
-		logCopy := make([]byte, len(p))
-		copy(logCopy, p)
-		select {
-		case tw.logCh <- logCopy:
-			return len(p), nil
-		default:
-			// Channel full, fallback to stderr
-			return tw.originalStderr.Write(p)
-		}
-	}
-}
-
-func (tw *logrouter) Start() {
-	go func() {
-		for msg := range tw.logCh {
-			// Re-check state before writing to view
-			if tw.view != nil && !tw.Headless.Load() {
-				fmt.Fprintf(tw.writer, "%s", msg)
-			} else {
-				// State changed while message was in queue
-				tw.originalStderr.Write(msg)
-			}
-		}
-	}()
-}
-
 func main() {
 	var appQuitWG sync.WaitGroup
 
@@ -500,8 +399,7 @@ func main() {
 		setFlags[f.Name] = true
 	})
 
-	fmt.Println(appName)
-	fmt.Printf("Version: %s\n\n", appVersion)
+	fmt.Printf(appName, appVersionMajor, appVersionMinor, appVersionPatch, minerEngineVersion)
 
 	cfg, err := config.InitAppConfig(*configPath, *testnetType)
 	if err != nil {
@@ -514,16 +412,10 @@ func main() {
 		*logLevel = int(cfg.LogLevel)
 	}
 
-	// logWriter := &tui.LogViewWriter{
-	// 	App:      nil,
-	// 	Headless: *headless,
-	// }
-
-	logWriter, cleanup := NewLogRouter()
+	logWriter, cleanup := tui.NewLogRouter()
 	defer cleanup()
 
 	logFile, logger := initLogging(cfg.LogPath, zerolog.Level(*logLevel))
-
 	defer logFile.Close()
 
 	if cfg.EvilMode {
@@ -574,6 +466,8 @@ func main() {
 
 	goose.SetBaseFS(embedMigrations)
 
+	goose.SetLogger(&zerologAdapter{logger: logger})
+
 	if err := goose.SetDialect("sqlite3"); err != nil {
 		panic(err)
 	}
@@ -582,7 +476,19 @@ func main() {
 		logger.Fatal().Err(err).Msg("database migration error")
 	}
 
-	appContext, err := NewApplicationContext(rpcClient, txRpcClient, clients, sqlite, &logger, cfg, context.Background())
+	var ipfsOracle ipfs.OracleClient
+
+	if cfg.IPFS.OracleURL != "" {
+		timeout, err := time.ParseDuration(cfg.IPFS.Timeout)
+		if err != nil {
+			logger.Fatal().Err(err).Msg("invalid IPFS oracle timeout")
+		}
+		ipfsOracle = ipfs.NewHTTPOracleClient(cfg.IPFS.OracleURL, timeout)
+	} else {
+		ipfsOracle = ipfs.NewMockOracleClient()
+	}
+
+	appContext, err := NewApplicationContext(rpcClient, txRpcClient, clients, sqlite, &logger, cfg, ipfsOracle, context.Background())
 
 	if err != nil {
 		logger.Fatal().Err(err).Msg("could not create application context")
@@ -813,8 +719,8 @@ func main() {
 
 		validateGpus(modelToMine, gpus, &logger)
 
-		if !miner.services.Engine.VersionCheck() {
-			logger.Fatal().Int("minerversion", int(minerVersion.Int64())).Msg("miner is out of date, please update to the latest version!")
+		if !miner.services.Engine.VersionCheck(minerEngineVersion) {
+			logger.Fatal().Int("minerversion", int(minerEngineVersion.Int64())).Msg("miner is out of date, please update to the latest version!")
 		}
 	} else {
 		logger.Warn().Msg("skipped model and miner version validation checks!")

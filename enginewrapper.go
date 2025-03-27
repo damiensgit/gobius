@@ -157,7 +157,7 @@ func (m *EngineWrapper) GetValidatorMinimum() (*big.Int, error) {
 	return result.(*big.Int), nil
 }
 
-func (m *EngineWrapper) VersionCheck() bool {
+func (m *EngineWrapper) VersionCheck(minerVersion *big.Int) bool {
 	version, err := m.Engine.Version(nil)
 
 	if err != nil {
