@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bytes"
 	"container/list"
 	"context"
 	"database/sql"
@@ -24,8 +23,6 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
-	"runtime"
-	"runtime/pprof"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -1484,19 +1481,13 @@ func main() {
 exit_app:
 	logger.Info().Msg("waiting for application workers to finish")
 	// Wait for all workers to finish
-	//appQuitWG.Wait()
+	appQuitWG.Wait()
 
-	// Now that all tasks are complete, properly cleanup the TUI
-	// if !*headless && p != nil {
-	// 	time.Sleep(100 * time.Millisecond) // Give a moment for the final frame to render
-	// 	p.Quit()
-	// 	p.Wait()
-	// }
+	logger.Info().Msg("bye! 👋")
 
-	//logger.Info().Msg("bye! 👋")
-
+	// for debugging purposes
 	// Create a timeout channel to detect if the wait takes too long
-	waitDone := make(chan struct{})
+	/* waitDone := make(chan struct{})
 	go func() {
 		appQuitWG.Wait()
 		close(waitDone)
@@ -1509,20 +1500,16 @@ exit_app:
 	case <-time.After(10 * time.Second):
 		logger.Warn().Msg("workers taking longer than expected to finish, dumping goroutine stacks for debugging")
 
-		// Get the number of goroutines
 		numGoroutines := runtime.NumGoroutine()
 		logger.Warn().Int("count", numGoroutines).Msg("number of active goroutines")
 
-		// Create a buffer to store the stack traces
 		var buf bytes.Buffer
 
-		// Write goroutine stacks to the buffer
 		pprof.Lookup("goroutine").WriteTo(&buf, 1)
 
-		// Log the stack traces - you may want to split this into smaller chunks if it's very large
 		logger.Warn().Msgf("goroutine stacks:\n%s", buf.String())
 
 		// Continue with the wait
 		logger.Warn().Msg("continuing to wait for goroutines to finish")
-	}
+	} */
 }
