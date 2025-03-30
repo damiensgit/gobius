@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"container/list"
 	"context"
 	"database/sql"
@@ -23,6 +24,8 @@ import (
 	"math/rand"
 	"os"
 	"os/signal"
+	"runtime"
+	"runtime/pprof"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -275,6 +278,7 @@ func (m *Miner) SolveTask(taskId task.TaskId, tx *types.Transaction, gpu *task.G
 			return nil, err
 		}
 		m.services.Logger.Debug().Str("cid", "0x"+hex.EncodeToString(cid)).Str("elapsed", elapsed.String()).Str("average", m.gpura.Average().String()).Msg("gpu finished & returned result")
+
 	}
 
 	if validateOnly {
@@ -316,6 +320,11 @@ func (m *Miner) SolveTask(taskId task.TaskId, tx *types.Transaction, gpu *task.G
 	if err != nil {
 		m.services.Logger.Warn().Msg("commitment failed so not sending solution")
 		return nil, err
+	}
+
+	err = m.validator.SubmitIpfsCid(validator, taskId, cid)
+	if err != nil {
+		m.services.Logger.Warn().Err(err).Msg("ipfs cid submission failed")
 	}
 
 	// Use a separate goroutine without WaitGroup tracking for solution submission
@@ -488,7 +497,7 @@ func main() {
 		ipfsOracle = ipfs.NewMockOracleClient()
 	}
 
-	appContext, err := NewApplicationContext(rpcClient, txRpcClient, clients, sqlite, &logger, cfg, ipfsOracle, context.Background())
+	appContext, err := NewApplicationContext(rpcClient, txRpcClient, clients, sqlite, &logger, cfg, ipfsOracle, context.Background(), appQuit)
 
 	if err != nil {
 		logger.Fatal().Err(err).Msg("could not create application context")
@@ -1475,7 +1484,7 @@ func main() {
 exit_app:
 	logger.Info().Msg("waiting for application workers to finish")
 	// Wait for all workers to finish
-	appQuitWG.Wait()
+	//appQuitWG.Wait()
 
 	// Now that all tasks are complete, properly cleanup the TUI
 	// if !*headless && p != nil {
@@ -1484,5 +1493,36 @@ exit_app:
 	// 	p.Wait()
 	// }
 
-	logger.Info().Msg("bye! 👋")
+	//logger.Info().Msg("bye! 👋")
+
+	// Create a timeout channel to detect if the wait takes too long
+	waitDone := make(chan struct{})
+	go func() {
+		appQuitWG.Wait()
+		close(waitDone)
+	}()
+
+	// Wait for either completion or timeout
+	select {
+	case <-waitDone:
+		logger.Info().Msg("all workers finished successfully")
+	case <-time.After(10 * time.Second):
+		logger.Warn().Msg("workers taking longer than expected to finish, dumping goroutine stacks for debugging")
+
+		// Get the number of goroutines
+		numGoroutines := runtime.NumGoroutine()
+		logger.Warn().Int("count", numGoroutines).Msg("number of active goroutines")
+
+		// Create a buffer to store the stack traces
+		var buf bytes.Buffer
+
+		// Write goroutine stacks to the buffer
+		pprof.Lookup("goroutine").WriteTo(&buf, 1)
+
+		// Log the stack traces - you may want to split this into smaller chunks if it's very large
+		logger.Warn().Msgf("goroutine stacks:\n%s", buf.String())
+
+		// Continue with the wait
+		logger.Warn().Msg("continuing to wait for goroutines to finish")
+	}
 }

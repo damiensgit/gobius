@@ -55,25 +55,66 @@ type TelegramBot struct {
 }
 
 type ValidatorConfig struct {
-	InitialStake            float64           `json:"initial_stake"`             // initial stake to use for the validator
-	StakeBufferStakeAmount  float64           `json:"stake_buffer_amount"`       // min buffer amount between validator stake and min stake
-	StakeBufferTopupAmount  float64           `json:"stake_buffer_topup_amount"` // amount to top up the stake buffer
-	StakeBufferPercent      int               `json:"stake_buffer_percent"`
-	StakeBufferTopupPercent int               `json:"stake_buffer_topup_percent"`
-	StakeCheck              bool              `json:"stake_check"`             // check if the validator has enough stake
-	StakeCheckInterval      string            `json:"stake_check_interval"`    // how often to check the stake
-	EthLowThreshold         float64           `json:"eth_low_threshold"`       // if the validator has less than this amount of eth, we send alerts (TODO: implement)
-	MinBasetokenThreshold   float64           `json:"min_basetoken_threshold"` // min balance to leave on the validator account
-	SellInterval            int               `json:"sell_interval"`           // how often to check if we should sell in seconds
-	SellBuffer              float64           `json:"sell_buffer"`             // multiplier for the amount of tokens to sell (e.g. 1.5 means sell 1.5 times the amount of tokens)
-	SellProfitInEth         float64           `json:"sell_profit_in_eth"`      // sell this additional amount of AIUS in Eth terms
-	SellAllOverThreshold    bool              `json:"sell_all_over_threshold"` // sell all tokens if the balance is over the threshold
-	SellMinAmount           float64           `json:"sell_min_amount"`         // minimum amount of tokens to sell
-	SellMaxAmount           float64           `json:"sell_max_amount"`         // max amount of tokens to sell
-	SellEthBalanceTarget    float64           `json:"sell_eth_bal_target"`     // sell all over threshold if ETH balance is below this target
-	TreasurySplit           float64           `json:"treasury_split"`          // split the rewards between the validator and the treasury
-	TreasuryAddress         ethcommon.Address `json:"treasury_address"`        // address of the treasury
-	PrivateKeys             []string          `json:"private_keys"`            // list of 1 or more validators to use for v3
+	// InitialStake specifies the minimum amount to stake for a new validator (in tokens)
+	// If > 0 and validator's stake is below this value, stake will be topped up to this amount
+	// takes precedence over stake_buffer_amount and stake_buffer_percent
+	// only useful for initial stake, not for topups e.g. testing purposes
+	// it is recommended to set this to 0 and use the stake_buffer_amount and stake_buffer_percent instead
+	InitialStake float64 `json:"initial_stake"`
+
+	// StakeBufferStakeAmount is an absolute stake amount (in tokens) to maintain above minimum
+	// If > 0, this overrides the percentage-based buffer mechanism
+	// System will top up to InitialStake or ensure StakeBufferStakeAmount above minimum
+	StakeBufferStakeAmount float64 `json:"stake_buffer_amount"`
+	// StakeBufferTopupAmount is the amount to add when topping up with StakeBufferStakeAmount
+	StakeBufferTopupAmount float64 `json:"stake_buffer_topup_amount"`
+
+	// StakeBufferPercent specifies minimum buffer as percentage above required stake
+	// For example, 10 means maintain at least 10% more than minimum stake
+	StakeBufferPercent int `json:"stake_buffer_percent"`
+	// StakeBufferTopupPercent specifies when to trigger a top-up as percentage above minimum
+	// For example, if StakeBufferPercent=10 and StakeBufferTopupPercent=5,
+	// top-up occurs when stake falls below 5% buffer and restores to 10% buffer
+	// making these values the same will lead to constant topups so keep some distance between them
+	StakeBufferTopupPercent int `json:"stake_buffer_topup_percent"`
+
+	// StakeCheck specifies if we should check the validator's stake, stake_check_interval is the polling interval
+	StakeCheck bool `json:"stake_check"`
+	// Interval for checking the validator's stake (e.g. "120s", "1m", "5m", "1h", etc.)
+	StakeCheckInterval string `json:"stake_check_interval"`
+
+	// If the validator has less than this amount of eth, we send log warnings
+	EthLowThreshold float64 `json:"eth_low_threshold"`
+
+	// Minimum balance to leave on the validator account at all times regardless of the sell settings
+	// Use this to ensure we have enough balance to cover validator min stake topups in future
+	MinBasetokenThreshold float64 `json:"min_basetoken_threshold"`
+
+	// Auto sell settings (TODO: break out into own struct)
+	// Auto sell check interval, in seconds
+	// by default, auto sell will sell enough aius to cover the gas used since the last sell
+	SellInterval int `json:"sell_interval"`
+	// Extra buffer to sell, e.g. 1.5 means sell 1.5 times the amount of tokens
+	SellBuffer float64 `json:"sell_buffer"`
+	// An additional amount of AIUS in Eth terms to sell
+	SellProfitInEth float64 `json:"sell_profit_in_eth"`
+	// if we should sell all tokens if the token balance is over the threshold
+	SellAllOverThreshold bool `json:"sell_all_over_threshold"`
+	// Minimum amount of tokens to sell
+	SellMinAmount float64 `json:"sell_min_amount"`
+	// Maximum amount of tokens to sell
+	SellMaxAmount float64 `json:"sell_max_amount"`
+	// If this value is > 0 then we want to ensure the balance of ETH reaches this target
+	// so we weant to keep selling all the AIUS until we reach this target (over the min threshold)
+	SellEthBalanceTarget float64 `json:"sell_eth_bal_target"`
+
+	// TreasurySplit is the percentage of the rewards to send to the treasury
+	TreasurySplit float64 `json:"treasury_split"`
+	// TreasuryAddress is the address of the treasury
+	TreasuryAddress ethcommon.Address `json:"treasury_address"`
+
+	// PrivateKeys is a list of 1 or more private keys to use for each validator
+	PrivateKeys []string `json:"private_keys"`
 }
 
 type BatchTasks struct {
@@ -92,25 +133,25 @@ type BatchTasks struct {
 }
 
 type BatchConfig struct {
-	MinBatchSize    int `json:"min_batch_size"`
-	MaxBatchSize    int `json:"max_batch_size"`
+	MinBatchSize    int `json:"min_batch_size"`    // minimum number of tasks to include in a batch
+	MaxBatchSize    int `json:"max_batch_size"`    // maximum number of tasks to include in a batch
 	NumberOfBatches int `json:"number_of_batches"` // number of batches to send out at once
 }
 
 type SolverConfig struct {
 	Enabled                 bool             `json:"enabled"`
-	CommitmentsAndSolutions CommitmentOption `json:"commitments_and_solutions"` // none, both, commitments
+	CommitmentsAndSolutions CommitmentOption `json:"commitments_and_solutions"` // one of: "donothing", "doboth", "docommitments", "dosolutions"
 	CommitmentBatch         BatchConfig      `json:"commitment_batch"`
 	SolutionBatch           BatchConfig      `json:"solution_batch"`
-	ConcurrentBatches       bool             `json:"concurrent_batches"`
+	ConcurrentBatches       bool             `json:"concurrent_batches"`       // if true, submit multiple batches of commitments and solutions concurrently (requires multiple accounts)
 	ProfitMode              string           `json:"profit_mode"`              // profit mode to use for batch operations
 	MinProfit               float64          `json:"min_profit"`               // minimum profit in USD to perform batch operations
-	MaxProfit               float64          `json:"max_profit"`               // minimum profit in USD to perform batch operations
+	MaxProfit               float64          `json:"max_profit"`               // maximum profit in USD to perform batch operations
 	PauseStakeBufferLevel   float64          `json:"pause_stake_buffer_level"` // pause submitting commits/solutions if the buffer = (current stake - min stake) is below this level
-	UsePolling              bool             `json:"use_polling"`              // use polling to check profit and submit txes
-	PollingTime             string           `json:"polling_time"`
-	BatchMode               int              `json:"batch_mode"`               // 0: no batch, 1 - normal batching using storage and polling, 2 - batch manually
-	NoChecks                bool             `json:"no_checks"`                // no checks on the tasks, just submit them
+	UsePolling              bool             `json:"use_polling"`              // use polling to check profit and submit txes if false, new block triggers batching
+	PollingTime             string           `json:"polling_time"`             // polling interval for profit checks and batching as "1m", "5m", "1h", etc..
+	BatchMode               int              `json:"batch_mode"`               // 0: no batch, single commitment/solution cycle, 1 - normal batching using storage and polling, 2 - batch manually (not used!)
+	NoChecks                bool             `json:"no_checks"`                // perform no onchain checks on the tasks/commitments/solutions, just submit them
 	ErrorMaxRetries         int              `json:"error_max_retries"`        // max retries for tx errors
 	ErrorBackoffTime        float64          `json:"error_backoff"`            // sleep time between retries
 	ErrorBackofMultiplier   float64          `json:"error_backoff_multiplier"` // backoff multiplier tx errors
@@ -134,21 +175,14 @@ type Automine struct {
 
 type Blockchain struct {
 	PrivateKey    string   `json:"private_key"`
-	RPCURL        string   `json:"rpc_url"`         // main rpc used for blockchain streaming and sending transactions
-	SenderRPCURL  string   `json:"sender_rpc_url"`  // if set, this rpc is used for sending txes
-	ClientRPCURLs []string `json:"client_rpc_urls"` // array of urls to used to send same tx
-	EthersGas     bool     `json:"use_ethers_gas_oracle"`
-	CacheNonce    bool     `json:"cache_nonce"`
-	BasefeeX      float64  `json:"basefee_x"` // basefee multiplier
-	ForceGas      bool     `json:"gas_override"`
-	GasOverride   float64  `json:"gas_override_gwei"`
-}
-
-type Redis struct {
-	Host     string `json:"host"`
-	Username string `json:"username"`
-	Password string `json:"password"`
-	DB       int    `json:"db"`
+	RPCURL        string   `json:"rpc_url"`               // main rpc used for blockchain streaming and sending transactions
+	SenderRPCURL  string   `json:"sender_rpc_url"`        // if set, this rpc is used for sending txes
+	ClientRPCURLs []string `json:"client_rpc_urls"`       // array of urls to used to send same tx
+	EthersGas     bool     `json:"use_ethers_gas_oracle"` // use same gas oracle as ethers.js
+	CacheNonce    bool     `json:"cache_nonce"`           // cache the nonce for the sender account
+	BasefeeX      float64  `json:"basefee_x"`             // basefee multiplier
+	ForceGas      bool     `json:"gas_override"`          // force the use of a specific gas price
+	GasOverride   float64  `json:"gas_override_gwei"`     // gas price to use if gas override is enabled in gwei
 }
 
 type RPC struct {
@@ -163,26 +197,24 @@ type Input struct {
 }
 
 type Claimer struct {
-	Enabled         bool    `json:"enabled"`
-	NumberOfBatches int     `json:"number_of_batches"` // number of batches to send out at once
-	MaxClaims       int     `json:"max_claims_per_batch"`
-	MinClaims       int     `json:"min_claims_per_batch"`
-	Delay           int     `json:"delay"`
-	ValidateClaims  bool    `json:"validate_claims"`
-	MinReward       float64 `json:"min_reward"`
-	MaxGas          float64 `json:"max_claim_gas"`
-	SortByCost      bool    `json:"sort_by_cost"`
+	Enabled         bool    `json:"enabled"`              // solution claimer enabled
+	NumberOfBatches int     `json:"number_of_batches"`    // number of batches to send out at once
+	MaxClaims       int     `json:"max_claims_per_batch"` // maximum number of claims per batch
+	MinClaims       int     `json:"min_claims_per_batch"` // minimum number of claims per batch
+	Delay           int     `json:"delay"`                // delay between claims in seconds
+	ValidateClaims  bool    `json:"validate_claims"`      // validate the claims onchain
+	MinReward       float64 `json:"min_reward"`           // minimum reward to claim a task
+	MaxGas          float64 `json:"max_claim_gas"`        // maximum gas to use for a claim
+	SortByCost      bool    `json:"sort_by_cost"`         // sort the claims by cost
 	// Maximum amount of claims to buffer before submitting them regardless of min reward
 	MaxClaimsBuffer int     `json:"max_claims_buffer"`
 	ClaimMinReward  float64 `json:"claim_min_reward"` // if reward is this level claim regardless
 	//  claim when staked amount approaches stake min level
 	ClaimOnApproachMinStake bool    `json:"claim_on_approach"`
 	MinStakeBufferLevel     float64 `json:"stake_buffer_level"`
-	MinBatchProfit          float64 `json:"min_batch_profit"` // lowest profit to claim a batch
-	// hoard claims
-	HoardMode bool `json:"hoard_mode"`
-	// max amount to hoard
-	HoardMaxQueueSize int `json:"hoard_max_queue_size"`
+	MinBatchProfit          float64 `json:"min_batch_profit"`     // lowest profit to claim a batch
+	HoardMode               bool    `json:"hoard_mode"`           // hoard claims when gas price is low
+	HoardMaxQueueSize       int     `json:"hoard_max_queue_size"` // max amount to hoard
 }
 
 type ML struct {

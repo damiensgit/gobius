@@ -48,7 +48,7 @@ type Services struct {
 	IpfsOracle         ipfs.OracleClient
 }
 
-func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients []*client.Client, sql *sql.DB, logger *zerolog.Logger, cfg *config.AppConfig, ipfsOracle ipfs.OracleClient, appContext context.Context) (context.Context, error) {
+func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients []*client.Client, sql *sql.DB, logger *zerolog.Logger, cfg *config.AppConfig, ipfsOracle ipfs.OracleClient, appContext, appQuit context.Context) (context.Context, error) {
 
 	ownerAccount, err := account.NewAccount(cfg.Blockchain.PrivateKey, rpc, appContext, cfg.Blockchain.CacheNonce)
 	if err != nil {
@@ -172,7 +172,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 		cfg.BaseConfig.BaseToken,
 		logger)
 
-	taskMetrics := metrics.NewTaskTracker()
+	taskMetrics := metrics.NewTaskTracker(appQuit)
 
 	input, err := json.Marshal(cfg.Strategies.Automine.Input)
 	if err != nil {

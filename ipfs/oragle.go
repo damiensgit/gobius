@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/ethereum/go-ethereum/common"
 )
 
 // SignRequest represents the request body for the oracle API
@@ -17,8 +19,8 @@ type SignRequest struct {
 
 // SignatureResponse represents a single signature in the response
 type SignatureResponse struct {
-	Signer    string `json:"signer"`
-	Signature string `json:"signature"`
+	Signer    common.Address `json:"signer"`
+	Signature string         `json:"signature"`
 }
 
 // OracleClient defines the interface for interacting with the IPFS oracle
@@ -93,7 +95,7 @@ func NewMockOracleClient() *MockOracleClient {
 		MockResponses: make(map[string][]SignatureResponse),
 		DefaultResponse: []SignatureResponse{
 			{
-				Signer:    "0x0",
+				Signer:    common.HexToAddress("0x0"),
 				Signature: "0xB00BA",
 			},
 		},

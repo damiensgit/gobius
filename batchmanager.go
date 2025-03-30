@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"gobius/account"
+	"gobius/bindings/arbiusrouterv1"
 	"gobius/bindings/engine"
 	"gobius/client"
 	task "gobius/common"
@@ -80,7 +81,7 @@ type BatchTransactionManager struct {
 	signalCommitmentEvent         common.Hash
 	solutionSubmittedEvent        common.Hash
 	taskSubmittedEvent            common.Hash
-	batchMode                     int
+	batchMode                     int // 0 - single commitment/soution cycle with no batching, 1 - normal batch system, 2 - do not use this mode
 	commitments                   [][32]byte
 	solutions                     []BatchSolution
 	encodedTaskData               []byte
@@ -1686,6 +1687,10 @@ func (tm *BatchTransactionManager) BatchSolutions() error {
 	return nil
 }
 
+func (tm *BatchTransactionManager) SubmitIpfsCid(validator common.Address, taskId task.TaskId, cid []byte) error {
+	return tm.services.TaskStorage.AddIpfsCid(taskId, cid)
+}
+
 func (tm *BatchTransactionManager) SignalCommitment(validator common.Address, taskId task.TaskId, commitment [32]byte) error {
 	switch tm.batchMode {
 	case 2:
@@ -1699,7 +1704,7 @@ func (tm *BatchTransactionManager) SignalCommitment(validator common.Address, ta
 		if err != nil {
 			tm.services.Logger.Error().Err(err).Msg("error adding commitment to storage")
 		}
-
+		return err
 	case 0:
 		return tm.singleSignalCommitment(taskId, commitment)
 	default:
@@ -2156,8 +2161,11 @@ func (m *BatchTransactionManager) SubmitContestation(validator common.Address, t
 }
 
 func (tm *BatchTransactionManager) Start(appQuit context.Context) error {
-	tm.cumulativeGasUsed.Start()
 
+	tm.wg.Add(1)
+	go tm.cumulativeGasUsed.Start(appQuit, tm.wg)
+
+	// if the validator stake / balance check is enabled, start the validator stake / balance check processor
 	if tm.services.Config.ValidatorConfig.StakeCheck {
 		stakeCheckInterval, err := time.ParseDuration(tm.services.Config.ValidatorConfig.StakeCheckInterval)
 		if err != nil {
@@ -2170,6 +2178,7 @@ func (tm *BatchTransactionManager) Start(appQuit context.Context) error {
 		tm.services.Logger.Warn().Msg("validator stake / balance checks are disabled!")
 	}
 
+	// if the ipfs incentive claim is enabled, start the ipfs claim processor
 	if tm.services.Config.IPFS.IncentiveClaim {
 		claimInterval, err := time.ParseDuration(tm.services.Config.IPFS.ClaimInterval)
 		if err != nil {
@@ -2180,6 +2189,8 @@ func (tm *BatchTransactionManager) Start(appQuit context.Context) error {
 		go tm.startIpfsClaimProcessor(appQuit, tm.wg, claimInterval)
 	}
 
+	// start the batch claim processor
+	// 1: normal batch system
 	switch tm.batchMode {
 	case 1:
 		if tm.services.Config.Miner.UsePolling {
@@ -2190,6 +2201,7 @@ func (tm *BatchTransactionManager) Start(appQuit context.Context) error {
 			tm.wg.Add(1)
 			go tm.processBatchPoller(appQuit, tm.wg, d)
 		} else {
+			// process batch on block trigger (this hits external apis harder and not recommended)
 			tm.wg.Add(1)
 			go tm.processBatchBlockTrigger(appQuit, tm.wg)
 		}
@@ -2390,11 +2402,11 @@ func (tm *BatchTransactionManager) GetProfitPerDay() float64 {
 // ProcessIpfsClaims queries the database for stored IPFS CIDs, gets signatures
 // from the oracle and submits claims on-chain
 // TODO: add support for querying other public IPFS providers for the Cid first to improve propagation speed before claiming
-func (tm *BatchTransactionManager) ProcessIpfsClaims(ctx context.Context) error {
+func (tm *BatchTransactionManager) processIpfsClaimsWithAccount(account *account.Account, ctx context.Context) error {
 	tm.Lock()
 	defer tm.Unlock()
 
-	// Get all IPFS entries from the database that haven't been claimed (oldest first)
+	// Get all Ipfs entries from the database that haven't been claimed (oldest first)
 	// TODO: make batch size configurable
 	ipfsEntries, err := tm.services.TaskStorage.GetIpfsCids(10)
 	if err != nil {
@@ -2403,13 +2415,15 @@ func (tm *BatchTransactionManager) ProcessIpfsClaims(ctx context.Context) error 
 	}
 
 	if len(ipfsEntries) == 0 {
-		tm.services.Logger.Debug().Msg("no unclaimed ipfs entries to process")
+		tm.services.Logger.Info().Msg("no unclaimed ipfs entries to process")
 		return nil
 	}
 
 	tm.services.Logger.Info().Int("count", len(ipfsEntries)).Msg("processing ipfs claim entries")
 
 	oracleClient := tm.services.IpfsOracle
+
+	gasPrice, gasFeeCap, gasFeeTip, _ := account.Client.GasPriceOracle(false)
 
 	for _, entry := range ipfsEntries {
 		// Check if we should stop processing
@@ -2490,16 +2504,45 @@ func (tm *BatchTransactionManager) ProcessIpfsClaims(ctx context.Context) error 
 			Str("incentiveAmount", incentiveAmount.String()).
 			Msg("submitting ipfs claim on-chain")
 
-		// TODO: Add call to the actual contract method to claim the IPFS incentive
-		// Pass the signatures array and the validator address
-		// var receipt *types.Receipt
-		// var claimErr error
+		// convert signatures to arbiusrouterv1.Signature
+		arbiusSignatures := make([]arbiusrouterv1.Signature, len(signatures))
+		for i, signature := range signatures {
+			arbiusSignatures[i] = arbiusrouterv1.Signature{
+				Signer:    signature.Signer,
+				Signature: common.FromHex(signature.Signature),
+			}
+		}
 
-		// For now, simulate a successful claim
-		success := true
+		opts := account.GetOptsWithoutNonceInc(0, gasPrice, gasFeeCap, gasFeeTip)
+		tx, err := tm.services.ArbiusRouter.ClaimIncentive(opts, entry.TaskId, arbiusSignatures)
+		if err != nil {
+			tm.services.Logger.Error().Err(err).Str("taskId", taskIdStr).Msg("failed to submit ipfs claim on-chain")
+			continue
+		}
+
+		var success bool
+
+		// special case for mock router contract
+		if *tx.To() == (common.Address{}) {
+			tm.services.Logger.Info().Str("taskId", taskIdStr).Msg("mock router contract, skipping confirmation check")
+			success = true
+		} else {
+
+			var receipt *types.Receipt
+
+			receipt, success, _, err = account.WaitForConfirmedTx(tm.services.Logger, tx)
+			if err != nil {
+				tm.services.Logger.Error().Err(err).Str("taskId", taskIdStr).Msg("failed to wait for ipfs claim on-chain")
+				continue
+			}
+
+			if receipt != nil {
+				tm.services.Logger.Info().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("ipfs claim tx completed!")
+			}
+		}
 
 		if success {
-			// Mark as claimed in database
+			// delete from database
 			if err := tm.services.TaskStorage.DeleteIpfsCid(entry.TaskId); err != nil {
 				tm.services.Logger.Error().Err(err).Str("taskId", taskIdStr).Msg("failed to mark entry as claimed")
 			}
@@ -2516,26 +2559,24 @@ func (tm *BatchTransactionManager) ProcessIpfsClaims(ctx context.Context) error 
 
 // StartIpfsClaimProcessor starts a background process to periodically check for and process IPFS claims
 func (tm *BatchTransactionManager) startIpfsClaimProcessor(appQuit context.Context, wg *sync.WaitGroup, claimInterval time.Duration) {
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		ticker := time.NewTicker(claimInterval)
-		defer ticker.Stop()
+	defer wg.Done()
+	ticker := time.NewTicker(claimInterval)
+	defer ticker.Stop()
 
-		tm.services.Logger.Info().Msgf("started ipfs claim processor with interval %s", claimInterval)
+	tm.services.Logger.Info().Msgf("started ipfs claim processor with interval %s", claimInterval)
 
-		for {
-			select {
-			case <-appQuit.Done():
-				tm.services.Logger.Info().Msg("shutting down ipfs claim processor")
-				return
-			case <-ticker.C:
-				if err := tm.ProcessIpfsClaims(appQuit); err != nil {
-					if err != context.Canceled {
-						tm.services.Logger.Error().Err(err).Msg("error processing ipfs claims")
-					}
+	for {
+		select {
+		case <-appQuit.Done():
+			tm.services.Logger.Info().Msg("shutting down ipfs claim processor")
+			return
+		case <-ticker.C:
+			// TODO: make this use task accounts instead of sender account
+			if err := tm.processIpfsClaimsWithAccount(tm.services.SenderOwnerAccount, appQuit); err != nil {
+				if err != context.Canceled {
+					tm.services.Logger.Error().Err(err).Msg("error processing ipfs claims")
 				}
 			}
 		}
-	}()
+	}
 }

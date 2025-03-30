@@ -18,6 +18,7 @@ import (
 type IValidator interface {
 	SignalCommitment(validator common.Address, taskId task.TaskId, commitment [32]byte) error
 	SubmitSolution(validator common.Address, taskId task.TaskId, cid []byte) error
+	SubmitIpfsCid(validator common.Address, taskId task.TaskId, cid []byte) error
 	GetNextValidatorAddress() common.Address
 	InitiateValidatorWithdraw(validator common.Address, amount float64) error
 	ValidatorWithdraw(validator common.Address) error
@@ -358,7 +359,7 @@ func (v *Validator) ProcessValidatorStake(baseTokenBalance *big.Int) {
 
 	depositAmount := new(big.Int)
 
-	// If initial stake > 0 and the staked amount is zero (fresh or emptied validator) then top up the stake to initial stake value
+	// If initial stake > 0 and the staked amount is less than the initial stake (say a fresh or emptied validator) then top up the stake to initial stake value
 	if v.services.Config.ValidatorConfig.InitialStake > 0 && stakedAmountFloat < v.services.Config.ValidatorConfig.InitialStake {
 		if v.services.Config.ValidatorConfig.InitialStake <= validatorMinFloat {
 			v.services.Logger.Error().Msg("⚠️ initial stake amount is less than validator minimum")
@@ -366,9 +367,6 @@ func (v *Validator) ProcessValidatorStake(baseTokenBalance *big.Int) {
 		}
 		depositAmount = v.services.Config.BaseConfig.BaseToken.FromFloat(v.services.Config.ValidatorConfig.InitialStake - stakedAmountFloat)
 	} else if v.services.Config.ValidatorConfig.StakeBufferStakeAmount > 0 {
-
-		stakedAmountFloat := v.services.Config.BaseConfig.BaseToken.ToFloat(stakedAmount)
-		validatorMinFloat := v.services.Config.BaseConfig.BaseToken.ToFloat(validatorMin)
 
 		if stakedAmountFloat-validatorMinFloat >= v.services.Config.ValidatorConfig.StakeBufferStakeAmount {
 			v.services.Logger.Info().Msg("✅ staked amount is sufficient")
@@ -393,7 +391,6 @@ func (v *Validator) ProcessValidatorStake(baseTokenBalance *big.Int) {
 			return
 		}
 
-		// (60.0952 * 100 / (100-10))=66.772444444444444444
 		// calculate the minimum with buffer
 		minWithBuffer := new(big.Int).Mul(validatorMin, big.NewInt(100))
 		minWithBuffer = new(big.Int).Div(minWithBuffer, big.NewInt(int64(100-v.services.Config.ValidatorConfig.StakeBufferPercent)))
