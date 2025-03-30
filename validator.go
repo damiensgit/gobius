@@ -43,7 +43,7 @@ func NewValidator(ctx context.Context, privateKey string, client *client.Client,
 		panic("could not get services from context")
 	}
 
-	account, err := account.NewAccount(privateKey, client, ctx, services.Config.Blockchain.CacheNonce)
+	account, err := account.NewAccount(privateKey, client, ctx, services.Config.Blockchain.CacheNonce, services.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -90,7 +90,7 @@ func (v *Validator) InitiateValidatorWithdraw(amount float64) error {
 	}
 
 	// Wait for the transaction to be mined
-	_, success, _, _ := v.Account.WaitForConfirmedTx(v.services.Logger, tx)
+	_, success, _, _ := v.Account.WaitForConfirmedTx(tx)
 	if !success {
 		return err
 	}
@@ -119,7 +119,7 @@ func (v *Validator) VoteOnContestation(taskId task.TaskId, yea bool) error {
 	}
 
 	// Wait for the transaction to be mined
-	_, success, _, _ := v.Account.WaitForConfirmedTx(v.services.Logger, tx)
+	_, success, _, _ := v.Account.WaitForConfirmedTx(tx)
 	if !success {
 		return err
 	}
@@ -139,7 +139,7 @@ func (v *Validator) SubmitContestation(taskId task.TaskId) error {
 	}
 
 	// Wait for the transaction to be mined
-	_, success, _, _ := v.Account.WaitForConfirmedTx(v.services.Logger, tx)
+	_, success, _, _ := v.Account.WaitForConfirmedTx(tx)
 	if !success {
 		return err
 	}
@@ -188,7 +188,7 @@ func (v *Validator) CancelValidatorWithdraw(index int64) error {
 	}
 
 	// Wait for the transaction to be mined
-	_, success, _, _ := v.Account.WaitForConfirmedTx(v.services.Logger, tx)
+	_, success, _, _ := v.Account.WaitForConfirmedTx(tx)
 	if !success {
 		return err
 	}
@@ -242,7 +242,7 @@ func (v *Validator) ValidatorWithdraw() error {
 			}
 
 			// Wait for the transaction to be mined
-			_, success, _, _ := v.Account.WaitForConfirmedTx(v.services.Logger, tx)
+			_, success, _, _ := v.Account.WaitForConfirmedTx(tx)
 			if !success {
 				return err
 			}
@@ -343,7 +343,7 @@ func (v *Validator) ProcessValidatorStake(baseTokenBalance *big.Int) {
 			return
 		}
 		// Wait for the transaction to be mined
-		_, success, _, _ := v.services.SenderOwnerAccount.WaitForConfirmedTx(v.services.Logger, tx)
+		_, success, _, _ := v.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 		if !success {
 			return
 		}
@@ -425,7 +425,7 @@ func (v *Validator) ProcessValidatorStake(baseTokenBalance *big.Int) {
 	}
 
 	// Wait for the transaction to be mined
-	_, success, _, _ := v.services.SenderOwnerAccount.WaitForConfirmedTx(v.services.Logger, tx)
+	_, success, _, _ := v.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 	if !success {
 		return
 	}

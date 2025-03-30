@@ -494,7 +494,7 @@ func main() {
 		ipfsOracle = ipfs.NewMockOracleClient()
 	}
 
-	appContext, err := NewApplicationContext(rpcClient, txRpcClient, clients, sqlite, &logger, cfg, ipfsOracle, context.Background(), appQuit)
+	appContext, err := NewApplicationContext(rpcClient, txRpcClient, clients, sqlite, logger, cfg, ipfsOracle, context.Background(), appQuit)
 
 	if err != nil {
 		logger.Fatal().Err(err).Msg("could not create application context")
@@ -687,7 +687,7 @@ func main() {
 		logger.Fatal().Err(err).Msg("error connecting to IPFS")
 	}
 
-	models.InitModelRegistry(ipfsClient, cfg, &logger)
+	models.InitModelRegistry(ipfsClient, cfg, logger)
 
 	modelToMine := models.ModelRegistry.GetModel(cfg.Strategies.Model)
 	if modelToMine == nil {
@@ -863,14 +863,27 @@ func main() {
 						Payload: gpuMetrics,
 					}
 
-					// // Update metrics
-					// dashboard.updates <- StateUpdate{
-					// 	Type: UpdateValidatorMetrics,
-					// 	Payload: ValidatorMetrics{
-					// 		SessionTime:      time.Hour.String(),
-					// 		SolvedLastMinute: int64(count % 10),
-					// 	},
-					// }
+					// Update validator metrics
+					validatorMetrics := tui.ValidatorMetrics{
+						SessionTime:      manager.GetSessionTime(),      // Call new manager method
+						SolvedLastMinute: manager.GetSolvedLastMinute(), // Call new manager method
+						SolutionsLastMinute: struct {
+							Success int64
+							Total   int64
+							Rate    float64
+						}{
+							Success: manager.GetSuccessCount(), // Call new manager method
+							Total:   manager.GetTotalCount(),   // Call new manager method
+							Rate:    manager.GetSuccessRate(),  // Call new manager method
+						},
+						AverageSolutionRate:    manager.GetAverageSolutionRate(),    // Call new manager method
+						AverageSolutionsPerMin: manager.GetAverageSolutionsPerMin(), // Call new manager method
+						AverageSolvesPerMin:    manager.GetAverageSolvesPerMin(),    // Call new manager method
+					}
+					dashboard.Updates <- tui.StateUpdate{
+						Type:    tui.UpdateValidatorMetrics,
+						Payload: validatorMetrics,
+					}
 
 					// // Update financial metrics
 					// dashboard.updates <- StateUpdate{

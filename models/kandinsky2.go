@@ -45,7 +45,7 @@ type Kandinsky2Model struct {
 	config  *config.AppConfig
 	//url     string
 	client *http.Client
-	logger *zerolog.Logger
+	logger zerolog.Logger
 }
 
 // Ensure Kandinsky2Model implements the Model interface.
@@ -96,12 +96,7 @@ var Kandinsky2ModelTemplate = Model{
 	},
 }
 
-func NewKandinsky2Model(client ipfs.IPFSClient, appConfig *config.AppConfig, logger *zerolog.Logger) *Kandinsky2Model {
-
-	if logger == nil {
-		nopLogger := zerolog.Nop()
-		logger = &nopLogger
-	}
+func NewKandinsky2Model(client ipfs.IPFSClient, appConfig *config.AppConfig, logger zerolog.Logger) *Kandinsky2Model {
 
 	model, ok := appConfig.BaseConfig.Models["kandinsky2"]
 	if !ok {
@@ -296,7 +291,7 @@ func (m *Kandinsky2Model) GetFiles(gpu *common.GPU, taskid string, input interfa
 
 func (m *Kandinsky2Model) GetCID(gpu *common.GPU, taskid string, input interface{}) ([]byte, error) {
 	//start := time.Now()
-	paths, err := utils.ExpRetry(func() (interface{}, error) {
+	paths, err := utils.ExpRetry(m.logger, func() (interface{}, error) {
 		return m.GetFiles(gpu, taskid, input)
 	}, 3, 1000)
 	//elapsed := time.Since(start)
@@ -307,7 +302,7 @@ func (m *Kandinsky2Model) GetCID(gpu *common.GPU, taskid string, input interface
 
 	//start = time.Now()
 	// TODO: calculate cid and pin async
-	cid58, err := utils.ExpRetry(func() (interface{}, error) {
+	cid58, err := utils.ExpRetry(m.logger, func() (interface{}, error) {
 		return m.ipfs.PinFilesToIPFS(taskid, paths.([]ipfs.IPFSFile))
 	}, 3, 1000)
 	//elapsed = time.Since(start)

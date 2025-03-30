@@ -2,12 +2,12 @@ package utils
 
 import (
 	"context"
-	"fmt"
-	"log"
 	"math/rand"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/rs/zerolog"
 )
 
 // exponentially increasing retry
@@ -19,13 +19,13 @@ import (
 // If the function succeeds, it returns the result and a nil error.
 // If the function fails after all retries, it returns the last result and the last error encountered.
 // TODO: fix logging here
-func ExpRetry(fn func() (interface{}, error), tries int, base float64) (interface{}, error) {
+func ExpRetry(logger zerolog.Logger, fn func() (any, error), tries int, base float64) (any, error) {
 	var err error
-	var result interface{}
+	var result any
 	totalNonceRetries := 1
 	backoff := base
 
-	for retry := 0; retry < tries; retry++ {
+	for range tries {
 		result, err = fn()
 		if err == nil {
 			return result, nil
@@ -33,7 +33,7 @@ func ExpRetry(fn func() (interface{}, error), tries int, base float64) (interfac
 		if strings.Contains(err.Error(), "solution already submitted") {
 			return result, err
 		} else if strings.Contains(err.Error(), "nonce too low") {
-			log.Printf("Error: %v, retries: %d", err, totalNonceRetries)
+			logger.Error().Err(err).Int("retries", totalNonceRetries).Msg("nonce too low")
 			time.Sleep(time.Duration(100) * time.Millisecond)
 			tries += 1
 			totalNonceRetries += 1
@@ -53,39 +53,39 @@ func ExpRetry(fn func() (interface{}, error), tries int, base float64) (interfac
 
 		sleepDuration := time.Duration(backoff) * time.Millisecond
 
-		log.Printf("retry request failed, retrying in %s seconds", sleepDuration)
-		log.Printf("Error: %v", err)
+		logger.Warn().Dur("sleep_duration", sleepDuration).Err(err).Msg("retry request failed, retrying")
+
 		//time.Sleep(time.Duration(seconds * float64(time.Second)))
 
 		time.Sleep(sleepDuration)
 		backoff *= 1.5 // Double the backoff time
 	}
 
-	log.Printf("retry request failed %d times", tries)
+	logger.Error().Int("tries", tries).Msg("retry request failed after multiple attempts")
 	return result, err
 }
 
-func ExpRetryWithNonce(fn func(nonce uint64) (interface{}, error), tries int, base, backoffMultiplier float64) (interface{}, error) {
-	return ExpRetryWithNonceContext(context.Background(), fn, tries, base, backoffMultiplier)
+func ExpRetryWithNonce(logger zerolog.Logger, fn func(nonce uint64) (any, error), tries int, base, backoffMultiplier float64) (any, error) {
+	return ExpRetryWithNonceContext(context.Background(), logger, fn, tries, base, backoffMultiplier)
 }
 
 // As ExpRetry, but with a nonce handling:
 // if we get "nonce too low" error we try to extract the expected nonce from the error message and retry with it
-func ExpRetryWithNonceContext(ctx context.Context, fn func(nonce uint64) (interface{}, error), tries int, base, backoffMultiplier float64) (interface{}, error) {
+func ExpRetryWithNonceContext(ctx context.Context, logger zerolog.Logger, fn func(nonce uint64) (any, error), tries int, base, backoffMultiplier float64) (any, error) {
 	var err error
-	var result interface{}
+	var result any
 	totalNonceRetries := 1
 	backoff := base
 
 	nonce := uint64(0)
 
-	for retry := 0; retry < tries; retry++ {
+	for range tries {
 		result, err = fn(nonce)
 		if err == nil {
 			return result, nil
 		}
 		if ctx.Err() != nil {
-			log.Printf("CONTEXT CANCELLED OR ERRORED: %s", ctx.Err().Error())
+			logger.Error().Err(ctx.Err()).Msg("Context cancelled or errored")
 			return result, ctx.Err()
 		}
 		if strings.Contains(err.Error(), "solution already submitted") {
@@ -98,21 +98,22 @@ func ExpRetryWithNonceContext(ctx context.Context, fn func(nonce uint64) (interf
 			///nonce too low: address 0x6c3Db6ef57735B8b62D0bdDa32c94389933d2f5d, tx: 316308 state: 316309 316309-316308=1
 			parts := strings.Split(err.Error(), "state: ")
 			if len(parts) < 2 {
-				log.Println("state not found in error message")
+				logger.Warn().Msg("state not found in error message for nonce adjustment")
 			} else {
 
-				state, err := strconv.Atoi(strings.TrimSpace(parts[1]))
-				if err != nil {
-					log.Println(err.Error())
+				stateStr := strings.Fields(parts[1])[0]
+				state, stateErr := strconv.Atoi(strings.TrimSpace(stateStr))
+				if stateErr != nil {
+					logger.Error().Err(stateErr).Str("state_part", stateStr).Msg("failed to parse state for nonce adjustment")
 				} else {
-					fmt.Println("setting new nonce to:", state)
+					logger.Info().Int("new_nonce", state).Msg("setting new nonce")
 					nonce = uint64(state)
 				}
 			}
 			duration := time.Duration(rand.Intn(30)) * time.Millisecond
 			//duration := time.Duration(300+rand.Intn(250)+25*totalNonceRetries) * time.Millisecond
 			time.Sleep(duration)
-			log.Printf("Error: %v, retries: %d, sleep: %s", err, totalNonceRetries, duration)
+			logger.Warn().Err(err).Int("retries", totalNonceRetries).Dur("sleep_duration", duration).Msg("Nonce error, retrying")
 			tries++
 			totalNonceRetries++
 			if totalNonceRetries > 25 {
@@ -129,21 +130,15 @@ func ExpRetryWithNonceContext(ctx context.Context, fn func(nonce uint64) (interf
 			// 	log.Printf("Error: %v", err)
 			// 	continue
 		}
-		// seconds := math.Pow(base, float64(retry))
-		// log.Printf("retry request failed, retrying in %f seconds", seconds)
-		// log.Printf("Error: %v", err)
-		// time.Sleep(time.Duration(seconds * float64(time.Second)))
 		sleepDuration := time.Duration(backoff) * time.Millisecond
 
-		log.Printf("retry request failed, retrying in %s", sleepDuration)
-		log.Printf("Error: %v", err)
-		//time.Sleep(time.Duration(seconds * float64(time.Second)))
+		logger.Warn().Err(err).Dur("sleep_duration", sleepDuration).Msg("retry request failed, retrying")
 
 		time.Sleep(sleepDuration)
 		backoff *= backoffMultiplier // Double the backoff time
 	}
 
-	log.Printf("retry request failed %d times", tries)
+	logger.Error().Int("tries", tries).Msg("retry request failed after multiple attempts")
 	return result, err
 }
 
@@ -157,15 +152,3 @@ func Map[T, U any](data []T, f func(T) U) []U {
 
 	return res
 }
-
-// var cache *lru.Cache
-
-// func init() {
-// 	var err error
-// 	cache, err = lru.New(128) // Create a cache with a maximum size of 128 items
-// 	if err != nil {
-// 		panic(err)
-// 	}
-// }
-
-//var nonceMu = sync.Mutex{}

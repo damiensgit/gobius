@@ -39,7 +39,7 @@ type ParaswapManager struct {
 	account           *account.Account
 	baseToken         *erc20.TokenERC20
 	baseTokenContract *basetoken.BaseToken
-	logger            *zerolog.Logger
+	logger            zerolog.Logger
 }
 
 type PriceResponse struct {
@@ -72,7 +72,7 @@ type TransactionResponse struct {
 	ChainID  int    `json:"chainId"`
 }
 
-func NewParaswapManager(account *account.Account, baseTokenContract *basetoken.BaseToken, baseToken *erc20.TokenERC20, logger *zerolog.Logger) *ParaswapManager {
+func NewParaswapManager(account *account.Account, baseTokenContract *basetoken.BaseToken, baseToken *erc20.TokenERC20, logger zerolog.Logger) *ParaswapManager {
 	return &ParaswapManager{
 		account:           account,
 		baseToken:         baseToken,

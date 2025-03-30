@@ -939,7 +939,7 @@ func (tm *BatchTransactionManager) processBatch(
 				return err
 			}
 
-			receipt, success, _, _ := account.WaitForConfirmedTx(tm.services.Logger, tx)
+			receipt, success, _, _ := account.WaitForConfirmedTx(tx)
 
 			txCost := new(big.Int)
 
@@ -1168,7 +1168,7 @@ func (tm *BatchTransactionManager) processBatch(
 					return err
 				}
 
-				receipt, success, _, _ := validatorToSendSubmits.Account.WaitForConfirmedTx(tm.services.Logger, tx)
+				receipt, success, _, _ := validatorToSendSubmits.Account.WaitForConfirmedTx(tx)
 
 				txCost := new(big.Int)
 
@@ -1602,7 +1602,7 @@ func (tm *BatchTransactionManager) BatchCommitments() error {
 		return err
 	}
 
-	receipt, success, _, _ := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tm.services.Logger, tx)
+	receipt, success, _, _ := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 
 	if receipt != nil {
 		txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
@@ -1667,7 +1667,7 @@ func (tm *BatchTransactionManager) BatchSolutions() error {
 			return err
 		}
 
-		receipt, success, _, _ := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tm.services.Logger, tx)
+		receipt, success, _, _ := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 
 		if receipt != nil {
 			txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
@@ -1769,7 +1769,7 @@ func (m *BatchTransactionManager) singleSignalCommitment(taskId task.TaskId, com
 	m.services.Logger.Info().Str("taskid", taskIdStr).Uint64("nonce", tx.Nonce()).Str("txhash", tx.Hash().String()).Str("elapsed", elapsed.String()).Msg("signal commitment tx sent")
 
 	go func() {
-		receipt, _, _, _ := m.services.SenderOwnerAccount.WaitForConfirmedTx(m.services.Logger, tx)
+		receipt, _, _, _ := m.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 		if receipt != nil {
 			txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
 			m.services.Logger.Info().Uint64("gas", receipt.GasUsed).Uint64("gas_per_commit", receipt.GasUsed).Msg("**** single commitment gas used *****")
@@ -1843,7 +1843,7 @@ func (m *BatchTransactionManager) singleSubmitSolution(taskId task.TaskId, cid [
 
 		}()
 
-		receipt, success, _, _ := m.services.SenderOwnerAccount.WaitForConfirmedTx(m.services.Logger, tx)
+		receipt, success, _, _ := m.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 
 		if receipt != nil {
 			txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
@@ -1919,7 +1919,7 @@ func (tm *BatchTransactionManager) BulkClaimWithAccount(account *account.Account
 		return nil, err
 	}
 
-	receipt, _, _, err := account.WaitForConfirmedTx(tm.services.Logger, tx)
+	receipt, _, _, err := account.WaitForConfirmedTx(tx)
 
 	if receipt != nil {
 		txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
@@ -1955,7 +1955,7 @@ func (tm *BatchTransactionManager) BulkTasks(account *account.Account, count int
 			return nil, err
 		}
 
-		receipt, success, _, err := account.WaitForConfirmedTx(tm.services.Logger, tx)
+		receipt, success, _, err := account.WaitForConfirmedTx(tx)
 
 		if receipt != nil {
 			gasPerTask := float64(receipt.GasUsed) / float64(count)
@@ -2269,7 +2269,7 @@ func NewBatchTransactionManager(ctx context.Context, wg *sync.WaitGroup) (*Batch
 
 		for _, pk := range services.Config.BatchTasks.PrivateKeys {
 
-			account, err := account.NewAccount(pk, services.SenderOwnerAccount.Client, ctx, services.Config.Blockchain.CacheNonce)
+			account, err := account.NewAccount(pk, services.SenderOwnerAccount.Client, ctx, services.Config.Blockchain.CacheNonce, services.Logger)
 			if err != nil {
 				return nil, err
 			}
@@ -2530,7 +2530,7 @@ func (tm *BatchTransactionManager) processIpfsClaimsWithAccount(account *account
 
 			var receipt *types.Receipt
 
-			receipt, success, _, err = account.WaitForConfirmedTx(tm.services.Logger, tx)
+			receipt, success, _, err = account.WaitForConfirmedTx(tx)
 			if err != nil {
 				tm.services.Logger.Error().Err(err).Str("taskId", taskIdStr).Msg("failed to wait for ipfs claim on-chain")
 				continue

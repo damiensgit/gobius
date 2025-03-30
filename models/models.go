@@ -74,7 +74,7 @@ func (mf *ModelFactory) GetAllModels() []ModelInterface {
 var ModelRegistry *ModelFactory
 
 // InitModelRegistry initializes the model registry with available models
-func InitModelRegistry(client ipfs.IPFSClient, config *config.AppConfig, logger *zerolog.Logger) {
+func InitModelRegistry(client ipfs.IPFSClient, config *config.AppConfig, logger zerolog.Logger) {
 	ModelRegistry = NewModelFactory()
 
 	// Register available models

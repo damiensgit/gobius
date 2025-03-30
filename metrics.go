@@ -32,6 +32,7 @@ type GasMetrics struct {
 	services         *Services
 
 	// TODO: Add more metrics here like tx counts, etc.
+	// TODO: expose metrics to prometheus
 }
 
 func NewMetricsManager(ctx context.Context, d time.Duration) *GasMetrics {
@@ -78,6 +79,7 @@ func NewMetricsManager(ctx context.Context, d time.Duration) *GasMetrics {
 	return gm
 }
 
+// TODO: refactor this into a service factory/broker system?
 func (gm *GasMetrics) Start(appQuit context.Context, wg *sync.WaitGroup) {
 	go gm.updateMetrics(time.Duration(60)*time.Second, appQuit, wg)
 }
@@ -352,7 +354,7 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration, appQuit context.C
 					if tx != nil {
 						gm.services.Logger.Info().Msg("approving AIUS to be sold")
 
-						_, success, _, _ := gm.services.SenderOwnerAccount.WaitForConfirmedTx(gm.services.Logger, tx)
+						_, success, _, _ := gm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 
 						if !success {
 							continue
@@ -368,7 +370,7 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration, appQuit context.C
 						continue
 					}
 
-					_, success, _, _ := gm.services.SenderOwnerAccount.WaitForConfirmedTx(gm.services.Logger, tx)
+					_, success, _, _ := gm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 					if !success {
 						continue
 					}
@@ -403,7 +405,7 @@ func (tm *GasMetrics) transferBasetokens(to common.Address, amount float64) bool
 		return false
 	}
 
-	_, success, _, err := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tm.services.Logger, tx)
+	_, success, _, err := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 
 	if err != nil {
 		tm.services.Logger.Error().Err(err).Msg("error waiting for transfer")

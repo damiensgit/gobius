@@ -40,7 +40,7 @@ type QwenTestModel struct {
 	Filters []MiningFilter
 	config  *config.AppConfig
 	client  *http.Client
-	logger  *zerolog.Logger
+	logger  zerolog.Logger
 	ipfs    ipfs.IPFSClient
 }
 
@@ -81,12 +81,7 @@ var QwenTestModelTemplate = Model{
 	},
 }
 
-func NewQwenTestModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logger *zerolog.Logger) *QwenTestModel {
-
-	if logger == nil {
-		nopLogger := zerolog.Nop()
-		logger = &nopLogger
-	}
+func NewQwenTestModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logger zerolog.Logger) *QwenTestModel {
 
 	model, ok := appConfig.BaseConfig.Models["qwen"]
 	if !ok {
@@ -356,14 +351,14 @@ func (m *QwenTestModel) GetFiles(gpu *common.GPU, taskid string, input any) ([]i
 }
 
 func (m *QwenTestModel) GetCID(gpu *common.GPU, taskid string, input any) ([]byte, error) {
-	paths, err := utils.ExpRetry(func() (any, error) {
+	paths, err := utils.ExpRetry(m.logger, func() (any, error) {
 		return m.GetFiles(gpu, taskid, input)
 	}, 3, 1000)
 	if err != nil {
 		return nil, err
 	}
 
-	cid58, err := utils.ExpRetry(func() (any, error) {
+	cid58, err := utils.ExpRetry(m.logger, func() (any, error) {
 		return m.ipfs.PinFilesToIPFS(taskid, paths.([]ipfs.IPFSFile))
 	}, 3, 1000)
 

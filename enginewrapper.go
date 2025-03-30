@@ -22,10 +22,10 @@ var (
 type EngineWrapper struct {
 	Engine *engine.Engine
 	Voter  *voter.Voter
-	logger *zerolog.Logger
+	logger zerolog.Logger
 }
 
-func NewEngineWrapper(engine *engine.Engine, voter *voter.Voter, logger *zerolog.Logger) *EngineWrapper {
+func NewEngineWrapper(engine *engine.Engine, voter *voter.Voter, logger zerolog.Logger) *EngineWrapper {
 	return &EngineWrapper{
 		Engine: engine,
 		Voter:  voter,
@@ -44,7 +44,7 @@ func (m *EngineWrapper) GetSolution(taskId task.TaskId) (*struct {
 		return m.Engine.Solutions(nil, taskId)
 	}
 
-	result, err := utils.ExpRetry(getSol, 3, 1000)
+	result, err := utils.ExpRetry(m.logger, getSol, 3, 1000)
 	if err != nil {
 		return nil, err
 	}
@@ -78,7 +78,7 @@ func (m *EngineWrapper) LookupTask(taskId task.TaskId) (*struct {
 		return m.Engine.Tasks(nil, taskId)
 	}
 
-	result, err := utils.ExpRetry(getTask, 3, 1000)
+	result, err := utils.ExpRetry(m.logger, getTask, 3, 1000)
 	if err != nil {
 		return nil, err
 	}
@@ -109,7 +109,7 @@ func (m *EngineWrapper) GetValidatorWithdrawPendingAmount(validator common.Addre
 		return m.Engine.ValidatorWithdrawPendingAmount(nil, validator)
 	}
 
-	result, err := utils.ExpRetry(check, 3, 1000)
+	result, err := utils.ExpRetry(m.logger, check, 3, 1000)
 
 	if err != nil {
 		return nil, err
@@ -124,7 +124,7 @@ func (m *EngineWrapper) GetValidatorStaked(validator common.Address) (*big.Int, 
 		return m.Engine.Validators(nil, validator)
 	}
 
-	result, err := utils.ExpRetry(check, 3, 1000)
+	result, err := utils.ExpRetry(m.logger, check, 3, 1000)
 
 	if err != nil {
 		return nil, err
@@ -148,7 +148,7 @@ func (m *EngineWrapper) GetValidatorMinimum() (*big.Int, error) {
 		return m.Engine.GetValidatorMinimum(nil)
 	}
 
-	result, err := utils.ExpRetry(check, 3, 1000)
+	result, err := utils.ExpRetry(m.logger, check, 3, 1000)
 
 	if err != nil {
 		return nil, err
@@ -180,7 +180,7 @@ func (m *EngineWrapper) IsPaused() (bool, error) {
 		return m.Engine.Paused(nil)
 	}
 
-	result, err := utils.ExpRetry(check, 3, 1000)
+	result, err := utils.ExpRetry(m.logger, check, 3, 1000)
 
 	if err != nil {
 		return false, err
@@ -200,7 +200,7 @@ func (m *EngineWrapper) GetContestation(taskId task.TaskId) (*struct {
 		return m.Engine.Contestations(nil, taskId)
 	}
 
-	result, err := utils.ExpRetry(getSol, 3, 1000)
+	result, err := utils.ExpRetry(m.logger, getSol, 3, 1000)
 	if err != nil {
 		return nil, err
 	}

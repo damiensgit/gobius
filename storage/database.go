@@ -20,10 +20,10 @@ type TaskStorageDB struct {
 	queries      *db.Queries
 	minclaimtime time.Duration
 	ctx          context.Context
-	logger       *zerolog.Logger
+	logger       zerolog.Logger
 }
 
-func NewTaskStorageDB(ctx context.Context, sql *sql.DB, minclaimtime time.Duration, logger *zerolog.Logger) *TaskStorageDB {
+func NewTaskStorageDB(ctx context.Context, sql *sql.DB, minclaimtime time.Duration, logger zerolog.Logger) *TaskStorageDB {
 
 	queries := db.New(sql)
 

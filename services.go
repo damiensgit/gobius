@@ -40,7 +40,7 @@ type Services struct {
 	SenderOwnerAccount *account.Account
 	Clients            []*client.Client
 	Config             *config.AppConfig
-	Logger             *zerolog.Logger
+	Logger             zerolog.Logger
 	TaskStorage        *storage.TaskStorageDB
 	AutoMineParams     *SubmitTaskParams
 	Paraswap           *paraswap.ParaswapManager
@@ -48,14 +48,14 @@ type Services struct {
 	IpfsOracle         ipfs.OracleClient
 }
 
-func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients []*client.Client, sql *sql.DB, logger *zerolog.Logger, cfg *config.AppConfig, ipfsOracle ipfs.OracleClient, appContext, appQuit context.Context) (context.Context, error) {
+func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients []*client.Client, sql *sql.DB, logger zerolog.Logger, cfg *config.AppConfig, ipfsOracle ipfs.OracleClient, appContext, appQuit context.Context) (context.Context, error) {
 
-	ownerAccount, err := account.NewAccount(cfg.Blockchain.PrivateKey, rpc, appContext, cfg.Blockchain.CacheNonce)
+	ownerAccount, err := account.NewAccount(cfg.Blockchain.PrivateKey, rpc, appContext, cfg.Blockchain.CacheNonce, logger)
 	if err != nil {
 		return nil, err
 	}
 
-	senderOwnerAccount, err := account.NewAccount(cfg.Blockchain.PrivateKey, senderrpc, appContext, cfg.Blockchain.CacheNonce)
+	senderOwnerAccount, err := account.NewAccount(cfg.Blockchain.PrivateKey, senderrpc, appContext, cfg.Blockchain.CacheNonce, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -94,7 +94,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 
 	if cfg.BaseConfig.TestnetType > 0 {
 		// TODO: this is a hack to check if the contract exists on testnet
-		if err := checkContractExists(cfg.BaseConfig.BulkTasksAddress, senderrpc.Client, logger); err != nil {
+		if err := checkContractExists(cfg.BaseConfig.BulkTasksAddress, senderrpc.Client); err != nil {
 
 			// on local testnet we can deploy the contract
 			// TODO: this is effectively disabled for now until we have a better way to handle it / rewrite contract
@@ -211,7 +211,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 }
 
 // checkContractExists verifies that a contract exists at the specified address
-func checkContractExists(address common.Address, client *ethclient.Client, logger *zerolog.Logger) error {
+func checkContractExists(address common.Address, client *ethclient.Client) error {
 	// Check if the address has code (only contracts have code)
 	code, err := client.CodeAt(context.Background(), address, nil)
 	if err != nil {

@@ -737,7 +737,7 @@ func fundTaskWallets(ctx context.Context, amount float64, minbal float64) {
 
 	for _, pk := range services.Config.BatchTasks.PrivateKeys {
 
-		account, err := account.NewAccount(pk, services.SenderOwnerAccount.Client, ctx, services.Config.Blockchain.CacheNonce)
+		account, err := account.NewAccount(pk, services.SenderOwnerAccount.Client, ctx, services.Config.Blockchain.CacheNonce, services.Logger)
 		if err != nil {
 			services.Logger.Error().Err(err).Msg("error in new account")
 			return
@@ -769,7 +769,7 @@ func fundTaskWallets(ctx context.Context, amount float64, minbal float64) {
 			services.Logger.Error().Err(err).Msg("error sending transfer")
 			return
 		}
-		_, success, _, err := services.SenderOwnerAccount.WaitForConfirmedTx(services.Logger, tx)
+		_, success, _, err := services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 
 		if err != nil {
 			services.Logger.Error().Err(err).Msg("error waiting for transfer")
