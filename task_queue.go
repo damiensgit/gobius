@@ -78,7 +78,7 @@ func (tq *TaskQueue) AddTask(ts *TaskSubmitted) bool {
 	}
 	tq.mu.Unlock()
 
-	tq.logger.Info().Str("task", taskIdStr).Int("queue_size", tq.deque.Len()).Msg("added task to queue")
+	tq.logger.Debug().Str("task", taskIdStr).Int("queue_size", tq.deque.Len()).Msg("added task to queue")
 
 	// Signal workers non-blockingly
 	select {
