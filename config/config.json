@@ -2,16 +2,19 @@
     "baseTokenAddress": "0x4a24B101728e07A52053c13FB4dB2BcF490CAbc3",
     "engineAddress": "0x9b51Ef044d3486A1fB0A2D55A6e0CeeAdd323E66",
     "bulkTasksAddress": "0x216546dBEB669C8Eb85A9EE31669A096B6b1F9ab",
+    "voterAddress": "0x80E9B3dA81258705eC7C3DC89a799b78f2c68968",
+    "veStakingAddress": "0x1c0a14cAC52ebDe9c724e5627162a90A26B85E15",
+    "arbiusRouterAddress": "0x6caF23DC6dAe5EdCc53e4F330B61c420e6c71565",
     "models": {
-      "kandinsky2": {
-        "id": "0x98617a8cd4a11db63100ad44bea4e5e296aecfd78b2ef06aee3e364c7307f212",
+      "qwen-qwq-32b": {
+        "id": "0xdafc13d7e9529e278bf40038524f20841ba8879c0b5d7667d438cd60c64a118d",
         "mineable": true,
         "contracts": {},
         "params": {
-          "addr": "0x0000000000000000000000000000000000000001",
-          "fee": "0",
-          "rate": "1000000000000000000",
-          "cid": "0x1220511fdf0e88fa9adba98a7693cca89b5d9f3181da4815b0f0500aa4315b38d17d"
+          "addr": "0x1298F8A91B046d7fCBd5454cd3331Ba6f4feA168",
+          "fee": "7000000000000000",
+          "rate": "0",
+          "cid": "0x12208dc17f4317285392e6811ca31c9efeb3b8511ebac1bd14b935ecf2c1b60c1b09"
         }
       }
     }
