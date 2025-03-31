@@ -1,12 +1,12 @@
 {
   "baseTokenAddress": "0x01C36ca785bbfBe8744252189feaa0163DCC706F",
   "engineAddress": "0x53c9F1a7AfF9f5B1028712e29BC2206Ef9241385",
-  "bulkTasksAddress": "0xDab3896E694F7E9678a2E30fBc9eaa0D6999ADF7",
+  "bulkTasksAddress": "0x4C1aD7bcda8E4F9e601Cbc750E8D176ee26C5519",
   "voterAddress": "0x2eB59677c170df0fD2D07159c11757720744E3DC",
   "veStakingAddress": "0xA3C730Dd2AFf11a5ec589BEa3767A258bF353fa0",
   "arbiusRouterAddress": "0x6BfA2f533d7D3331D411E7a0358164D9644f0425",
   "models": {
-    "qwen": {
+    "qwen-test": {
       "id": "0x7cd06b3facb05c072fb359904a7381e8f28218f410830f85018f3922621ed33a",
       "mineable": true,
       "contracts": {},
@@ -15,6 +15,17 @@
         "fee": "1000000000000000",
         "rate": "0",
         "cid": "0x12204b352d8f12ef72450a3475d245134f2c798f25674b592c7401c369bf122d3cdf"
+      }
+    },
+    "qwen": {
+      "id": "0xdafc13d7e9529e278bf40038524f20841ba8879c0b5d7667d438cd60c64a118d",
+      "mineable": true,
+      "contracts": {},
+      "params": {
+        "addr": "0x8115F3DBb2DF930cC07b8D910C3bb06b5b9bf573",
+        "fee": "7000000000000000",
+        "rate": "0",
+        "cid": "0x12208dc17f4317285392e6811ca31c9efeb3b8511ebac1bd14b935ecf2c1b60c1b09"
       }
     }
   }

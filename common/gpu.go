@@ -86,3 +86,15 @@ func (g *GPU) GetMockCid(taskid string, input interface{}) ([]byte, error) {
 
 	return b, nil
 }
+
+func (g *GPU) GetStatus() string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.Status
+}
+
+func (g *GPU) SetStatus(status string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.Status = status
+}

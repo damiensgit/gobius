@@ -20,21 +20,10 @@ import (
 	"github.com/rs/zerolog"
 )
 
-type QwenInner struct {
-	Prompt string `json:"prompt"`
-	Seed   uint64 `json:"seed"`
-}
+// known good cid for qwen-qwq-32b
+const expectedCID = "0x12209e5962a0b505af317e43db6e1ac3ec7e66af56fe55c8bd952615e84179b09776"
 
-type QwenPrompt struct {
-	Input QwenInner `json:"input"`
-}
-
-type QwenModelResponse struct {
-	Input  map[string]any `json:"input"`
-	Output []string       `json:"output"`
-}
-
-type QwenTestModel struct {
+type QwenMainnetModel struct {
 	Model
 	Filters []MiningFilter
 	config  *config.AppConfig
@@ -44,15 +33,15 @@ type QwenTestModel struct {
 }
 
 // Ensure QwenTestModel implements the Model interface.
-var _ ModelInterface = (*QwenTestModel)(nil)
+var _ ModelInterface = (*QwenMainnetModel)(nil)
 
-var QwenTestModelTemplate = Model{
+var QwenMainnetModelTemplate = Model{
 	ID:       "",
 	Mineable: true,
 	Template: map[string]any{
 		"meta": map[string]any{
-			"title":       "Qwen",
-			"description": "Qwen Sepolia Test Model",
+			"title":       "qwen-qwq-32b",
+			"description": "Qwen Mainnet Model",
 			"version":     1,
 			"input": []map[string]any{
 				{
@@ -80,9 +69,9 @@ var QwenTestModelTemplate = Model{
 	},
 }
 
-func NewQwenTestModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logger zerolog.Logger) *QwenTestModel {
+func NewQwenMainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logger zerolog.Logger) *QwenMainnetModel {
 
-	model, ok := appConfig.BaseConfig.Models["qwen-test"]
+	model, ok := appConfig.BaseConfig.Models["qwen"]
 	if !ok {
 		return nil
 	}
@@ -96,8 +85,8 @@ func NewQwenTestModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logge
 		Timeout: time.Second * 30,
 	}
 
-	m := &QwenTestModel{
-		Model:  QwenTestModelTemplate,
+	m := &QwenMainnetModel{
+		Model:  QwenMainnetModelTemplate,
 		config: appConfig,
 		//url:    url[0],
 		Filters: []MiningFilter{
@@ -115,7 +104,7 @@ func NewQwenTestModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logge
 	return m
 }
 
-func (m *QwenTestModel) HydrateInput(preprocessedInput map[string]any, seed uint64) (InputHydrationResult, error) {
+func (m *QwenMainnetModel) HydrateInput(preprocessedInput map[string]any, seed uint64) (InputHydrationResult, error) {
 	input := make(map[string]any)
 
 	// Helper functions for type conversion
@@ -254,11 +243,11 @@ func (m *QwenTestModel) HydrateInput(preprocessedInput map[string]any, seed uint
 	return QwenPrompt{Input: inner}, nil
 }
 
-func (m *QwenTestModel) GetID() string {
+func (m *QwenMainnetModel) GetID() string {
 	return m.Model.ID
 }
 
-func (m *QwenTestModel) GetFiles(gpu *common.GPU, taskid string, input any) ([]ipfs.IPFSFile, error) {
+func (m *QwenMainnetModel) GetFiles(gpu *common.GPU, taskid string, input any) ([]ipfs.IPFSFile, error) {
 
 	marshaledInput, _ := json.Marshal(input)
 
@@ -290,7 +279,7 @@ func (m *QwenTestModel) GetFiles(gpu *common.GPU, taskid string, input any) ([]i
 	return []ipfs.IPFSFile{{Name: "out-1.txt", Path: path, Buffer: buffer}}, nil
 }
 
-func (m *QwenTestModel) GetCID(gpu *common.GPU, taskid string, input any) ([]byte, error) {
+func (m *QwenMainnetModel) GetCID(gpu *common.GPU, taskid string, input any) ([]byte, error) {
 	paths, err := utils.ExpRetry(m.logger, func() (any, error) {
 		return m.GetFiles(gpu, taskid, input)
 	}, 3, 1000)
@@ -314,12 +303,12 @@ func (m *QwenTestModel) GetCID(gpu *common.GPU, taskid string, input any) ([]byt
 	return cidBytes, nil
 }
 
-func (m *QwenTestModel) Validate(gpu *common.GPU, taskid string) error {
+func (m *QwenMainnetModel) Validate(gpu *common.GPU, taskid string) error {
 
 	testPrompt := QwenPrompt{
 		Input: QwenInner{
-			Prompt: "why is the meaning of life 42?",
-			Seed:   1337,
+			Prompt: "Hello World",
+			Seed:   100,
 		},
 	}
 
@@ -328,12 +317,11 @@ func (m *QwenTestModel) Validate(gpu *common.GPU, taskid string) error {
 		return err
 	}
 
-	expected := "0x122041fa6dba0027cf73097b4c75cae5f16122b4f1cfe85616bdccb6eaea711e7238"
 	cidStr := "0x" + hex.EncodeToString(cid)
-	if cidStr == expected {
-		m.logger.Info().Str("model", m.GetID()).Str("cid", cidStr).Str("expected", expected).Msg("model CID matches expected CID")
+	if cidStr == expectedCID {
+		m.logger.Info().Str("model", m.GetID()).Str("cid", cidStr).Str("expected", expectedCID).Msg("model CID matches expected CID")
 	} else {
-		m.logger.Error().Str("model", m.GetID()).Str("cid", cidStr).Str("expected", expected).Msg("model CID does not match expected CID")
+		m.logger.Error().Str("model", m.GetID()).Str("cid", cidStr).Str("expected", expectedCID).Msg("model CID does not match expected CID")
 		return errors.New("model CID does not match expected CID")
 	}
 

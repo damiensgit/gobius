@@ -36,12 +36,7 @@ type Validator struct {
 	ratelimit float64
 }
 
-func NewValidator(ctx context.Context, privateKey string, client *client.Client, ratelimit float64) (*Validator, error) {
-	// Get the services from the context
-	services, ok := ctx.Value(servicesKey{}).(*Services)
-	if !ok {
-		panic("could not get services from context")
-	}
+func NewValidator(services *Services, ctx context.Context, privateKey string, client *client.Client, ratelimit float64) (*Validator, error) {
 
 	account, err := account.NewAccount(privateKey, client, ctx, services.Config.Blockchain.CacheNonce, services.Logger)
 	if err != nil {

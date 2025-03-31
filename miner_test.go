@@ -90,7 +90,7 @@ func TestValidatorWithdraw(t *testing.T) {
 	_ = rpcClient
 
 	var appQuitWG sync.WaitGroup
-	validator, err := NewBatchTransactionManager(appContext, &appQuitWG)
+	validator, err := NewBatchTransactionManager(appServices, appContext, &appQuitWG)
 
 	if err != nil {
 		logger.Fatal().Err(err).Msg("could not create transaction manager")

@@ -78,12 +78,20 @@ func InitModelRegistry(client ipfs.IPFSClient, config *config.AppConfig, logger 
 	ModelRegistry = NewModelFactory()
 
 	// Register available models
-	modelQwen := NewQwenTestModel(client, config, logger)
+	modelQwenMainnet := NewQwenMainnetModel(client, config, logger)
 	// only register if not nil e.g. is it is available in the config for this network
-	if modelQwen != nil {
-		ModelRegistry.RegisterModel(modelQwen)
+	if modelQwenMainnet != nil {
+		ModelRegistry.RegisterModel(modelQwenMainnet)
 	}
 
+	// Sepolia testnet model
+	modelQwenTest := NewQwenTestModel(client, config, logger)
+	// only register if not nil e.g. is it is available in the config for this network
+	if modelQwenTest != nil {
+		ModelRegistry.RegisterModel(modelQwenTest)
+	}
+
+	// Deprecated models, will be removed in future versions
 	modelKandinsky2 := NewKandinsky2Model(client, config, logger)
 	if modelKandinsky2 != nil {
 		ModelRegistry.RegisterModel(modelKandinsky2)

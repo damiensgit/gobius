@@ -2218,13 +2218,7 @@ func (tm *BatchTransactionManager) Start(appQuit context.Context) error {
 	return nil
 }
 
-func NewBatchTransactionManager(ctx context.Context, wg *sync.WaitGroup) (*BatchTransactionManager, error) {
-
-	// Get the services from the context
-	services, ok := ctx.Value(servicesKey{}).(*Services)
-	if !ok {
-		panic("could not get services from context")
-	}
+func NewBatchTransactionManager(services *Services, ctx context.Context, wg *sync.WaitGroup) (*BatchTransactionManager, error) {
 
 	// TODO: move these out of here!
 	engineAbi, err := engine.EngineMetaData.GetAbi()
@@ -2290,7 +2284,7 @@ func NewBatchTransactionManager(ctx context.Context, wg *sync.WaitGroup) (*Batch
 
 	var validators []*Validator
 	for _, pk := range services.Config.ValidatorConfig.PrivateKeys {
-		va, err := NewValidator(ctx, pk, services.SenderOwnerAccount.Client, ratelimit)
+		va, err := NewValidator(services, ctx, pk, services.SenderOwnerAccount.Client, ratelimit)
 		if err != nil {
 			return nil, err
 		}

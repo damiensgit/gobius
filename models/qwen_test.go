@@ -8,6 +8,8 @@ import (
 	"gobius/ipfs"
 	"strings"
 	"testing"
+
+	"github.com/rs/zerolog"
 )
 
 func Test_QwenTestModel_Config(t *testing.T) {
@@ -28,7 +30,9 @@ func Test_QwenTestModel_Config(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	NewQwenTestModel(ipfsClient, &appConfig, nil)
+	logger := zerolog.Nop()
+
+	NewQwenTestModel(ipfsClient, &appConfig, logger)
 	t.Errorf("expected panic")
 }
 
@@ -39,7 +43,7 @@ func Test_QwenTestModel_WithMockIPFS_GetFiles(t *testing.T) {
 	modelID := "0x98617a8cd4a11db63100ad44bea4e5e296aecfd78b2ef06aee3e364c7307f212"
 	appConfig.ML.Cog = map[string]config.Cog{
 		modelID: {
-			URL: []string{"http://150.136.215.9:8000/predictions"},
+			URL: []string{"http://fixme:8000/predictions"},
 		},
 	}
 	ipfsClient, err := ipfs.NewMockIPFSClient(appConfig, true)
@@ -47,7 +51,9 @@ func Test_QwenTestModel_WithMockIPFS_GetFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	model := NewQwenTestModel(ipfsClient, &appConfig, nil)
+	logger := zerolog.Nop()
+
+	model := NewQwenTestModel(ipfsClient, &appConfig, logger)
 
 	testPrompt := QwenPrompt{
 		Input: QwenInner{
@@ -112,6 +118,8 @@ func Test_QwenTestModel_HydrateInput(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	logger := zerolog.Nop()
+
 	for _, tc := range testcases {
 
 		var result map[string]interface{}
@@ -119,7 +127,7 @@ func Test_QwenTestModel_HydrateInput(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		newModel := NewQwenTestModel(ipfsClient, &appConfig, nil)
+		newModel := NewQwenTestModel(ipfsClient, &appConfig, logger)
 
 		output, err := newModel.HydrateInput(result, 1337)
 		if err != nil {

@@ -18,6 +18,7 @@ import (
 	"gobius/metrics"
 	"gobius/paraswap"
 	"gobius/storage"
+	"math/big"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -28,6 +29,15 @@ import (
 )
 
 type servicesKey struct{}
+
+// Define the function parameters
+type SubmitTaskParams struct {
+	Version uint8
+	Owner   common.Address
+	Model   [32]byte
+	Fee     *big.Int
+	Input   []byte
+}
 
 type Services struct {
 	Basetoken          *basetoken.BaseToken
@@ -48,16 +58,16 @@ type Services struct {
 	IpfsOracle         ipfs.OracleClient
 }
 
-func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients []*client.Client, sql *sql.DB, logger zerolog.Logger, cfg *config.AppConfig, ipfsOracle ipfs.OracleClient, appContext, appQuit context.Context) (context.Context, error) {
+func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients []*client.Client, sql *sql.DB, logger zerolog.Logger, cfg *config.AppConfig, ipfsOracle ipfs.OracleClient, appContext, appQuit context.Context) (context.Context, *Services, error) {
 
 	ownerAccount, err := account.NewAccount(cfg.Blockchain.PrivateKey, rpc, appContext, cfg.Blockchain.CacheNonce, logger)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	senderOwnerAccount, err := account.NewAccount(cfg.Blockchain.PrivateKey, senderrpc, appContext, cfg.Blockchain.CacheNonce, logger)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// TODO: need a cleaner way to handle this nonce update on first use - maybe move to NewAccount
@@ -65,17 +75,17 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 
 	baseTokenContract, err := basetoken.NewBaseToken(cfg.BaseConfig.BaseTokenAddress, senderrpc.Client)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	engineContract, err := engine.NewEngine(cfg.BaseConfig.EngineAddress, rpc.Client)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	voterContract, err := voter.NewVoter(cfg.BaseConfig.VoterAddress, rpc.Client)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// if we are on sepolia or mainnet we can use a real contract otherwise we mock (determined by config)
@@ -85,7 +95,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 	} else {
 		arbiusRouterContract, err := arbiusrouterv1.NewArbiusRouterV1(cfg.BaseConfig.ArbiusRouterAddress, rpc.Client)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		arbiusRouter = ipfs.NewRouterContractWrapper(arbiusRouterContract, rpc)
 	}
@@ -94,10 +104,11 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 
 	if cfg.BaseConfig.TestnetType > 0 {
 		// TODO: this is a hack to check if the contract exists on testnet
-		if err := checkContractExists(cfg.BaseConfig.BulkTasksAddress, senderrpc.Client); err != nil {
+		err := checkContractExists(cfg.BaseConfig.BulkTasksAddress, senderrpc.Client)
+
+		if err != nil {
 
 			// on local testnet we can deploy the contract
-			// TODO: this is effectively disabled for now until we have a better way to handle it / rewrite contract
 			if cfg.BaseConfig.TestnetType > 0 {
 				ctxTimeout, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 				defer cancel()
@@ -105,7 +116,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 				// get the gas price
 				gasPrice, err := ownerAccount.Client.GetGasPrice()
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 
 				opts := ownerAccount.GetOpts(1_000_000, gasPrice, nil, nil)
@@ -117,25 +128,25 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 
 				bulkTasksContractAddress, tx, bulkTasksContract, err = bulktasks.DeployBulkTasks(opts, senderrpc.Client, cfg.BaseConfig.BaseTokenAddress, cfg.BaseConfig.EngineAddress)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 
 				logger.Info().Msg("waiting for BulkTasks contract deployment")
 
 				receipt, err := bind.WaitMined(ctxTimeout, senderrpc.Client, tx)
 				if err != nil {
-					return nil, err
+					return nil, nil, err
 				}
 
 				if receipt.Status != types.ReceiptStatusSuccessful {
-					return nil, fmt.Errorf("BulkTasks contract deployment failed")
+					return nil, nil, fmt.Errorf("BulkTasks contract deployment failed")
 				}
 
 				logger.Info().Msgf("BulkTasks contract deployed at address %s (you must update the config with this address)", bulkTasksContractAddress.Hex())
 
 				cfg.BaseConfig.BulkTasksAddress = bulkTasksContractAddress
 			} else {
-				return nil, fmt.Errorf("BulkTasks contract not deployed or invalid at address %s: %w",
+				return nil, nil, fmt.Errorf("BulkTasks contract not deployed or invalid at address %s: %w",
 					cfg.BaseConfig.BulkTasksAddress.Hex(), err)
 			}
 		}
@@ -144,14 +155,14 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 	if bulkTasksContract == nil {
 		bulkTasksContract, err = bulktasks.NewBulkTasks(cfg.BaseConfig.BulkTasksAddress, senderrpc.Client)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
 
 	// cache the min claim time
 	minClaimSolTimeBig, err := engineContract.MinClaimSolutionTime(nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// A convienience wrapper to represent ETH
@@ -160,7 +171,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 	// 120 = jitter offset in seconds for the min claim time
 	minclaimTime := time.Duration(minClaimSolTimeBig.Uint64()+120) * time.Second
 
-	logger.Info().Msgf("Minimum claim time is %s", minclaimTime)
+	logger.Info().Msgf("minimum claim time is %s", minclaimTime)
 
 	ts := storage.NewTaskStorageDB(appContext, sql, minclaimTime, logger)
 
@@ -176,7 +187,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 
 	input, err := json.Marshal(cfg.Strategies.Automine.Input)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	st := &SubmitTaskParams{
 		Version: uint8(cfg.Strategies.Automine.Version),
@@ -207,7 +218,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 
 	ctx := context.WithValue(appContext, servicesKey{}, services)
 
-	return ctx, nil
+	return ctx, services, nil
 }
 
 // checkContractExists verifies that a contract exists at the specified address
@@ -217,10 +228,8 @@ func checkContractExists(address common.Address, client *ethclient.Client) error
 	if err != nil {
 		return fmt.Errorf("failed to get code at address: %w", err)
 	}
-
 	if len(code) == 0 {
 		return fmt.Errorf("no contract code found at address")
 	}
-
 	return nil
 }
