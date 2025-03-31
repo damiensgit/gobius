@@ -28,6 +28,11 @@ sql:
               import: "gobius/common"
               package: "task"
               type: "TaskId"               
+          - column: "ipfs_cids.taskid"
+            go_type:
+              import: "gobius/common"
+              package: "task"
+              type: "TaskId"
           - column: "commitments.validator"
             go_type:
               import: "github.com/ethereum/go-ethereum/common"

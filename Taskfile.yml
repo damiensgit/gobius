@@ -1,0 +1,216 @@
+version: '3'
+
+vars:
+  SOLC: ./bin/solc
+  ABIGEN: ./bin/abigen
+  CONTRACT_ROOT: ./external/arbius
+  BUILD_DIR: ./build
+  BINDINGS_DIR: ./bindings
+  INTERFACES_DIR: "{{.CONTRACT_ROOT}}/contract/contracts/interfaces"
+  CONTRACTS_DIR: "{{.CONTRACT_ROOT}}/contract/contracts"
+  NODE_MODULES: "{{.CONTRACT_ROOT}}/contract/node_modules"
+  LOCAL_CONTRACTS: ./contracts
+
+tasks:
+  build:dir:
+    cmds:
+      - mkdir -p {{.BUILD_DIR}}
+    status:
+      - test -d {{.BUILD_DIR}}
+
+  _build:interface:
+    internal: true
+    vars:
+      NAME: '{{.NAME}}'
+      PKG: '{{.PKG}}'
+      TYPE: '{{.TYPE}}'
+      OUT_DIR: '{{.OUT_DIR}}'
+      SRC_DIR: '{{.SRC_DIR | default .INTERFACES_DIR}}'
+      BASE_PATH: '{{.BASE_PATH | default .CONTRACT_ROOT}}/contract'
+    cmds:
+      - mkdir -p {{.OUT_DIR}}
+      - |
+        {{.SOLC}} --base-path '{{.BASE_PATH}}' \
+          --include-path '{{.NODE_MODULES}}' \
+          --bin --abi {{.SRC_DIR}}/I{{.NAME}}.sol \
+          -o {{.BUILD_DIR}} --overwrite \
+          --evm-version london
+      - |
+        {{.ABIGEN}} \
+          --bin={{.BUILD_DIR}}/I{{.NAME}}.bin \
+          --abi={{.BUILD_DIR}}/I{{.NAME}}.abi \
+          --pkg={{.PKG}} --type={{.TYPE}} \
+          --out={{.OUT_DIR}}/{{.PKG}}.go
+    sources:
+      - "{{.SRC_DIR}}/I{{.NAME}}.sol"
+    generates:
+      - "{{.BUILD_DIR}}/I{{.NAME}}.abi"
+      - "{{.BUILD_DIR}}/I{{.NAME}}.bin"
+      - "{{.OUT_DIR}}/{{.PKG}}.go"
+
+  _build:contract:
+    internal: true
+    vars:
+      NAME: '{{.NAME}}'
+      PKG: '{{.PKG}}'
+      TYPE: '{{.TYPE}}'
+      OUT_DIR: '{{.OUT_DIR}}'
+      SRC_DIR: '{{.SRC_DIR | default .CONTRACTS_DIR}}'
+      BASE_PATH: '{{.BASE_PATH | default .CONTRACTS_DIR}}'
+      CONTRACT_NAME: '{{.CONTRACT_NAME | default .NAME}}'
+    cmds:
+      - mkdir -p {{.OUT_DIR}}
+      - |
+        {{.SOLC}} --base-path '{{.BASE_PATH}}' \
+          --include-path '{{.NODE_MODULES}}' \
+          --bin --abi {{.SRC_DIR}}/{{.NAME}}.sol \
+          -o {{.BUILD_DIR}} --overwrite \
+          --evm-version london
+      - |
+        {{.ABIGEN}} \
+          --bin={{.BUILD_DIR}}/{{.CONTRACT_NAME}}.bin \
+          --abi={{.BUILD_DIR}}/{{.CONTRACT_NAME}}.abi \
+          --pkg={{.PKG}} --type={{.TYPE}} \
+          --out={{.OUT_DIR}}/{{.PKG}}.go
+    sources:
+      - "{{.SRC_DIR}}/{{.NAME}}.sol"
+    generates:
+      - "{{.BUILD_DIR}}/{{.CONTRACT_NAME}}.abi"
+      - "{{.BUILD_DIR}}/{{.CONTRACT_NAME}}.bin"
+      - "{{.OUT_DIR}}/{{.PKG}}.go"
+
+  _build:abi_only:
+    internal: true
+    vars:
+      NAME: '{{.NAME}}'
+      PKG: '{{.PKG}}'
+      TYPE: '{{.TYPE}}'
+      OUT_DIR: '{{.OUT_DIR}}'
+      SRC_DIR: '{{.SRC_DIR | default .CONTRACTS_DIR}}'
+      BASE_PATH: '{{.BASE_PATH | default .CONTRACT_ROOT}}/contract'
+    cmds:
+      - mkdir -p {{.OUT_DIR}}
+      - |
+        {{.SOLC}} --base-path '{{.BASE_PATH}}' \
+          --include-path '{{.NODE_MODULES}}' \
+          --abi {{.SRC_DIR}}/{{.NAME}}.sol \
+          -o {{.BUILD_DIR}} --overwrite \
+          --evm-version london
+      - |
+        {{.ABIGEN}} \
+          --abi={{.BUILD_DIR}}/{{.NAME}}.abi \
+          --pkg={{.PKG}} --type={{.TYPE}} \
+          --out={{.OUT_DIR}}/{{.PKG}}.go
+    sources:
+      - "{{.SRC_DIR}}/{{.NAME}}.sol"
+    generates:
+      - "{{.BUILD_DIR}}/{{.NAME}}.abi"
+      - "{{.OUT_DIR}}/{{.PKG}}.go"
+
+  build:voter:
+    desc: Build Voter interface
+    deps: [build:dir]
+    cmds:
+      - task: _build:interface
+        vars:
+          NAME: Voter
+          PKG: voter
+          TYPE: Voter
+          OUT_DIR: "{{.BINDINGS_DIR}}/voter"
+
+  build:arbiusrouterv1:
+    desc: Build ArbiusRouterV1 contract
+    deps: [build:dir]
+    cmds:
+      - task: _build:contract
+        vars:
+          NAME: ArbiusRouterV1
+          PKG: arbiusrouterv1
+          TYPE: ArbiusRouterV1
+          OUT_DIR: "{{.BINDINGS_DIR}}/arbiusrouterv1"
+          SRC_DIR: "{{.CONTRACTS_DIR}}"
+          CONTRACT_NAME: ArbiusRouterV1
+
+  build:vestaking:
+    desc: Build VeStaking interface
+    deps: [build:dir]
+    cmds:
+      - task: _build:interface
+        vars:
+          NAME: VeStaking
+          PKG: vestaking
+          TYPE: VeStaking
+          OUT_DIR: "{{.BINDINGS_DIR}}/vestaking"
+
+  build:votingescrow:
+    desc: Build VotingEscrow interface
+    deps: [build:dir]
+    cmds:
+      - task: _build:interface
+        vars:
+          NAME: VotingEscrow
+          PKG: votingescrow
+          TYPE: VotingEscrow
+          OUT_DIR: "{{.BINDINGS_DIR}}/votingescrow"
+
+  build:enginev5:
+    desc: Build V2_EngineV5 contract (ABI only)
+    deps: [build:dir]
+    cmds:
+      - task: _build:abi_only
+        vars:
+          NAME: V2_EngineV5
+          PKG: engine
+          TYPE: Engine
+          OUT_DIR: "{{.BINDINGS_DIR}}/engine"
+
+  build:bulktasks:
+    desc: Build BulkTasks contract
+    deps: [build:dir]
+    cmds:
+      - task: _build:contract
+        vars:
+          NAME: BulkTasks
+          PKG: bulktasks
+          TYPE: BulkTasks
+          OUT_DIR: "{{.BINDINGS_DIR}}/bulktasks"
+          SRC_DIR: "{{.LOCAL_CONTRACTS}}"
+          BASE_PATH: "."
+          CONTRACT_NAME: BulkTasks
+
+  build:basetoken:
+    desc: Build BaseToken interface
+    deps: [build:dir]
+    cmds:
+      - task: _build:interface
+        vars:
+          NAME: BaseToken
+          PKG: basetoken
+          TYPE: BaseToken
+          OUT_DIR: "{{.BINDINGS_DIR}}/basetoken"
+
+  build:sqlc:
+    desc: Generate Go code from SQL schema
+    cmds:
+      - cd sql && sqlc generate
+
+  build:all:
+    desc: Build all contract interfaces
+    cmds:
+      - task: build:voter
+      - task: build:vestaking
+      - task: build:votingescrow
+      - task: build:enginev5
+      - task: build:bulktasks
+      - task: build:sqlc
+      - task: build:arbiusrouterv1
+  clean:
+    desc: Clean build artifacts
+    cmds:
+      - rm -rf {{.BUILD_DIR}}
+      - rm -rf {{.BINDINGS_DIR}}
+
+  default:
+    desc: Default task builds all interfaces
+    cmds:
+      - task: build:all 

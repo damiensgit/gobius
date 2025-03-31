@@ -142,3 +142,20 @@ JOIN tasks ON solutions.taskid = tasks.taskid
 WHERE tasks.status = 2
 GROUP BY solutions.validator
 ORDER BY solution_count DESC;
+
+-- name: GetIPFSCids :many
+SELECT 
+    taskid, cid, added
+FROM ipfs_cids
+ORDER BY added ASC 
+LIMIT ?;
+
+-- name: AddIPFSCid :exec
+INSERT INTO ipfs_cids (
+  taskid, cid
+) VALUES (
+  ?, ?
+);
+
+-- name: DeletedIPFSCid :execrows
+DELETE FROM ipfs_cids WHERE taskid = ?;

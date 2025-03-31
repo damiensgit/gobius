@@ -8,6 +8,8 @@ import (
 	"gobius/ipfs"
 	"strings"
 	"testing"
+
+	"github.com/rs/zerolog"
 )
 
 func Test_Kandinsky2Model_Config(t *testing.T) {
@@ -28,7 +30,9 @@ func Test_Kandinsky2Model_Config(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	NewKandinsky2Model(ipfsClient, &appConfig)
+	logger := zerolog.Nop()
+
+	NewKandinsky2Model(ipfsClient, &appConfig, logger)
 	t.Errorf("expected panic")
 }
 
@@ -36,10 +40,9 @@ func Test_Kandinsky2Model_Config(t *testing.T) {
 func Test_Kandinsky2Model_WithMockIPFS_GetFiles(t *testing.T) {
 	appConfig := config.AppConfig{}
 	modelID := "0x98617a8cd4a11db63100ad44bea4e5e296aecfd78b2ef06aee3e364c7307f212"
-	//appConfig.IPFS.HTTPClient.URL = "/dns4/localhost/tcp/5001/http"
 	appConfig.ML.Cog = map[string]config.Cog{
 		modelID: {
-			URL: []string{"http://185.65.93.212:41108/predictions"},
+			URL: []string{"http://localhost:41108/predictions"},
 		},
 	}
 	ipfsClient, err := ipfs.NewMockIPFSClient(appConfig, true)
@@ -47,10 +50,12 @@ func Test_Kandinsky2Model_WithMockIPFS_GetFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	model := NewKandinsky2Model(ipfsClient, &appConfig)
+	logger := zerolog.Nop()
+
+	model := NewKandinsky2Model(ipfsClient, &appConfig, logger)
 
 	testPrompt := Kandinsky2Prompt{
-		Input: Inner{
+		Input: Kadinsky2Inner{
 			Prompt: "arbius test cat",
 			Seed:   1337,
 		},
@@ -107,6 +112,8 @@ func Test_Kandinsky2Model_HydrateInput(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	logger := zerolog.Nop()
+
 	for _, tc := range testcases {
 
 		var result map[string]interface{}
@@ -114,9 +121,9 @@ func Test_Kandinsky2Model_HydrateInput(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		newModel := NewKandinsky2Model(ipfsClient, &appConfig)
+		newModel := NewKandinsky2Model(ipfsClient, &appConfig, logger)
 
-		output, err := newModel.HydrateInput(result)
+		output, err := newModel.HydrateInput(result, 1337)
 		if err != nil {
 			if tc.errMsg != "" {
 				if !strings.Contains(err.Error(), tc.errMsg) {

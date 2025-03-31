@@ -12,7 +12,23 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/core/types"
 )
+
+type IValidator interface {
+	SignalCommitment(validator common.Address, taskId task.TaskId, commitment [32]byte) error
+	SubmitSolution(validator common.Address, taskId task.TaskId, cid []byte) error
+	SubmitIpfsCid(validator common.Address, taskId task.TaskId, cid []byte) error
+	GetNextValidatorAddress() common.Address
+	InitiateValidatorWithdraw(validator common.Address, amount float64) error
+	ValidatorWithdraw(validator common.Address) error
+	CancelValidatorWithdraw(validator common.Address, count int64) error
+	BulkClaim(taskIds [][32]byte) (*types.Receipt, error)
+	BatchCommitments() error
+	BatchSolutions() error
+	VoteOnContestation(validator common.Address, taskId task.TaskId, yeah bool) error
+	SubmitContestation(validator common.Address, taskId task.TaskId) error
+}
 
 type Validator struct {
 	services  *Services
@@ -20,14 +36,9 @@ type Validator struct {
 	ratelimit float64
 }
 
-func NewValidator(ctx context.Context, privateKey string, client *client.Client, ratelimit float64) (*Validator, error) {
-	// Get the services from the context
-	services, ok := ctx.Value(servicesKey{}).(*Services)
-	if !ok {
-		panic("could not get services from context")
-	}
+func NewValidator(services *Services, ctx context.Context, privateKey string, client *client.Client, ratelimit float64) (*Validator, error) {
 
-	account, err := account.NewAccount(privateKey, client, ctx, services.Config.Blockchain.CacheNonce)
+	account, err := account.NewAccount(privateKey, client, ctx, services.Config.Blockchain.CacheNonce, services.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -74,7 +85,7 @@ func (v *Validator) InitiateValidatorWithdraw(amount float64) error {
 	}
 
 	// Wait for the transaction to be mined
-	_, success, _, _ := v.Account.WaitForConfirmedTx(v.services.Logger, tx)
+	_, success, _, _ := v.Account.WaitForConfirmedTx(tx)
 	if !success {
 		return err
 	}
@@ -103,7 +114,7 @@ func (v *Validator) VoteOnContestation(taskId task.TaskId, yea bool) error {
 	}
 
 	// Wait for the transaction to be mined
-	_, success, _, _ := v.Account.WaitForConfirmedTx(v.services.Logger, tx)
+	_, success, _, _ := v.Account.WaitForConfirmedTx(tx)
 	if !success {
 		return err
 	}
@@ -123,7 +134,7 @@ func (v *Validator) SubmitContestation(taskId task.TaskId) error {
 	}
 
 	// Wait for the transaction to be mined
-	_, success, _, _ := v.Account.WaitForConfirmedTx(v.services.Logger, tx)
+	_, success, _, _ := v.Account.WaitForConfirmedTx(tx)
 	if !success {
 		return err
 	}
@@ -172,7 +183,7 @@ func (v *Validator) CancelValidatorWithdraw(index int64) error {
 	}
 
 	// Wait for the transaction to be mined
-	_, success, _, _ := v.Account.WaitForConfirmedTx(v.services.Logger, tx)
+	_, success, _, _ := v.Account.WaitForConfirmedTx(tx)
 	if !success {
 		return err
 	}
@@ -226,7 +237,7 @@ func (v *Validator) ValidatorWithdraw() error {
 			}
 
 			// Wait for the transaction to be mined
-			_, success, _, _ := v.Account.WaitForConfirmedTx(v.services.Logger, tx)
+			_, success, _, _ := v.Account.WaitForConfirmedTx(tx)
 			if !success {
 				return err
 			}
@@ -300,75 +311,7 @@ func (v *Validator) ProcessValidatorStake(baseTokenBalance *big.Int) {
 		return
 	}
 
-	stakedAmount.Sub(stakedAmount, validatorPending)
-	stakedAmountFloat := v.services.Config.BaseConfig.BaseToken.ToFloat(stakedAmount)
-	validatorMinFloat := v.services.Config.BaseConfig.BaseToken.ToFloat(validatorMin)
-
-	v.services.Logger.Info().Float64("minimum", validatorMinFloat).Float64("basetoken_bal", validatorBaseBalFloat).Float64("staked", stakedAmountFloat).Float64("pending_withdraw", v.services.Eth.ToFloat(validatorPending)).Str("address", v.ValidatorAddress().String()).Msg("validator staked amount")
-
-	depositAmount := new(big.Int)
-
-	// If initial stake > 0 and the staked amount is zero (fresh or emptied validator) then top up the stake to initial stake value
-	if v.services.Config.ValidatorConfig.InitialStake > 0 && stakedAmountFloat < v.services.Config.ValidatorConfig.InitialStake {
-		if v.services.Config.ValidatorConfig.InitialStake <= validatorMinFloat {
-			v.services.Logger.Error().Msg("⚠️ initial stake amount is less than validator minimum")
-			return
-		}
-		depositAmount = v.services.Config.BaseConfig.BaseToken.FromFloat(v.services.Config.ValidatorConfig.InitialStake - stakedAmountFloat)
-	} else if v.services.Config.ValidatorConfig.StakeBufferStakeAmount > 0 {
-
-		stakedAmountFloat := v.services.Config.BaseConfig.BaseToken.ToFloat(stakedAmount)
-		validatorMinFloat := v.services.Config.BaseConfig.BaseToken.ToFloat(validatorMin)
-
-		if stakedAmountFloat-validatorMinFloat >= v.services.Config.ValidatorConfig.StakeBufferStakeAmount {
-			v.services.Logger.Info().Msg("✅ staked amount is sufficient")
-			return
-		} else {
-			depositAmount = v.services.Config.BaseConfig.BaseToken.FromFloat(v.services.Config.ValidatorConfig.StakeBufferTopupAmount)
-		}
-
-	} else {
-
-		// calculate the minimum with topup buffer
-		minWithTopupBuffer := new(big.Int).Mul(validatorMin, big.NewInt(100))
-		minWithTopupBuffer = new(big.Int).Div(minWithTopupBuffer, big.NewInt(int64(100-v.services.Config.ValidatorConfig.StakeBufferTopupPercent)))
-
-		minWithTopupBufferAF := v.services.Config.BaseConfig.BaseToken.ToFloat(minWithTopupBuffer)
-
-		v.services.Logger.Info().Float64("amount", minWithTopupBufferAF).Msgf("minWithTopupBufferAF")
-
-		// check if the staked amount is greater than or equal to the minimum with topup buffer
-		if stakedAmount.Cmp(minWithTopupBuffer) >= 0 {
-			v.services.Logger.Info().Msg("✅ staked amount is sufficient")
-			return
-		}
-
-		// (60.0952 * 100 / (100-10))=66.772444444444444444
-		// calculate the minimum with buffer
-		minWithBuffer := new(big.Int).Mul(validatorMin, big.NewInt(100))
-		minWithBuffer = new(big.Int).Div(minWithBuffer, big.NewInt(int64(100-v.services.Config.ValidatorConfig.StakeBufferPercent)))
-
-		// calculate the deposit amount
-		depositAmount.Sub(minWithBuffer, stakedAmount)
-
-	}
-	depositAmountAsFloat := v.services.Config.BaseConfig.BaseToken.ToFloat(depositAmount)
-	v.services.Logger.Info().Float64("amount", depositAmountAsFloat).Msgf("deposit amount")
-
-	if depositAmountAsFloat <= 0 {
-		v.services.Logger.Error().Msgf("deposit amount is less than zero - check stake values in config")
-		return
-	}
-
-	// check if the balance is less than the deposit amount
-	if baseTokenBalance.Cmp(depositAmount) < 0 {
-		v.services.Logger.Error().Msgf("⚠️ balance %g less than deposit amount %g ⚠️",
-			v.services.Config.BaseConfig.BaseToken.ToFloat(baseTokenBalance),
-			depositAmountAsFloat,
-		)
-		return
-	}
-
+	// moved this to earlier to ensure we have correct allowance EVEN if we dont need to deposit (fixes issue on sepolia where min stake is 0)
 	// get the allowance
 	allowanceAddress := v.services.Config.BaseConfig.EngineAddress
 
@@ -395,12 +338,77 @@ func (v *Validator) ProcessValidatorStake(baseTokenBalance *big.Int) {
 			return
 		}
 		// Wait for the transaction to be mined
-		_, success, _, _ := v.services.SenderOwnerAccount.WaitForConfirmedTx(v.services.Logger, tx)
+		_, success, _, _ := v.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 		if !success {
 			return
 		}
 
 		v.services.Logger.Info().Str("txhash", tx.Hash().String()).Msgf("allowance increased")
+	}
+
+	stakedAmount.Sub(stakedAmount, validatorPending)
+	stakedAmountFloat := v.services.Config.BaseConfig.BaseToken.ToFloat(stakedAmount)
+	validatorMinFloat := v.services.Config.BaseConfig.BaseToken.ToFloat(validatorMin)
+
+	v.services.Logger.Info().Float64("minimum", validatorMinFloat).Float64("basetoken_bal", validatorBaseBalFloat).Float64("staked", stakedAmountFloat).Float64("pending_withdraw", v.services.Eth.ToFloat(validatorPending)).Str("address", v.ValidatorAddress().String()).Msg("validator staked amount")
+
+	depositAmount := new(big.Int)
+
+	// If initial stake > 0 and the staked amount is less than the initial stake (say a fresh or emptied validator) then top up the stake to initial stake value
+	if v.services.Config.ValidatorConfig.InitialStake > 0 && stakedAmountFloat < v.services.Config.ValidatorConfig.InitialStake {
+		if v.services.Config.ValidatorConfig.InitialStake <= validatorMinFloat {
+			v.services.Logger.Error().Msg("⚠️ initial stake amount is less than validator minimum")
+			return
+		}
+		depositAmount = v.services.Config.BaseConfig.BaseToken.FromFloat(v.services.Config.ValidatorConfig.InitialStake - stakedAmountFloat)
+	} else if v.services.Config.ValidatorConfig.StakeBufferStakeAmount > 0 {
+
+		if stakedAmountFloat-validatorMinFloat >= v.services.Config.ValidatorConfig.StakeBufferStakeAmount {
+			v.services.Logger.Info().Msg("✅ staked amount is sufficient")
+			return
+		} else {
+			depositAmount = v.services.Config.BaseConfig.BaseToken.FromFloat(v.services.Config.ValidatorConfig.StakeBufferTopupAmount)
+		}
+
+	} else {
+
+		// calculate the minimum with topup buffer
+		minWithTopupBuffer := new(big.Int).Mul(validatorMin, big.NewInt(100))
+		minWithTopupBuffer = new(big.Int).Div(minWithTopupBuffer, big.NewInt(int64(100-v.services.Config.ValidatorConfig.StakeBufferTopupPercent)))
+
+		minWithTopupBufferAF := v.services.Config.BaseConfig.BaseToken.ToFloat(minWithTopupBuffer)
+
+		v.services.Logger.Info().Float64("amount", minWithTopupBufferAF).Msgf("minWithTopupBufferAF")
+
+		// check if the staked amount is greater than or equal to the minimum with topup buffer
+		if stakedAmount.Cmp(minWithTopupBuffer) >= 0 {
+			v.services.Logger.Info().Msg("✅ staked amount is sufficient")
+			return
+		}
+
+		// calculate the minimum with buffer
+		minWithBuffer := new(big.Int).Mul(validatorMin, big.NewInt(100))
+		minWithBuffer = new(big.Int).Div(minWithBuffer, big.NewInt(int64(100-v.services.Config.ValidatorConfig.StakeBufferPercent)))
+
+		// calculate the deposit amount
+		depositAmount.Sub(minWithBuffer, stakedAmount)
+
+	}
+	depositAmountAsFloat := v.services.Config.BaseConfig.BaseToken.ToFloat(depositAmount)
+	v.services.Logger.Info().Float64("amount", depositAmountAsFloat).Msgf("deposit amount")
+
+	if depositAmountAsFloat <= 0 {
+		v.services.Logger.Error().Msgf("deposit amount is less than zero - check stake values in config")
+		return
+	}
+
+	// check if the balance is less than the deposit amount
+	if baseTokenBalance.Cmp(depositAmount) < 0 {
+		v.services.Logger.Error().Msgf("⚠️ balance %g less than deposit amount %g ⚠️",
+			v.services.Config.BaseConfig.BaseToken.ToFloat(baseTokenBalance),
+			depositAmountAsFloat,
+		)
+		return
 	}
 
 	tx, err := v.services.SenderOwnerAccount.NonceManagerWrapper(3, 425, 1.5, true, func(opts *bind.TransactOpts) (interface{}, error) {
@@ -412,7 +420,7 @@ func (v *Validator) ProcessValidatorStake(baseTokenBalance *big.Int) {
 	}
 
 	// Wait for the transaction to be mined
-	_, success, _, _ := v.services.SenderOwnerAccount.WaitForConfirmedTx(v.services.Logger, tx)
+	_, success, _, _ := v.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 	if !success {
 		return
 	}

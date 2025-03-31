@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"gobius/account"
-	"gobius/arbius/basetoken"
+	"gobius/bindings/basetoken"
 	"gobius/erc20"
 	"io"
 	"math/big"
@@ -38,8 +38,8 @@ var (
 type ParaswapManager struct {
 	account           *account.Account
 	baseToken         *erc20.TokenERC20
-	baseTokenContract *basetoken.Basetoken
-	logger            *zerolog.Logger
+	baseTokenContract *basetoken.BaseToken
+	logger            zerolog.Logger
 }
 
 type PriceResponse struct {
@@ -72,7 +72,7 @@ type TransactionResponse struct {
 	ChainID  int    `json:"chainId"`
 }
 
-func NewParaswapManager(account *account.Account, baseTokenContract *basetoken.Basetoken, baseToken *erc20.TokenERC20, logger *zerolog.Logger) *ParaswapManager {
+func NewParaswapManager(account *account.Account, baseTokenContract *basetoken.BaseToken, baseToken *erc20.TokenERC20, logger zerolog.Logger) *ParaswapManager {
 	return &ParaswapManager{
 		account:           account,
 		baseToken:         baseToken,
@@ -110,6 +110,7 @@ func (p *ParaswapManager) GetPrices() (aiusPrice float64, ethPrice float64, err 
 	return aiusPrice, ethPrice, nil
 }
 
+// TODO: make this a context bound http call via NewRequestWithContext
 func (p *ParaswapManager) GetPrice(srcToken, destToken *erc20.TokenERC20, amount *big.Int) (*PriceResponse, error) {
 	params := url.Values{}
 	params.Add("srcToken", srcToken.Address.String())

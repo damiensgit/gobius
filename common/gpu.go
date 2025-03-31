@@ -14,6 +14,7 @@ type GPU struct {
 	ErrorCount     int
 	TimeSinceError time.Time
 	Mock           bool
+	Status         string
 	mu             sync.RWMutex
 }
 
@@ -24,6 +25,7 @@ func NewGPU(id int, url string) *GPU {
 		Url:        url,
 		Enabled:    true,
 		ErrorCount: 0,
+		Status:     "Idle",
 
 		// Set the time since error to some default value so that we don't immediately disable the GPU
 		TimeSinceError: time.Now(),
@@ -35,7 +37,7 @@ const (
 	errorTimeout  = 5 * time.Minute
 )
 
-// atomically increment the error count and set the time since error to now
+// automatically increment the error count and set the time since error to now
 // ensuring thread safety
 func (g *GPU) IncrementErrorCount() {
 	g.mu.Lock()
@@ -83,4 +85,16 @@ func (g *GPU) GetMockCid(taskid string, input interface{}) ([]byte, error) {
 	time.Sleep(time.Duration(rand.Intn(700)+4800) * time.Millisecond)
 
 	return b, nil
+}
+
+func (g *GPU) GetStatus() string {
+	g.mu.RLock()
+	defer g.mu.RUnlock()
+	return g.Status
+}
+
+func (g *GPU) SetStatus(status string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.Status = status
 }

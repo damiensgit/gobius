@@ -6,7 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"gobius/account"
-	"gobius/arbius/engine"
+	"gobius/bindings/arbiusrouterv1"
+	"gobius/bindings/engine"
 	"gobius/client"
 	task "gobius/common"
 	"gobius/config"
@@ -30,7 +31,7 @@ import (
 const profitEstimateBatchSize = 200
 
 type CacheItem struct {
-	Value      interface{}
+	Value      any
 	LastUpdate time.Time
 }
 
@@ -47,7 +48,7 @@ func NewCache(ttl time.Duration) *Cache {
 	}
 }
 
-func (c *Cache) Get(key string) (interface{}, bool) {
+func (c *Cache) Get(key string) (any, bool) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -59,7 +60,7 @@ func (c *Cache) Get(key string) (interface{}, bool) {
 	return item.Value, true
 }
 
-func (c *Cache) Set(key string, value interface{}) {
+func (c *Cache) Set(key string, value any) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -75,14 +76,12 @@ type BatchSolution struct {
 }
 
 type BatchTransactionManager struct {
-	services *Services
-	//delegatedvalidatorContract *delegatedvalidator.Delegatedvalidator
-	//bulkContract
+	services                      *Services
 	cumulativeGasUsed             *GasMetrics // tracks how much gas we've spent
 	signalCommitmentEvent         common.Hash
 	solutionSubmittedEvent        common.Hash
 	taskSubmittedEvent            common.Hash
-	batchMode                     int
+	batchMode                     int // 0 - single commitment/soution cycle with no batching, 1 - normal batch system, 2 - do not use this mode
 	commitments                   [][32]byte
 	solutions                     []BatchSolution
 	encodedTaskData               []byte
@@ -145,10 +144,12 @@ func (tm *BatchTransactionManager) GetValidatorInfo() string {
 	return s
 }
 
-// TODO: refactor this bs
+// TODO: refactor this to be more efficient and not so messy
 func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float64, float64, float64, float64, error) {
 	var err error
 	var basePrice, ethPrice float64
+
+	modelId := tm.services.AutoMineParams.Model
 
 	if basefee == nil {
 		basefee, err = tm.services.OwnerAccount.Client.GetBaseFee()
@@ -161,10 +162,18 @@ func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float6
 	basefeeinEth := tm.services.Eth.ToFloat(basefee)
 	basefeeinGwei := basefeeinEth * 1000000000
 
-	basePrice, ethPrice, err = tm.services.Paraswap.GetPrices()
-	if err != nil {
-		tm.services.Logger.Error().Err(err).Msg("could not get prices from paraswap!")
-		return 0, 0, 0, 0, 0, err
+	if tm.services.Config.BaseConfig.TestnetType > 0 {
+		basePrice, ethPrice = 30, 2000
+	} else {
+		basePrice, ethPrice, err = tm.services.Paraswap.GetPrices()
+		if err != nil {
+			tm.services.Logger.Error().Err(err).Msg("could not get prices from oracle!")
+			//return 0, 0, 0, 0, 0, err
+			// TODO: for local offline testing we need to handle this!
+			// if our oracle is offline for extended period of time the miner will be come inactive as it wont be able to process
+			// various tasks
+			basePrice, ethPrice = 30, 2000
+		}
 	}
 
 	tm.cache.Set("base_price", basePrice)
@@ -186,14 +195,13 @@ func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float6
 
 	totalCostPerBatchUSD := (submitTasksBatchUSD + signalCommitmentBatchUSD + submitSolutionBatchUSD + claimTasksUSD)
 
-	//rewardInAIUS := tm.cumulativeGasUsed.rewardEMA.Average()
-	reward, err := tm.services.Engine.Engine.GetReward(nil)
+	totalReward, err := tm.services.Engine.GetModelReward(modelId)
 	if err != nil {
-		tm.services.Logger.Error().Err(err).Msg("could not get reward!")
+		tm.services.Logger.Error().Err(err).Msg("could not get model reward!")
 		return 0, 0, 0, 0, 0, err
 	}
 
-	rewardInAIUS := tm.services.Config.BaseConfig.BaseToken.ToFloat(reward) * 0.9
+	rewardInAIUS := tm.services.Config.BaseConfig.BaseToken.ToFloat(totalReward)
 
 	tm.cache.Set("reward", rewardInAIUS)
 
@@ -399,7 +407,6 @@ func (tm *BatchTransactionManager) processBatch(
 	profitLevel, baseFee, rewardInAIUS, ethPrice, basePrice float64) {
 
 	if err := appQuit.Err(); err != nil {
-		tm.services.Logger.Error().Msg("appQuit err not nil")
 		return
 	}
 
@@ -932,7 +939,7 @@ func (tm *BatchTransactionManager) processBatch(
 				return err
 			}
 
-			receipt, success, _, _ := account.WaitForConfirmedTx(tm.services.Logger, tx)
+			receipt, success, _, _ := account.WaitForConfirmedTx(tx)
 
 			txCost := new(big.Int)
 
@@ -1161,7 +1168,7 @@ func (tm *BatchTransactionManager) processBatch(
 					return err
 				}
 
-				receipt, success, _, _ := validatorToSendSubmits.Account.WaitForConfirmedTx(tm.services.Logger, tx)
+				receipt, success, _, _ := validatorToSendSubmits.Account.WaitForConfirmedTx(tx)
 
 				txCost := new(big.Int)
 
@@ -1347,16 +1354,31 @@ func (tm *BatchTransactionManager) processBulkClaimFast(account *account.Account
 
 	// Get the event SolutionClaimed topic ID
 	eventTopic := event.Events["SolutionClaimed"].ID
+	rewardsPaidTopic := event.Events["RewardsPaid"].ID
+
+	var totalValidatorReward *big.Int = big.NewInt(0)
 
 	for _, log := range receipt.Logs {
-
-		if len(log.Topics) > 0 && log.Topics[0] == eventTopic {
-			parsed, err := tm.services.Engine.Engine.ParseSolutionClaimed(*log)
-			if err != nil {
-				tm.services.Logger.Error().Err(err).Msg("could not parse solution claimed event")
-				continue
+		if len(log.Topics) > 0 {
+			// Check for SolutionClaimed event
+			if log.Topics[0] == eventTopic {
+				parsed, err := tm.services.Engine.Engine.ParseSolutionClaimed(*log)
+				if err != nil {
+					tm.services.Logger.Error().Err(err).Msg("could not parse solution claimed event")
+					continue
+				}
+				tasksClaimed = append(tasksClaimed, task.TaskId(parsed.Task))
 			}
-			tasksClaimed = append(tasksClaimed, task.TaskId(parsed.Task))
+
+			// Check for RewardsPaid event to sum validatorReward
+			if log.Topics[0] == rewardsPaidTopic {
+				parsed, err := tm.services.Engine.Engine.ParseRewardsPaid(*log)
+				if err != nil {
+					tm.services.Logger.Error().Err(err).Msg("could not parse rewards paid event")
+					continue
+				}
+				totalValidatorReward.Add(totalValidatorReward, parsed.ValidatorReward)
+			}
 		}
 	}
 
@@ -1459,7 +1481,6 @@ func (tm *BatchTransactionManager) processBulkClaim(account *account.Account, ta
 
 	// Use the Map function to extract the TaskId from each struct
 	taskIds := utils.Map(tasksToClaim, func(s storage.ClaimTask) [32]byte {
-		//value, _ := task.ConvertTaskIdString2Bytes(s.ID)
 		return s.ID
 	})
 
@@ -1488,21 +1509,41 @@ func (tm *BatchTransactionManager) processBulkClaim(account *account.Account, ta
 
 	// Get the event SolutionClaimed topic ID
 	eventTopic := event.Events["SolutionClaimed"].ID
+	rewardsPaidTopic := event.Events["RewardsPaid"].ID
+
+	var totalValidatorReward *big.Int = big.NewInt(0)
 
 	for _, log := range receipt.Logs {
-
-		if len(log.Topics) > 0 && log.Topics[0] == eventTopic {
-			parsed, err := tm.services.Engine.Engine.ParseSolutionClaimed(*log)
-			if err != nil {
-				tm.services.Logger.Error().Err(err).Msg("could not parse solution claimed event")
-				continue
+		if len(log.Topics) > 0 {
+			// Check for SolutionClaimed event
+			if log.Topics[0] == eventTopic {
+				parsed, err := tm.services.Engine.Engine.ParseSolutionClaimed(*log)
+				if err != nil {
+					tm.services.Logger.Error().Err(err).Msg("could not parse solution claimed event")
+					continue
+				}
+				tasksClaimed = append(tasksClaimed, task.TaskId(parsed.Task))
 			}
-			tasksClaimed = append(tasksClaimed, task.TaskId(parsed.Task))
+
+			// Check for RewardsPaid event to sum validatorReward
+			if log.Topics[0] == rewardsPaidTopic {
+				parsed, err := tm.services.Engine.Engine.ParseRewardsPaid(*log)
+				if err != nil {
+					tm.services.Logger.Error().Err(err).Msg("could not parse rewards paid event")
+					continue
+				}
+				totalValidatorReward.Add(totalValidatorReward, parsed.ValidatorReward)
+			}
 		}
 	}
 
 	if len(tasksClaimed) == 0 {
 		tm.services.Logger.Warn().Msg("⚠️ successful bulk claim transaction but no tasks were claimed: check for contestations/cooldown issues ⚠️")
+	}
+
+	if totalValidatorReward.Cmp(big.NewInt(0)) > 0 {
+		totalValidatorRewardInAius := tm.services.Config.BaseConfig.BaseToken.ToFloat(totalValidatorReward)
+		tm.services.Logger.Info().Float64("validator_reward", totalValidatorRewardInAius).Msg("total validator reward for bulk claim")
 	}
 
 	claimsToDelete = make([]task.TaskId, 0)
@@ -1528,7 +1569,7 @@ func (tm *BatchTransactionManager) processBulkClaim(account *account.Account, ta
 	}
 
 	if len(claimsToDelete) > 0 {
-		tm.services.Logger.Info().Int("claimed", len(claimsToDelete)).Msg("deleting claims from storage")
+		tm.services.Logger.Info().Int("claimed", len(claimsToDelete)).Msg("deleting claimed tasks from storage")
 		tm.services.TaskStorage.DeleteClaims(claimsToDelete)
 	}
 
@@ -1561,7 +1602,7 @@ func (tm *BatchTransactionManager) BatchCommitments() error {
 		return err
 	}
 
-	receipt, success, _, _ := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tm.services.Logger, tx)
+	receipt, success, _, _ := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 
 	if receipt != nil {
 		txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
@@ -1590,7 +1631,6 @@ func (tm *BatchTransactionManager) BatchSolutions() error {
 	copySolutions := make([]BatchSolution, len(tm.solutions))
 	copy(copySolutions, tm.solutions)
 	tm.solutions = []BatchSolution{}
-
 	tm.Unlock()
 
 	for _, solution := range copySolutions {
@@ -1627,7 +1667,7 @@ func (tm *BatchTransactionManager) BatchSolutions() error {
 			return err
 		}
 
-		receipt, success, _, _ := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tm.services.Logger, tx)
+		receipt, success, _, _ := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 
 		if receipt != nil {
 			txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
@@ -1647,6 +1687,10 @@ func (tm *BatchTransactionManager) BatchSolutions() error {
 	return nil
 }
 
+func (tm *BatchTransactionManager) SubmitIpfsCid(validator common.Address, taskId task.TaskId, cid []byte) error {
+	return tm.services.TaskStorage.AddIpfsCid(taskId, cid)
+}
+
 func (tm *BatchTransactionManager) SignalCommitment(validator common.Address, taskId task.TaskId, commitment [32]byte) error {
 	switch tm.batchMode {
 	case 2:
@@ -1660,7 +1704,7 @@ func (tm *BatchTransactionManager) SignalCommitment(validator common.Address, ta
 		if err != nil {
 			tm.services.Logger.Error().Err(err).Msg("error adding commitment to storage")
 		}
-
+		return err
 	case 0:
 		return tm.singleSignalCommitment(taskId, commitment)
 	default:
@@ -1725,7 +1769,7 @@ func (m *BatchTransactionManager) singleSignalCommitment(taskId task.TaskId, com
 	m.services.Logger.Info().Str("taskid", taskIdStr).Uint64("nonce", tx.Nonce()).Str("txhash", tx.Hash().String()).Str("elapsed", elapsed.String()).Msg("signal commitment tx sent")
 
 	go func() {
-		receipt, _, _, _ := m.services.SenderOwnerAccount.WaitForConfirmedTx(m.services.Logger, tx)
+		receipt, _, _, _ := m.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 		if receipt != nil {
 			txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
 			m.services.Logger.Info().Uint64("gas", receipt.GasUsed).Uint64("gas_per_commit", receipt.GasUsed).Msg("**** single commitment gas used *****")
@@ -1743,7 +1787,7 @@ func (m *BatchTransactionManager) singleSignalCommitment(taskId task.TaskId, com
 func (m *BatchTransactionManager) singleSubmitSolution(taskId task.TaskId, cid []byte) error {
 
 	taskIdStr := taskId.String()
-	m.services.Logger.Info().Str("taskid", taskIdStr).Msg("sending solution")
+	m.services.Logger.Info().Str("taskid", taskIdStr).Msg("sending single solution")
 
 	start := time.Now()
 	tx, err := m.services.SenderOwnerAccount.NonceManagerWrapper(8, 250, 1.5, false, func(opts *bind.TransactOpts) (interface{}, error) {
@@ -1753,7 +1797,7 @@ func (m *BatchTransactionManager) singleSubmitSolution(taskId task.TaskId, cid [
 		// }
 		// m.services.Logger.Info().Int("nonce", nonce).Str("taskId", taskId.String()).Msg("NonceManagerWrapper [sending solution]")
 
-		opts.GasLimit = 0 //400_000
+		opts.GasLimit = 400_000
 
 		return m.services.Engine.Engine.SubmitSolution(opts, taskId, cid)
 	})
@@ -1799,7 +1843,7 @@ func (m *BatchTransactionManager) singleSubmitSolution(taskId task.TaskId, cid [
 
 		}()
 
-		receipt, success, _, _ := m.services.SenderOwnerAccount.WaitForConfirmedTx(m.services.Logger, tx)
+		receipt, success, _, _ := m.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 
 		if receipt != nil {
 			txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
@@ -1875,7 +1919,7 @@ func (tm *BatchTransactionManager) BulkClaimWithAccount(account *account.Account
 		return nil, err
 	}
 
-	receipt, _, _, err := account.WaitForConfirmedTx(tm.services.Logger, tx)
+	receipt, _, _, err := account.WaitForConfirmedTx(tx)
 
 	if receipt != nil {
 		txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
@@ -1894,10 +1938,9 @@ func (tm *BatchTransactionManager) BulkTasks(account *account.Account, count int
 			// 1 in 10 it undershoots the gas limit
 			opts.GasLimit = uint64(1_500_000 + uint64(count)*185_000)
 			tasks := big.NewInt(int64(count))
-			if client == nil {
-				return tm.services.Engine.Engine.BulkSubmitTask(opts, tm.services.AutoMineParams.Version, tm.services.AutoMineParams.Owner, tm.services.AutoMineParams.Model, tm.services.AutoMineParams.Fee, tm.services.AutoMineParams.Input, tasks)
-				//return tm.services.BulkTasks.SubmitMultipleTasksEncoded(opts, tasks, tm.encodedTaskData)
-			} else {
+			//if client == nil {
+			return tm.services.Engine.Engine.BulkSubmitTask(opts, tm.services.AutoMineParams.Version, tm.services.AutoMineParams.Owner, tm.services.AutoMineParams.Model, tm.services.AutoMineParams.Fee, tm.services.AutoMineParams.Input, tasks)
+			/*} else {
 				opts.NoSend = true
 				tx, err := tm.services.BulkTasks.SubmitMultipleTasksEncoded(opts, tasks, tm.encodedTaskData)
 				if err != nil {
@@ -1905,15 +1948,14 @@ func (tm *BatchTransactionManager) BulkTasks(account *account.Account, count int
 				}
 
 				return client.SendSignedTransaction(tx)
-			}
-			//return tm.services.BulkTasks.SubmitMultipleTasks(opts, count/10)
+			}*/
 		})
 
 		if err != nil {
 			return nil, err
 		}
 
-		receipt, success, _, err := account.WaitForConfirmedTx(tm.services.Logger, tx)
+		receipt, success, _, err := account.WaitForConfirmedTx(tx)
 
 		if receipt != nil {
 			gasPerTask := float64(receipt.GasUsed) / float64(count)
@@ -2016,7 +2058,7 @@ func (m *BatchTransactionManager) ProcessValidatorsStakes() {
 
 	balAsFloat := m.services.Eth.ToFloat(bal)
 
-	// check if the Ether balance is less than 0.01 Ether
+	// check if the Ether balance is less than configured threshold
 	if balAsFloat < m.services.Config.ValidatorConfig.EthLowThreshold {
 		m.services.Logger.Warn().Float64("threshold", m.services.Config.ValidatorConfig.EthLowThreshold).Msg("⚠️ balance is below threshold")
 	}
@@ -2118,53 +2160,65 @@ func (m *BatchTransactionManager) SubmitContestation(validator common.Address, t
 	return errors.New("validator not found")
 }
 
-func (m *BatchTransactionManager) Start(appQuit context.Context) error {
-	m.cumulativeGasUsed.Start()
+func (tm *BatchTransactionManager) Start(appQuit context.Context) error {
 
-	if m.services.Config.ValidatorConfig.StakeCheck {
-		stakeCheckInterval, err := time.ParseDuration(m.services.Config.ValidatorConfig.StakeCheckInterval)
+	tm.wg.Add(1)
+	go tm.cumulativeGasUsed.Start(appQuit, tm.wg)
+
+	// if the validator stake / balance check is enabled, start the validator stake / balance check processor
+	if tm.services.Config.ValidatorConfig.StakeCheck {
+		stakeCheckInterval, err := time.ParseDuration(tm.services.Config.ValidatorConfig.StakeCheckInterval)
 		if err != nil {
 			return err
 		}
-		m.ProcessValidatorsStakes()
-
-		go m.processValidatorStakePoller(appQuit, m.wg, stakeCheckInterval)
+		tm.ProcessValidatorsStakes()
+		tm.wg.Add(1) // Added wg.Add(1) to match the Done in processValidatorStakePoller
+		go tm.processValidatorStakePoller(appQuit, tm.wg, stakeCheckInterval)
 	} else {
-		m.services.Logger.Warn().Msg("validator stake / balance checks are disabled!")
+		tm.services.Logger.Warn().Msg("validator stake / balance checks are disabled!")
 	}
 
-	switch m.batchMode {
+	// if the ipfs incentive claim is enabled, start the ipfs claim processor
+	if tm.services.Config.IPFS.IncentiveClaim {
+		claimInterval, err := time.ParseDuration(tm.services.Config.IPFS.ClaimInterval)
+		if err != nil {
+			return err
+		}
+
+		tm.wg.Add(1)
+		go tm.startIpfsClaimProcessor(appQuit, tm.wg, claimInterval)
+	}
+
+	// start the batch claim processor
+	// 1: normal batch system
+	switch tm.batchMode {
 	case 1:
-		if m.services.Config.Miner.UsePolling {
-			d, err := time.ParseDuration(m.services.Config.Miner.PollingTime)
+		if tm.services.Config.Miner.UsePolling {
+			d, err := time.ParseDuration(tm.services.Config.Miner.PollingTime)
 			if err != nil {
 				return err
 			}
-			m.wg.Add(1)
-			go m.processBatchPoller(appQuit, m.wg, d)
+			tm.wg.Add(1)
+			go tm.processBatchPoller(appQuit, tm.wg, d)
 		} else {
-			m.wg.Add(1)
-			go m.processBatchBlockTrigger(appQuit, m.wg)
+			// process batch on block trigger (this hits external apis harder and not recommended)
+			tm.wg.Add(1)
+			go tm.processBatchBlockTrigger(appQuit, tm.wg)
 		}
 	case 0, 2:
-		if m.services.Config.Claim.Enabled {
-			m.wg.Add(1)
-			go m.batchClaimPoller(appQuit, m.wg, time.Duration(m.services.Config.Claim.Delay)*time.Second)
+		if tm.services.Config.Claim.Enabled {
+			tm.wg.Add(1)
+			go tm.batchClaimPoller(appQuit, tm.wg, time.Duration(tm.services.Config.Claim.Delay)*time.Second)
 		}
 	default:
 		// error
+		return errors.New("invalid batch mode")
 	}
 
 	return nil
 }
 
-func NewBatchTransactionManager(ctx context.Context, wg *sync.WaitGroup) (*BatchTransactionManager, error) {
-
-	// Get the services from the context
-	services, ok := ctx.Value(servicesKey{}).(*Services)
-	if !ok {
-		panic("could not get services from context")
-	}
+func NewBatchTransactionManager(services *Services, ctx context.Context, wg *sync.WaitGroup) (*BatchTransactionManager, error) {
 
 	// TODO: move these out of here!
 	engineAbi, err := engine.EngineMetaData.GetAbi()
@@ -2177,13 +2231,12 @@ func NewBatchTransactionManager(ctx context.Context, wg *sync.WaitGroup) (*Batch
 	solutionSubmittedEvent := engineAbi.Events["SolutionSubmitted"].ID
 	taskSubmittedEvent := engineAbi.Events["TaskSubmitted"].ID
 
-	// TODO: cache these values at load time
 	minClaimSolutionTimeBig, err := services.Engine.Engine.MinClaimSolutionTime(nil)
 	if err != nil {
 		return nil, err
 	}
 
-	fmt.Println("minClaimSolutionTimeBig", minClaimSolutionTimeBig.String())
+	//fmt.Println("minClaimSolutionTimeBig", minClaimSolutionTimeBig.String())
 
 	minContestationVotePeriodTimeBig, err := services.Engine.Engine.MinContestationVotePeriodTime(nil)
 	if err != nil {
@@ -2203,7 +2256,6 @@ func NewBatchTransactionManager(ctx context.Context, wg *sync.WaitGroup) (*Batch
 	if err != nil {
 		return nil, err
 	}
-	//	}
 
 	var accounts []*account.Account
 
@@ -2211,7 +2263,7 @@ func NewBatchTransactionManager(ctx context.Context, wg *sync.WaitGroup) (*Batch
 
 		for _, pk := range services.Config.BatchTasks.PrivateKeys {
 
-			account, err := account.NewAccount(pk, services.SenderOwnerAccount.Client, ctx, services.Config.Blockchain.CacheNonce)
+			account, err := account.NewAccount(pk, services.SenderOwnerAccount.Client, ctx, services.Config.Blockchain.CacheNonce, services.Logger)
 			if err != nil {
 				return nil, err
 			}
@@ -2232,7 +2284,7 @@ func NewBatchTransactionManager(ctx context.Context, wg *sync.WaitGroup) (*Batch
 
 	var validators []*Validator
 	for _, pk := range services.Config.ValidatorConfig.PrivateKeys {
-		va, err := NewValidator(ctx, pk, services.SenderOwnerAccount.Client, ratelimit)
+		va, err := NewValidator(services, ctx, pk, services.SenderOwnerAccount.Client, ratelimit)
 		if err != nil {
 			return nil, err
 		}
@@ -2259,4 +2311,266 @@ func NewBatchTransactionManager(ctx context.Context, wg *sync.WaitGroup) (*Batch
 	}
 
 	return btm, nil
+}
+
+// Add after the existing metrics interface implementation:
+
+func (tm *BatchTransactionManager) GetSessionTime() string {
+	sessionDuration := time.Since(tm.cumulativeGasUsed.sessionStartTime)
+	hours := int(sessionDuration.Hours())
+	minutes := int(sessionDuration.Minutes()) % 60
+	seconds := int(sessionDuration.Seconds()) % 60
+	return fmt.Sprintf("%02d:%02d:%02d", hours, minutes, seconds)
+}
+
+func (tm *BatchTransactionManager) GetSolvedLastMinute() int64 {
+	return tm.services.TaskTracker.GetSolvedLastMinute()
+}
+
+func (tm *BatchTransactionManager) GetSuccessCount() int64 {
+	return tm.services.TaskTracker.GetSuccessCount()
+}
+
+func (tm *BatchTransactionManager) GetTotalCount() int64 {
+	return tm.services.TaskTracker.GetTotalCount()
+}
+
+func (tm *BatchTransactionManager) GetSuccessRate() float64 {
+	return tm.services.TaskTracker.GetSuccessRate()
+}
+
+func (tm *BatchTransactionManager) GetAverageSolutionRate() float64 {
+	return tm.services.TaskTracker.GetAverageSolutionRate()
+}
+
+func (tm *BatchTransactionManager) GetAverageSolutionsPerMin() float64 {
+	return tm.services.TaskTracker.GetAverageSolutionsPerMin()
+}
+
+func (tm *BatchTransactionManager) GetAverageSolvesPerMin() float64 {
+	return tm.services.TaskTracker.GetAverageSolvesPerMin()
+}
+
+func (tm *BatchTransactionManager) GetTokenIncomePerMin() float64 {
+	return tm.services.TaskTracker.GetAverageTasksPerPeriod() * tm.cumulativeGasUsed.rewardEMA.Average()
+}
+
+func (tm *BatchTransactionManager) GetTokenIncomePerHour() float64 {
+	return tm.GetTokenIncomePerMin() * 60
+}
+
+func (tm *BatchTransactionManager) GetTokenIncomePerDay() float64 {
+	return tm.GetTokenIncomePerHour() * 24
+}
+
+func (tm *BatchTransactionManager) GetIncomePerMin() float64 {
+	return tm.GetTokenIncomePerMin() * tm.cumulativeGasUsed.basePriceEMA.Average()
+}
+
+func (tm *BatchTransactionManager) GetIncomePerHour() float64 {
+	return tm.GetIncomePerMin() * 60
+}
+
+func (tm *BatchTransactionManager) GetIncomePerDay() float64 {
+	return tm.GetIncomePerHour() * 24
+}
+
+func (tm *BatchTransactionManager) GetProfitPerMin() float64 {
+	totalCostInUSD := tm.services.Config.BaseConfig.BaseToken.ToFloat(tm.cumulativeGasUsed.GetTotals()) * tm.cumulativeGasUsed.lastEthPrice
+	timeSinceSessionStart := time.Since(tm.cumulativeGasUsed.sessionStartTime).Minutes()
+	if timeSinceSessionStart <= 0 {
+		return 0
+	}
+	averageCostsPerMin := totalCostInUSD / timeSinceSessionStart
+	return tm.GetIncomePerMin() - averageCostsPerMin
+}
+
+func (tm *BatchTransactionManager) GetProfitPerHour() float64 {
+	return tm.GetProfitPerMin() * 60
+}
+
+func (tm *BatchTransactionManager) GetProfitPerDay() float64 {
+	return tm.GetProfitPerHour() * 24
+}
+
+// ProcessIpfsClaims queries the database for stored IPFS CIDs, gets signatures
+// from the oracle and submits claims on-chain
+// TODO: add support for querying other public IPFS providers for the Cid first to improve propagation speed before claiming
+func (tm *BatchTransactionManager) processIpfsClaimsWithAccount(account *account.Account, ctx context.Context) error {
+	tm.Lock()
+	defer tm.Unlock()
+
+	// Get all Ipfs entries from the database that haven't been claimed (oldest first)
+	// TODO: make batch size configurable
+	ipfsEntries, err := tm.services.TaskStorage.GetIpfsCids(10)
+	if err != nil {
+		tm.services.Logger.Error().Err(err).Msg("failed to get unclaimed ipfs entries")
+		return err
+	}
+
+	if len(ipfsEntries) == 0 {
+		tm.services.Logger.Info().Msg("no unclaimed ipfs entries to process")
+		return nil
+	}
+
+	tm.services.Logger.Info().Int("count", len(ipfsEntries)).Msg("processing ipfs claim entries")
+
+	oracleClient := tm.services.IpfsOracle
+
+	gasPrice, gasFeeCap, gasFeeTip, _ := account.Client.GasPriceOracle(false)
+
+	for _, entry := range ipfsEntries {
+		// Check if we should stop processing
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		cidHex := fmt.Sprintf("%x", entry.Cid)
+		taskIdStr := entry.TaskId.String()
+
+		// Check if incentive is still available on-chain
+		incentiveAmount, err := tm.services.ArbiusRouter.Incentives(nil, entry.TaskId)
+		if err != nil {
+			tm.services.Logger.Error().
+				Err(err).
+				Str("taskId", taskIdStr).
+				Msg("failed to check incentive availability")
+			continue
+		}
+
+		if incentiveAmount.Cmp(big.NewInt(0)) == 0 {
+			tm.services.Logger.Info().
+				Str("taskId", taskIdStr).
+				Str("cid", "0x"+cidHex).
+				Msg("incentive already claimed for this task")
+
+			// Mark as claimed in database to avoid reprocessing
+			if err := tm.services.TaskStorage.DeleteIpfsCid(entry.TaskId); err != nil {
+				tm.services.Logger.Error().Err(err).Str("taskId", taskIdStr).Msg("failed to mark entry as claimed")
+			}
+			continue
+		}
+
+		// Check if within 60 second priority window
+		isWithinPriorityWindow := time.Since(entry.Added) <= 60*time.Second
+
+		// If outside 60 seconds and not our validator, may want to be more strategic
+		if !isWithinPriorityWindow {
+			tm.services.Logger.Info().
+				Str("taskId", taskIdStr).
+				Str("cid", "0x"+cidHex).
+				Dur("age", time.Since(entry.Added)).
+				Msg("outside 60 second priority window, still attempting claim")
+		}
+
+		tm.services.Logger.Debug().
+			Str("taskId", taskIdStr).
+			Str("cid", "0x"+cidHex).
+			Msg("getting signatures for cid")
+
+		// Get signatures from oracle
+		signatures, err := oracleClient.GetSignaturesForCID(ctx, cidHex)
+		if err != nil {
+			tm.services.Logger.Error().
+				Err(err).
+				Str("taskId", taskIdStr).
+				Str("cid", "0x"+cidHex).
+				Msg("failed to get signatures for cid")
+			continue
+		}
+
+		if len(signatures) == 0 {
+			tm.services.Logger.Warn().
+				Str("taskId", taskIdStr).
+				Str("cid", "0x"+cidHex).
+				Msg("no signatures returned for cid")
+			continue
+		}
+
+		// Submit on-chain claim with signatures
+		tm.services.Logger.Info().
+			Str("taskId", taskIdStr).
+			Str("cid", "0x"+cidHex).
+			Int("signatureCount", len(signatures)).
+			Bool("priorityWindow", isWithinPriorityWindow).
+			Str("incentiveAmount", incentiveAmount.String()).
+			Msg("submitting ipfs claim on-chain")
+
+		// convert signatures to arbiusrouterv1.Signature
+		arbiusSignatures := make([]arbiusrouterv1.Signature, len(signatures))
+		for i, signature := range signatures {
+			arbiusSignatures[i] = arbiusrouterv1.Signature{
+				Signer:    signature.Signer,
+				Signature: common.FromHex(signature.Signature),
+			}
+		}
+
+		opts := account.GetOptsWithoutNonceInc(0, gasPrice, gasFeeCap, gasFeeTip)
+		tx, err := tm.services.ArbiusRouter.ClaimIncentive(opts, entry.TaskId, arbiusSignatures)
+		if err != nil {
+			tm.services.Logger.Error().Err(err).Str("taskId", taskIdStr).Msg("failed to submit ipfs claim on-chain")
+			continue
+		}
+
+		var success bool
+
+		// special case for mock router contract
+		if *tx.To() == (common.Address{}) {
+			tm.services.Logger.Info().Str("taskId", taskIdStr).Msg("mock router contract, skipping confirmation check")
+			success = true
+		} else {
+
+			var receipt *types.Receipt
+
+			receipt, success, _, err = account.WaitForConfirmedTx(tx)
+			if err != nil {
+				tm.services.Logger.Error().Err(err).Str("taskId", taskIdStr).Msg("failed to wait for ipfs claim on-chain")
+				continue
+			}
+
+			if receipt != nil {
+				tm.services.Logger.Info().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("ipfs claim tx completed!")
+			}
+		}
+
+		if success {
+			// delete from database
+			if err := tm.services.TaskStorage.DeleteIpfsCid(entry.TaskId); err != nil {
+				tm.services.Logger.Error().Err(err).Str("taskId", taskIdStr).Msg("failed to mark entry as claimed")
+			}
+		} else {
+			tm.services.Logger.Error().
+				Str("taskId", taskIdStr).
+				Str("cid", "0x"+cidHex).
+				Msg("failed to submit ipfs claim on-chain")
+		}
+	}
+
+	return nil
+}
+
+// StartIpfsClaimProcessor starts a background process to periodically check for and process IPFS claims
+func (tm *BatchTransactionManager) startIpfsClaimProcessor(appQuit context.Context, wg *sync.WaitGroup, claimInterval time.Duration) {
+	defer wg.Done()
+	ticker := time.NewTicker(claimInterval)
+	defer ticker.Stop()
+
+	tm.services.Logger.Info().Msgf("started ipfs claim processor with interval %s", claimInterval)
+
+	for {
+		select {
+		case <-appQuit.Done():
+			tm.services.Logger.Info().Msg("shutting down ipfs claim processor")
+			return
+		case <-ticker.C:
+			// TODO: make this use task accounts instead of sender account
+			if err := tm.processIpfsClaimsWithAccount(tm.services.SenderOwnerAccount, appQuit); err != nil {
+				if err != context.Canceled {
+					tm.services.Logger.Error().Err(err).Msg("error processing ipfs claims")
+				}
+			}
+		}
+	}
 }

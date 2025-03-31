@@ -1,7 +1,7 @@
 {
     "baseTokenAddress": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
-    "engineAddress": "0xDc64a140Aa3E981100a9becA4E685f962f0cF6C9",
-    "bulkTasksAddress": "0x0E801D84Fa97b50751Dbf25036d067dCf18858bF",
+    "engineAddress": "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707",
+    "bulkTasksAddress": "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575",
     "models": {
       "kandinsky2": {
         "id": "0x002a11afdb4f9e0ae985136622cbea64dd5d90d3d751ce1ad2391264e886aad1",

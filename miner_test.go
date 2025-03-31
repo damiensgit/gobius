@@ -8,6 +8,7 @@ import (
 	"gobius/client"
 	"gobius/config"
 	"os"
+	"sync"
 	"testing"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
@@ -88,14 +89,23 @@ func TestValidatorWithdraw(t *testing.T) {
 	_ = logger
 	_ = rpcClient
 
-	miner, err := NewMinerEngine(context.Background(), validator, wg)
+	var appQuitWG sync.WaitGroup
+	validator, err := NewBatchTransactionManager(appServices, appContext, &appQuitWG)
+
+	if err != nil {
+		logger.Fatal().Err(err).Msg("could not create transaction manager")
+	}
+
+	miner, err := NewMinerEngine(context.Background(), validator, &appQuitWG)
 
 	assert.NoError(t, err, "could not create miner engine")
 
-	err = miner.validator.InitiateValidatorWithdraw()
+	validatorAddress := miner.validator.GetNextValidatorAddress()
+
+	err = miner.validator.InitiateValidatorWithdraw(validatorAddress, 0.00001)
 	assert.NoError(t, err, "error in initiate validator withdraw")
 
-	err = miner.validator.ValidatorWithdraw()
+	err = miner.validator.ValidatorWithdraw(validatorAddress)
 	assert.NoError(t, err, "error in  validator withdraw")
 
 }

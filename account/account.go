@@ -29,8 +29,9 @@ type Account struct {
 	Address    common.Address
 	auth       *bind.TransactOpts
 	ctx        context.Context
-	nonce      uint64 `json:"-"`
-	cacheNonce bool   `json:"-"`
+	nonce      uint64         `json:"-"`
+	cacheNonce bool           `json:"-"`
+	logger     zerolog.Logger `json:"-"`
 	sync.RWMutex
 }
 
@@ -38,7 +39,7 @@ const basefeeWiggleMultiplier = 2
 
 // Portions of code taken from offchainlabs/go-ethereum to handle trasactions
 
-func NewAccount(privateKeyHex string, client *client.Client, ctx context.Context, cacheNonce bool) (*Account, error) {
+func NewAccount(privateKeyHex string, client *client.Client, ctx context.Context, cacheNonce bool, logger zerolog.Logger) (*Account, error) {
 	privateKey, err := crypto.HexToECDSA(privateKeyHex)
 	if err != nil {
 		return nil, err
@@ -69,6 +70,7 @@ func NewAccount(privateKeyHex string, client *client.Client, ctx context.Context
 		ctx:        ctx,
 		cacheNonce: cacheNonce,
 		nonce:      math.MaxUint64,
+		logger:     logger,
 	}, nil
 }
 
@@ -255,29 +257,6 @@ func (account *Account) SendTransactionWithOpts(opts *bind.TransactOpts, contrac
 	return signedTx, nil
 }
 
-// func (account *Account) SendTransaction(toAddress common.Address, value *big.Int, gasLimit uint64, gasPrice *big.Int, data []byte) (*types.Transaction, error) {
-
-// 	opts := account.GetOpts(gasLimit, gasPrice, nil, nil)
-
-// 	return account.SendTransactionWithOpts(opts, &toAddress, data)
-
-// 	// nonce := account.Nonce()
-
-// 	// tx := types.NewTransaction(nonce, toAddress, value, gasLimit, gasPrice, data)
-
-// 	// signedTx, err := types.SignTx(tx, types.LatestSignerForChainID(account.Client.ChainID), account.privateKey)
-// 	// if err != nil {
-// 	// 	return nil, err
-// 	// }
-
-// 	// err = account.Client.Client.SendTransaction(account.ctx, signedTx)
-// 	// if err != nil {
-// 	// 	return nil, err
-// 	// }
-
-// 	// return signedTx, nil
-// }
-
 func (account *Account) SendSignedTransaction(signedTx *types.Transaction) (*types.Transaction, error) {
 	err := account.Client.Client.SendTransaction(account.ctx, signedTx)
 	if err != nil {
@@ -393,19 +372,19 @@ func (account *Account) UpdateNonce() error {
 
 // TODO: move logger to account type
 // TODO: use app context
-func (account *Account) WaitForConfirmedTx(logger *zerolog.Logger, tx *types.Transaction) (receipt *types.Receipt, success bool, revertReason string, err error) {
+func (account *Account) WaitForConfirmedTx(tx *types.Transaction) (receipt *types.Receipt, success bool, revertReason string, err error) {
 	ctxTimeout, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
 	receipt, err = bind.WaitMined(ctxTimeout, account.Client.Client, tx)
 	if err != nil {
-		logger.Error().Err(err).Str("txhash", tx.Hash().String()).Msg("❌ error waiting for transaction to be mined")
+		account.logger.Error().Err(err).Str("txhash", tx.Hash().String()).Msg("❌ error waiting for transaction to be mined")
 		return nil, false, "", err
 	}
 
 	if receipt.Status != types.ReceiptStatusSuccessful {
 		revertReason = utils.GetRevertReason(account.Address, tx, account.Client.Client, receipt.BlockNumber)
-		logger.Error().
+		account.logger.Error().
 			Str("reason", revertReason).
 			Str("txhash", tx.Hash().String()).
 			Str("	", tx.GasFeeCap().String()).
@@ -421,7 +400,7 @@ func (account *Account) NonceManagerWrapperWithContext(ctx context.Context, opts
 		gasPrice, gasFeeCap, gasFeeTip, _ := account.Client.GasPriceOracle(override)
 		opts = account.GetOpts(0, gasPrice, gasFeeCap, gasFeeTip)
 	}
-	txFunc := func(nonce uint64) (interface{}, error) {
+	txFunc := func(nonce uint64) (any, error) {
 
 		if nonce > 0 && account.CacheNonce() {
 			// nonceMu.Lock()
@@ -438,7 +417,7 @@ func (account *Account) NonceManagerWrapperWithContext(ctx context.Context, opts
 			optsNonce := opts.Nonce.Uint64()
 			diff := int64(nonce - optsNonce)
 
-			log.Printf("NONCE HANDLING: STATE: %d OPTS: %d DIFF: %d\n", nonce, optsNonce, diff)
+			//log.Printf("NONCE HANDLING: STATE: %d OPTS: %d DIFF: %d\n", nonce, optsNonce, diff)
 			//}
 
 			//newNonce := nonce
@@ -466,12 +445,12 @@ func (account *Account) NonceManagerWrapperWithContext(ctx context.Context, opts
 			// 	//account.SetNonce(nonce + 1)
 			// 	opts.Nonce.Sub(opts.Nonce, big.NewInt(1))
 			// }
-			log.Printf("NONCE HANDLING: AFTER: %d", opts.Nonce.Int64())
+			//log.Printf("NONCE HANDLING: AFTER: %d", opts.Nonce.Int64())
 			//opts.Nonce = big.NewInt(int64(nonce))
 		}
 		return fn(opts)
 	}
-	result, err := utils.ExpRetryWithNonceContext(ctx, txFunc, tries, base, backoffMultiplier)
+	result, err := utils.ExpRetryWithNonceContext(ctx, account.logger, txFunc, tries, base, backoffMultiplier)
 	txResult, ok := result.(*types.Transaction)
 	if !ok {
 		return nil, errors.New("result is not the expected type")

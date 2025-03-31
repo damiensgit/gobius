@@ -78,6 +78,46 @@ Windows, Linux and macOS are supported
    go build
    ```
 
+### Building Contract Bindings
+
+The project uses [Task](https://taskfile.dev) to manage contract binding generation. First, install Task:
+
+```bash
+go install github.com/go-task/task/v3/cmd/task@latest
+```
+
+1. Generate all contract bindings:
+   ```bash
+   task build:all
+   ```
+
+2. Or generate specific bindings:
+   ```bash
+   # Build just the voter interface
+   task build:voter
+
+   # Build just the engine contract
+   task build:enginev5
+
+   # Build bulk tasks contract
+   task build:bulktasks
+   
+   # Build SQL schema bindings
+   task build:sqlc
+   ```
+
+The bindings will be generated in the `./bindings` directory with appropriate subdirectories for each contract.
+
+### SQL Schema Requirements
+
+To build SQL bindings, you'll need [sqlc](https://sqlc.dev/) installed:
+
+```bash
+go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
+```
+
+The SQL schema and configuration are located in the `./sql` directory. Running `task build:sqlc` will generate Go code from your SQL schema.
+
 ### Configuration Setup
 
 1. Copy the example configuration:

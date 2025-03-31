@@ -21,3 +21,6 @@ gobius
 local.db*
 bin/*
 .vscode/settings.json
+.task/
+!config.example.json
+!sepolia.example.json

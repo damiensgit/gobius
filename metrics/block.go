@@ -3,7 +3,7 @@ package metrics
 import (
 	"context"
 	"fmt"
-	"gobius/arbius/engine"
+	"gobius/bindings/engine"
 	"gobius/client"
 	"gobius/config"
 	"log"
@@ -63,7 +63,6 @@ var validatorDepositEvent common.Hash
 
 func init() {
 
-	// TODO: move these out of here!
 	event, err := engine.EngineMetaData.GetAbi()
 	if err != nil {
 		panic("error getting engine abi")
