@@ -1,7 +1,7 @@
 {
     "baseTokenAddress": "0x4a24B101728e07A52053c13FB4dB2BcF490CAbc3",
     "engineAddress": "0x9b51Ef044d3486A1fB0A2D55A6e0CeeAdd323E66",
-    "bulkTasksAddress": "0x216546dBEB669C8Eb85A9EE31669A096B6b1F9ab",
+    "bulkTasksAddress": "0x75879250b1d43F8860Bd30C628E8606782a02a87",
     "voterAddress": "0x80E9B3dA81258705eC7C3DC89a799b78f2c68968",
     "veStakingAddress": "0x1c0a14cAC52ebDe9c724e5627162a90A26B85E15",
     "arbiusRouterAddress": "0x6caF23DC6dAe5EdCc53e4F330B61c420e6c71565",
