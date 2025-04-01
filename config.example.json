@@ -25,7 +25,7 @@
         "concurrent_batches": false,
         "profit_mode": "fixed",
         "min_profit": 0,
-        "max_profit": -10,
+        "max_profit": 100,
         "pause_stake_buffer_level": 0,
         "use_polling": true,
         "polling_time": "1m",
@@ -70,14 +70,13 @@
         "hoard_mode_number_of_batches": 1,
         "hoard_min_gas_price": 0,
         "hoard_max_queue_size": 1000,
-        "use_bens_tasks": false,
         "private_keys": []
     },
     "strategies": {
         "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
         "strategy": "bulkmine",
         "automine": {
-            "enabled": true,
+            "owner": "0x0000000000000000000000000000000000000000",
             "version": 0,
             "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
             "fee": 7000000000000000,
@@ -100,7 +99,7 @@
     "claim": {
         "enabled": true,
         "number_of_batches": 0,
-        "max_claims_per_batch": 250,
+        "max_claims_per_batch": 100,
         "min_claims_per_batch": 10,
         "delay": 60,
         "validate_claims": true,

@@ -88,6 +88,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 		return nil, nil, err
 	}
 
+
 	// if we are on sepolia or mainnet we can use a real contract otherwise we mock (determined by config)
 	var arbiusRouter ipfs.ArbiusRouterContract
 	if cfg.BaseConfig.ArbiusRouterAddress == (common.Address{}) {

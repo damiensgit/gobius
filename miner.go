@@ -93,10 +93,7 @@ func initLogging(file string, level zerolog.Level) (logFile io.WriteCloser, logg
 	}
 
 	consoleWriter := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: "15:04:05.000000000"}
-	consoleWriter.FormatTimestamp = func(i interface{}) string {
-		return fmt.Sprintf("\x1b[37m%s\x1b[0m", i.(string))
-	}
-
+	consoleWriter.FormatTimestamp = utils.ZerologConsoleFormatTimestamp(consoleWriter.TimeFormat)
 	multi := zerolog.MultiLevelWriter(consoleWriter, fileLogger)
 	logger = zerolog.New(multi).Level(level).With().Timestamp().Logger()
 	return fileLogger, logger
