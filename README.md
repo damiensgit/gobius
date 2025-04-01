@@ -6,6 +6,12 @@ A high-performance, multi-GPU mining client for the [Arbius protocol](https://ar
 
 Gobius enables decentralized machine learning by allowing miners to participate in the Arbius network - an on-chain, reproducible AI model execution platform similar to services like Midjourney or ChatGPT, but in a censorship-resistant way.
 
+## Getting Started as a Miner
+
+**Are you looking to start mining with Gobius?** Please read our dedicated [QUICKSTART.md](QUICKSTART.md) guide, which provides a step-by-step walkthrough specifically designed for miners.
+
+The rest of this README document contains more detailed information about the project structure, development setup, and advanced configuration options primarily intended for developers or advanced users.
+
 ## Features
 
 - **Multi-GPU Support**
