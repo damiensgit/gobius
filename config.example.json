@@ -71,9 +71,7 @@
         "hoard_min_gas_price": 0,
         "hoard_max_queue_size": 1000,
         "use_bens_tasks": false,
-        "private_keys": [
-            "<batch-manager-private-key>"
-        ]
+        "private_keys": []
     },
     "strategies": {
         "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
@@ -89,8 +87,8 @@
         }
     },
     "blockchain": {
-        "private_key": "CHANGME",
-        "rpc_url": "CHANGME",
+        "private_key": "CHANGEME",
+        "rpc_url": "CHANGEME",
         "sender_rpc_url": "",
         "client_rpc_urls": [],
         "use_ethers_gas_oracle": false,
@@ -119,9 +117,6 @@
     },
     "ml": {
         "strategy": "cog",
-        "replicate": {
-            "api_token": ""
-        },
         "cog": {
             "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc": {
                 "url": [

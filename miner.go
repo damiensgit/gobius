@@ -92,7 +92,12 @@ func initLogging(file string, level zerolog.Level) (logFile io.WriteCloser, logg
 		MaxAge:     5, // days
 	}
 
-	multi := zerolog.MultiLevelWriter(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05.000000000"}, fileLogger)
+	consoleWriter := zerolog.ConsoleWriter{Out: os.Stdout, TimeFormat: "15:04:05.000000000"}
+	consoleWriter.FormatTimestamp = func(i interface{}) string {
+		return fmt.Sprintf("\x1b[37m%s\x1b[0m", i.(string))
+	}
+
+	multi := zerolog.MultiLevelWriter(consoleWriter, fileLogger)
 	logger = zerolog.New(multi).Level(level).With().Timestamp().Logger()
 	return fileLogger, logger
 }
@@ -288,17 +293,18 @@ func main() {
 
 	cfg, err := config.InitAppConfig(*configPath, *testnetType)
 	if err != nil {
-		log.Fatalf("failed to load app configuration: %v", err)
+		fmt.Printf("fatal error", err)
+		//log.Fatalf("failed to load app configuration: %v", err)
+		os.Exit(1)
 	}
+
+	log.Fatalf("test1")
 
 	// Check if logLevel was set
 	if !setFlags["loglevel"] {
 		// If logLevel was not set on the command line, use the value from the config
 		*logLevel = int(cfg.LogLevel)
 	}
-
-	logWriter, cleanup := tui.NewLogRouter()
-	defer cleanup()
 
 	logFile, logger := initLogging(cfg.LogPath, zerolog.Level(*logLevel))
 	defer logFile.Close()
@@ -648,19 +654,53 @@ func main() {
 		logger.Warn().Msg("listening to TaskSubmitted events is disabled in config")
 	}
 
+	// Task Queue
+	taskQueue, err := NewTaskQueue(logger, defaultMaxTasks, defaultTaskCacheSize) // Use constants or config
+	if err != nil {
+		logger.Fatal().Err(err).Msg("could not create task queue")
+	}
+	logger.Info().Msg("task queue initialized")
+
+	// --- Select and Start Mining Strategy ---
+	var strategy MiningStrategy
+	switch cfg.Strategies.Strategy {
+	case "bulkmine":
+		strategy = NewBulkMineStrategy(appQuit, appServices, miner, gpuPool, taskQueue)
+	case "solutionsampler":
+		// Need to connect to solution events *before* starting the strategy
+		strategy = NewSolutionSamplerStrategy(appContext, appServices, miner, gpuPool, taskQueue)
+	case "task": //  "task" is the simple listen-and-mine strategy
+		if !cfg.ListenToTaskSubmitted {
+			logger.Fatal().Msg("strategy 'task' requires 'ListenToTaskSubmitted' to be enabled in config")
+		}
+		// Simple strategy: just process tasks from the event stream directly
+		logger.Warn().Msg("strategy 'task' currently behaves like 'bulkmine' fed by events")
+		strategy = NewBulkMineStrategy(appContext, appServices, miner, gpuPool, taskQueue)
+
+	default:
+		logger.Fatal().Str("strategy", cfg.Strategies.Strategy).Msg("unknown or unsupported mining strategy specified in config")
+	}
+
+	// Start the selected strategy's workers
+	err = strategy.Start()
+	if err != nil {
+		logger.Fatal().Err(err).Str("strategy", strategy.Name()).Msg("failed to start mining strategy")
+	}
+
 	dashboard := tui.NewDashboard()
 
 	if !*headless {
+		logWriter, cleanup := tui.NewLogRouter()
+		defer cleanup()
+
 		// Update our log router to use the logviewer
 		logWriter.SetView(dashboard.LogViewer.CustomTextView)
 		go func() {
-
 			dashboard.Run()
 			// disable writing to log viwer on exit
 			// we don't set the view to nil as this is unsafe instead we use an atomic bool
 			logWriter.Headless.Store(true)
 			appCancel()
-
 		}()
 
 		go func() {
@@ -722,43 +762,6 @@ func main() {
 
 	} else {
 		logger.Info().Msg("running in headless mode; dashboard disabled")
-	}
-
-	// Task Queue
-	taskQueue, err := NewTaskQueue(logger, defaultMaxTasks, defaultTaskCacheSize) // Use constants or config
-	if err != nil {
-		logger.Fatal().Err(err).Msg("could not create task queue")
-	}
-	logger.Info().Msg("task queue initialized")
-
-	// --- Select and Start Mining Strategy ---
-	var strategy MiningStrategy
-	switch cfg.Strategies.Strategy {
-	case "bulkmine":
-		strategy = NewBulkMineStrategy(appQuit, appServices, miner, gpuPool, taskQueue)
-	case "solutionsampler":
-		// Need to connect to solution events *before* starting the strategy
-		strategy = NewSolutionSamplerStrategy(appContext, appServices, miner, gpuPool, taskQueue)
-	case "task": //  "task" is the simple listen-and-mine strategy
-		if !cfg.ListenToTaskSubmitted {
-			logger.Fatal().Msg("strategy 'task' requires 'ListenToTaskSubmitted' to be enabled in config")
-		}
-		// Simple strategy: just process tasks from the event stream directly
-		// We can adapt BulkMine or create a new simple one if needed.
-		// For now, let's treat it like BulkMine but primarily fed by events.
-		logger.Warn().Msg("strategy 'task' currently behaves like 'bulkmine' fed by events")
-		strategy = NewBulkMineStrategy(appContext, appServices, miner, gpuPool, taskQueue)
-
-	default:
-		logger.Fatal().Str("strategy", cfg.Strategies.Strategy).Msg("unknown or unsupported mining strategy specified in config")
-	}
-
-	logger.Info().Str("strategy", strategy.Name()).Msg("⛏️ GOBIUS MINER STARTING! ⛏️")
-
-	// Start the selected strategy's workers
-	err = strategy.Start()
-	if err != nil {
-		logger.Fatal().Err(err).Str("strategy", strategy.Name()).Msg("failed to start mining strategy")
 	}
 
 	maxHeaderBackoff := 30 * time.Second
