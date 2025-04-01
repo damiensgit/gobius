@@ -1,9 +1,9 @@
 {
   "db_path": "storage.db",
-  "log_path": "log-local.txt",
+  "log_path": "log.txt",
   "log_level": 1,
   "cache_path": "cache",
-  "listen_to_task_submitted": true,
+  "listen_to_task_submitted": false,
   "check_commitment": true,
   "evil_mode": false,
   "evil_mode_min": 2000,
@@ -55,7 +55,7 @@
       "sell_max_amount": 0,
       "sell_eth_bal_target": 0,
       "treasury_address": "0x0000000000000000000000000000000000000000",
-      "private_keys": []
+      "private_keys": ["<validator-private-key>"]
   },
   "batchtasks": {
       "enabled": true,
@@ -70,18 +70,18 @@
       "hoard_min_gas_price": 0,
       "hoard_max_queue_size": 1000,
       "use_bens_tasks": false,
-      "private_keys": null
+      "private_keys": ["<batch-manager-private-key>"]
   },
   "strategies": {
-      "model": "0x002a11afdb4f9e0ae985136622cbea64dd5d90d3d751ce1ad2391264e886aad1",
+      "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
       "strategy": "bulkmine",
       "automine": {
-          "enabled": false,
+          "enabled": true,
           "version": 0,
-          "model": "0x002a11afdb4f9e0ae985136622cbea64dd5d90d3d751ce1ad2391264e886aad1",
-          "fee": 0,
+          "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
+          "fee": 7000000000000000,
           "input": {
-              "prompt": "black"
+              "prompt": "What is the capital of the moon?"
           }
       }
   },
@@ -120,9 +120,11 @@
           "api_token": ""
       },
       "cog": {
-          "0x002a11afdb4f9e0ae985136622cbea64dd5d90d3d751ce1ad2391264e886aad1": {
-              "url": []
-          }
+        "0xdafc13d7e9529e278bf40038524f20841ba8879c0b5d7667d438cd60c64a118d": {
+            "url": [
+            "<cog-url>"  
+            ]
+        }
       }
   },
   "ipfs": {

@@ -46,6 +46,18 @@ Windows, Linux and macOS are supported
 - [Go 1.22 or later](https://go.dev/dl/)
 - Git
 
+- **IPFS**: Gobius requires IPFS (InterPlanetary File System) for model and data storage.
+  - Install IPFS: Follow the official installation guide at [https://docs.ipfs.tech/install/command-line/#install-official-binary-distributions](https://docs.ipfs.tech/install/command-line/#install-official-binary-distributions).
+  - **Initialization**: After installing, initialize your IPFS node:
+    ```bash
+    ipfs init
+    ```
+  - **Daemon**: Run the IPFS daemon:
+    ```bash
+    ipfs daemon
+    ```
+  - **Firewall**: IPFS uses specific ports (typically 4001 TCP/UDP, 5001 TCP, 8080 TCP). Ensure these are open in your firewall, especially if running on a cloud provider or restricted network. Some hosting providers may block peer-to-peer traffic, which could affect IPFS operation. Consult your provider's documentation and configure firewall rules accordingly.
+
 ### System Setup
 
 1. Install Go:
@@ -116,7 +128,7 @@ To build SQL bindings, you'll need [sqlc](https://sqlc.dev/) installed:
 go install github.com/sqlc-dev/sqlc/cmd/sqlc@latest
 ```
 
-The SQL schema and configuration are located in the `./sql` directory. Running `task build:sqlc` will generate Go code from your SQL schema.
+The SQL schema and configuration are located in the `./sql` directory. Running `task build:sqlc` will generate Go code from the SQL schema.
 
 ### Configuration Setup
 
@@ -142,7 +154,7 @@ The miner makes use of a simple solidity contract that enables the submission of
 
 See ```/contracts``` folder for details.
 
-There is a deployed contract on Arbitrum one available at ``0x216546dBEB669C8Eb85A9EE31669A096B6b1F9ab``, but you may deploy your own e.g. for event tracking.
+There is a deployed contract on Arbitrum one available at ``0x75879250b1d43F8860Bd30C628E8606782a02a87``, but you may deploy your own e.g. for event tracking.
 
 Use remix to deploy [this contract](contracts/BulkTasksMainnet.sol) and update the ./config/config.json field ``bulkTasksAddress`` with the new contract address.
 

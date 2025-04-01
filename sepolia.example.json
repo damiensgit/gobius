@@ -77,13 +77,13 @@
       "private_keys": [""]
   },
   "strategies": {
-      "model": "0x7cd06b3facb05c072fb359904a7381e8f28218f410830f85018f3922621ed33a",
+      "model": "0xdafc13d7e9529e278bf40038524f20841ba8879c0b5d7667d438cd60c64a118d",
       "strategy": "bulkmine",
       "automine": {
           "enabled": true,
           "version": 0,
-          "model": "0x7cd06b3facb05c072fb359904a7381e8f28218f410830f85018f3922621ed33a",
-          "fee":  1000000000000000,
+          "model": "0xdafc13d7e9529e278bf40038524f20841ba8879c0b5d7667d438cd60c64a118d",
+          "fee":  7000000000000000,
           "input": {
               "prompt": "what is the capital of the moon?"
           }
