@@ -132,9 +132,21 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
            "prompt": "What is the capital of the moon?"
          }
        }
+     },
+     "validator_config": {
+       "private_keys": ["YOUR_VALIDATOR_PRIVATE_KEY"], // Add validator private keys here (no 0x)
+       "stake_check": true,
+       "stake_check_interval": "120s", // How often to check stake/health
+       "min_basetoken_threshold": 10, // Min AIUS to keep on validator
+       "stake_buffer_percent": 2, // Target stake buffer % above min stake
+       "stake_buffer_topup_percent": 1, // Top-up trigger % above min stake
+       "initial_stake": 0 // Set > 0 to manually manage stake amount (disables auto top-up)
+       // ... other advanced settings ...
      }
    }
    ```
+
+   > **Note on Settings**: While `config.json` contains many settings, most can be left at their default values (copied from `config.example.json`) for initial setup. The defaults are designed to work well for basic auto-mining. Many options are for advanced users and fine-tuning specific behaviors. For details on all available options and their effects, advanced users can refer to the configuration loading logic in the source code (primarily within the `config/` directory).
 
    > **Database (`db_path`)**: Gobius uses a SQLite database (default: `storage.db`) to keep track of its state (pending commitments, solutions, claims, etc.). This allows Gobius to stop and restart safely, resuming where it left off. **Do not delete this file** unless you intend to reset the miner's state.
 
@@ -143,6 +155,31 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
    > **Note**: Ensure your IPFS daemon is running and accessible at the configured URL. If you're running IPFS on a different host or port, adjust the URL accordingly.
 
    > **Cog Model URLs**: Replace `<cog-url>` with the actual URL of the Cog model you are using. You can add multiple URLs if needed.
+
+   **Understanding `validator_config`**:
+
+   This section controls the behavior of your validator account(s). A validator is an Ethereum wallet (Externally Owned Account - EOA) that holds the required AIUS stake (minimum stake) and is used by Gobius to submit solutions and claim rewards.
+
+   ```json
+   "validator_config": {
+     "private_keys": ["YOUR_VALIDATOR_PRIVATE_KEY"], // Add validator private keys here (no 0x)
+     "stake_check": true,
+     "stake_check_interval": "120s", // How often to check stake/health
+     "min_basetoken_threshold": 10, // Min AIUS to keep on validator
+     "stake_buffer_percent": 2, // Target stake buffer % above min stake
+     "stake_buffer_topup_percent": 1, // Top-up trigger % above min stake
+     "initial_stake": 0 // Set > 0 to manually manage stake amount (disables auto top-up)
+     // ... other advanced settings ...
+   }
+   ```
+
+   -   **`private_keys`**: This is crucial. Add the private key(s) for your validator wallet(s) here as strings within the square brackets `[]`. You can add multiple keys if running multiple validators. **Remember to remove the leading `0x` from the private key.**
+   -   **Stake Management (Defaults)**: By default (`initial_stake: 0`), Gobius automatically manages your stake based on percentages:
+        -   It tries to maintain a stake level that is `stake_buffer_percent` above the network's minimum requirement.
+        -   If the stake drops to only `stake_buffer_topup_percent` above the minimum, it will automatically top up the stake back to the `stake_buffer_percent` level.
+   -   **Stake Management (Manual - `initial_stake`)**: If you set `initial_stake` to a value greater than 0 (representing an amount of AIUS), Gobius will attempt to top up the validator's stake to this specific amount. **Important:** This disables the automatic percentage-based top-ups, meaning you are responsible for ensuring the stake doesn't fall below the minimum required by the network.
+   -   **`min_basetoken_threshold`**: Sets a minimum amount of AIUS tokens to always keep in the validator wallet. This reserve is used for future transaction fees (like stake top-ups or task submission fees) ensuring the validator doesn't run out of funds for essential operations.
+   -   **`stake_check_interval`**: Determines how frequently Gobius checks the validator's stake level and performs health checks (default is every 120 seconds).
 
 ### Deployed Contracts
 
@@ -340,7 +377,7 @@ This is configured in the `strategies` section of your `config.json` file. The e
     "enabled": true, // Enable auto-mining
     "version": 0,
     "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc", // Ensure this matches the supported model ID
-    "fee": 7000000000000000, // Default fee
+    "fee": 7000000000000000, // Task submission fee in AIUS (wei)
     "input": {
       "prompt": "What is the capital of the moon?" // You can customize this prompt
     }
@@ -353,6 +390,7 @@ This is configured in the `strategies` section of your `config.json` file. The e
 -   `strategy`: Must be set to `"bulkmine"`.
 -   `automine.enabled`: Must be set to `true`.
 -   `model` (in both `strategies` and `automine`): Ensure this matches the Model ID of the supported model (`0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc`).
+-   `automine.fee`: This is the fee (in AIUS wei, which is AIUS * 10^-18) paid *per task* when submitting tasks generated via automine. **This fee will deplete your validator wallet's AIUS balance over time**, in addition to any gas costs. Ensure your validator has enough AIUS to cover these fees (consider the `min_basetoken_threshold` in `validator_config`).
 -   `automine.input.prompt`: This is the main setting you might want to change. It defines the input for the tasks your miner generates. The default prompt is just an example.
 
 For starting, you typically only need to ensure the `model` IDs are correct and potentially customize the `prompt`.

@@ -8,7 +8,6 @@
   "evil_mode": false,
   "evil_mode_min": 2000,
   "evil_mode_int": 1000,
-  "whitelist_tasks": true,
   "num_workers_per_gpu": 1,
   "solver": {
       "enabled": true,
@@ -46,7 +45,7 @@
       "stake_check": true,
       "stake_check_interval": "120s",
       "eth_low_threshold": 0.01,
-      "min_basetoken_threshold": 1,
+      "min_basetoken_threshold": 10,
       "sell_interval": 600,
       "sell_buffer": 0.5,
       "sell_profit_in_eth": 0.01,
