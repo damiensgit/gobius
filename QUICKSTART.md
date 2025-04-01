@@ -157,6 +157,18 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
 
    > **Cog Model URLs**: Replace `<cog-url>` with the actual URL of the Cog model you are using. You can add multiple URLs if needed.
 
+   **Recommended Validator AIUS Balance**:
+
+   Your validator wallet (the address corresponding to the `private_keys` in `validator_config`) needs sufficient AIUS tokens to function correctly.
+
+   -   **Minimum Stake**: The primary requirement is holding the network's minimum stake. As of writing, this is **420,926,548,100,086,163,465 wei** (approximately **421 AIUS**). You can always check the current minimum stake directly on the Arbius network or through community resources.
+   -   **Buffer for Fees and Top-ups**: It is highly recommended to keep an **additional buffer** of AIUS in the validator wallet, beyond the minimum stake. A buffer of **at least 10%** (around 42 AIUS or more) is suggested.
+   -   **Why the Buffer?**
+        -   **Task Fees**: If using `automine`, each generated task requires a fee (`automine.fee`), which depletes the validator's balance.
+        -   **Gas Costs**: All transactions (submitting solutions, claiming rewards, topping up stake) require gas fees, paid in **ETH (on Arbitrum)**.
+        -   **Stake Top-ups**: Gobius might automatically top up the stake if it falls slightly (due to penalties or configuration). The buffer ensures funds are available for this.
+   -   **`min_basetoken_threshold`**: This setting in `validator_config` helps enforce a minimum reserve, but you should still ensure the *total* balance is sufficient for both the stake and the buffer.
+
    **Understanding `validator_config`**:
 
    This section controls the behavior of your validator account(s). A validator is an Ethereum wallet (Externally Owned Account - EOA) that holds the required AIUS stake (minimum stake) and is used by Gobius to submit solutions and claim rewards.
@@ -243,7 +255,7 @@ When new versions of Gobius are released, you'll want to update your local repos
 ## Additional Resources
 
 - For more detailed information, refer to the [README.md](README.md).
-- If you encounter issues, check the [Troubleshooting](README.md#troubleshooting) section in the README.
+- If you encounter issues, check the [Troubleshooting](#troubleshooting-common-issues) section in this guide.
 
 ## Cog Setup
 
@@ -314,13 +326,15 @@ To run the Cog model `r8.im/kasumi-1/qwen-qwq-32b`, you need to set up a GPU ins
 
 1. **Create an Account**: Sign up or log in to your Vast.ai account.
 
-2. **Rent a GPU**:
+2. **Rent a GPU**: 
    - Select a machine with an **NVIDIA A100 80GB** GPU.
    - Configure the container disk to **60GB** and volume disk to **100GB**.
    - Expose port **5000** for external access.
 
 3. **Deploy the Model**:
    - Use the image `r8.im/kasumi-1/qwen-qwq-32b` to deploy your model.
+
+   > **Initialization Time**: Note that it can take several minutes for the Vast.ai instance to fully initialize, download the image, and start the Cog service after you click "Rent". Be patient and wait for the status to indicate it's running.
 
 **Advanced (CLI)**:
 
@@ -334,11 +348,11 @@ This command sets up the instance with the required image, exposes port 5000, al
 
 > **Note**: Ensure your instance meets the model's resource requirements for optimal performance.
 
-## Extracting the URL for Launched Instances
+### Extracting the URL for Launched Instances
 
-Once your GPU instance is running on RunPod or Vast.ai, you'll need to extract the correct URL to use in your configuration. Remember that the URL should end with `/predictions`.
+Once your GPU instance is running (either on RunPod or Vast.ai), you need to find its public URL to configure Gobius.
 
-### RunPod
+#### RunPod
 
 1.  **Access the Pod**: Navigate to "My Pods" in the RunPod dashboard and select your running pod.
 2.  **Find the URL**: Go to the "Connect" tab. Look for the HTTP/HTTPS connection URL provided for port 5000. It will typically look like `https://<pod-id>-5000.proxy.runpod.net`.
@@ -356,23 +370,15 @@ Once your GPU instance is running on RunPod or Vast.ai, you'll need to extract t
     }
     ```
 
-### Vast.ai
+#### Vast.ai
 
-1.  **Access the Instance**: Go to your "Instances" page in the Vast.ai dashboard.
-2.  **Find the URL**: Click the "Connect" button for your instance. Look for the port forwarding URL mapped to port 5000. It often looks like `http://<numeric-address>:<port>` or a direct domain name if configured.
-3.  **Update Config**: Insert the full URL, **appending `/predictions`**, into your `config.json` in the Cog model section:
-    ```json
-    "ml": {
-      "strategy": "cog",
-      "cog": {
-        "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc": { // Ensure this is the correct model ID
-          "url": [
-            "http://<vast-instance-url>:5000/predictions" // Replace with your actual Vast.ai URL and port, ending in /predictions
-          ]
-        }
-      }
-    }
-    ```
+1. Go to your Vast.ai Instances dashboard.
+2. Find your running instance.
+3. **Check Ports and IP**: Look for the section displaying connection information, specifically the IP address and port mappings. You need the **public IP address** and the **external port** that maps to the internal container port **5000/tcp**. It will often look something like `YOUR_PUBLIC_IP:EXTERNAL_PORT -> 5000/tcp`.
+4. **Construct the URL**: Combine the public IP and the *external* port number to form the base URL (e.g., `http://YOUR_PUBLIC_IP:EXTERNAL_PORT`).
+5. **Append Endpoint**: Add `/predictions` to the end.
+   Example: `http://123.45.67.89:12345/predictions`
+6. Update the `url` field in your `config.json` under `ml.cog.0x...` with this complete URL.
 
 > **Note**: Ensure the URLs are accessible, include `http://` or `https://` as appropriate, end with the correct endpoint (`/predictions`), and are correctly formatted to avoid connectivity issues.
 
@@ -418,8 +424,6 @@ Once all the prerequisites, building, and configuration steps are complete, you 
     ```
 
 Congratulations! Your Gobius miner should now be running.
-
-
 
 ## Troubleshooting Common Issues
 
