@@ -71,7 +71,7 @@ var QwenMainnetModelTemplate = Model{
 
 func NewQwenMainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logger zerolog.Logger) *QwenMainnetModel {
 
-	model, ok := appConfig.BaseConfig.Models["qwen"]
+	model, ok := appConfig.BaseConfig.Models["qwen-qwq-32b"]
 	if !ok {
 		return nil
 	}
