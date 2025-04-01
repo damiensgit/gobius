@@ -101,6 +101,7 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
 2. Edit `config.json` with your settings:
    ```json
    {
+     "db_path": "storage.db",
      "rpc": "YOUR_RPC_ENDPOINT",  // e.g., "https://arb1.arbitrum.io/rpc"
      "privatekey": "YOUR_PRIVATE_KEY",  // Your wallet private key (without 0x prefix)
      "ipfs": {
@@ -135,6 +136,8 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
    }
    ```
 
+   > **Database (`db_path`)**: Gobius uses a SQLite database (default: `storage.db`) to keep track of its state (pending commitments, solutions, claims, etc.). This allows Gobius to stop and restart safely, resuming where it left off. **Do not delete this file** unless you intend to reset the miner's state.
+
    > ⚠️ **Important**: Never share or commit your private key. Keep your `config.json` file secure.
 
    > **Note**: Ensure your IPFS daemon is running and accessible at the configured URL. If you're running IPFS on a different host or port, adjust the URL accordingly.
@@ -162,6 +165,8 @@ The `Bulk Tasks` contract is part of the Gobius project and has been deployed to
 
 When new versions of Gobius are released, you'll want to update your local repository and rebuild the miner.
 
+**Before Updating**: It is **highly recommended** to back up your `config.json` file AND your database file (`storage.db` by default, check your `db_path` setting). Updates might include database schema changes (migrations).
+
 1.  **Navigate to the Gobius Directory**:
     Make sure you are in the `gobius` directory on your server:
     ```bash
@@ -185,7 +190,8 @@ When new versions of Gobius are released, you'll want to update your local repos
 **Configuration File Safety**:
 
 -   Your `config.json` file will **not** be overwritten by the `git pull` command, as long as you created it by copying `config.example.json` and did not directly edit the example file itself.
--   **Important**: Always check the release notes or update announcements for the new version. Sometimes, updates might introduce changes to the required configuration format or add new options. You may need to manually update your `config.json` based on these notes.
+-   Your database file (`storage.db` or custom `db_path`) will also **not** be overwritten by `git pull`.
+-   **Important**: Always check the release notes or update announcements for the new version. Sometimes, updates might introduce changes to the required configuration format or add new options. Updates may also perform automatic database migrations upon first run - backing up the database is crucial in case of migration issues.
 
 **Editing the Configuration File (`config.json`)**:
 
@@ -429,3 +435,7 @@ Here are some common problems users might encounter during setup:
 *   **Symptom**: Gobius behaves unexpectedly after an update.
 *   **Cause**: Forgetting to rebuild (`go build`) after pulling changes, or configuration requirements changed in the update.
 *   **Solution**: Always run `go build` after `git pull`. Read the update's release notes carefully for any required changes to your `config.json`.
+
+*   **Symptom**: Gobius fails to start after an update, potentially with database errors.
+*   **Cause**: An automatic database migration required by the update failed.
+*   **Solution**: Check the Gobius logs for specific database error messages. Report the issue with logs to the developers. If necessary, you may need to restore your database from the backup you made *before* updating and seek further assistance.
