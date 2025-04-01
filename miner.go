@@ -293,12 +293,8 @@ func main() {
 
 	cfg, err := config.InitAppConfig(*configPath, *testnetType)
 	if err != nil {
-		fmt.Printf("fatal error", err)
-		//log.Fatalf("failed to load app configuration: %v", err)
-		os.Exit(1)
+		log.Fatalf("failed to load app configuration: %v", err)
 	}
-
-	log.Fatalf("test1")
 
 	// Check if logLevel was set
 	if !setFlags["loglevel"] {
@@ -318,8 +314,7 @@ func main() {
 	rpcClient, err := client.NewClient(cfg.Blockchain.RPCURL, appQuit, cfg.Blockchain.EthersGas, cfg.Blockchain.BasefeeX, cfg.Blockchain.ForceGas, cfg.Blockchain.GasOverride)
 
 	if err != nil {
-		logger.Error().Err(err).Msgf("error connecting to RPC: %s", cfg.Blockchain.RPCURL)
-		return
+		logger.Fatal().Err(err).Msgf("error connecting to RPC: %s", cfg.Blockchain.RPCURL)
 	}
 
 	txRpcClient := rpcClient
@@ -327,8 +322,7 @@ func main() {
 		txRpcClient, err = client.NewClient(cfg.Blockchain.SenderRPCURL, appQuit, cfg.Blockchain.EthersGas, cfg.Blockchain.BasefeeX, cfg.Blockchain.ForceGas, cfg.Blockchain.GasOverride)
 
 		if err != nil {
-			logger.Error().Err(err).Msgf("error connecting to sender RPC: %s", cfg.Blockchain.SenderRPCURL)
-			return
+			logger.Fatal().Err(err).Msgf("error connecting to sender RPC: %s", cfg.Blockchain.SenderRPCURL)
 		}
 	}
 
@@ -337,8 +331,7 @@ func main() {
 		c, err := client.NewClient(curl, appQuit, cfg.Blockchain.EthersGas, cfg.Blockchain.BasefeeX, cfg.Blockchain.ForceGas, cfg.Blockchain.GasOverride)
 
 		if err != nil {
-			logger.Error().Err(err).Msgf("error connecting to client RPC: %s", curl)
-			return
+			logger.Fatal().Err(err).Msgf("error connecting to client RPC: %s", curl)
 		}
 
 		clients = append(clients, c)
@@ -352,7 +345,7 @@ func main() {
 	}
 	_, err = sqlite.Exec("PRAGMA journal_mode=WAL;")
 	if err != nil {
-		log.Fatal(err)
+		logger.Fatal().Err(err).Msg("error setting pragma journal mode on sqlite")
 	}
 
 	goose.SetBaseFS(embedMigrations)
@@ -360,7 +353,7 @@ func main() {
 	goose.SetLogger(&zerologAdapter{logger: logger})
 
 	if err := goose.SetDialect("sqlite3"); err != nil {
-		panic(err)
+		logger.Fatal().Err(err).Msg("error setting goose dialect to sqlite3")
 	}
 
 	if err := goose.Up(sqlite, "sql/sqlite/migrations"); err != nil {
@@ -690,6 +683,7 @@ func main() {
 	dashboard := tui.NewDashboard()
 
 	if !*headless {
+		// this captures the log output and sends it to the logviewer
 		logWriter, cleanup := tui.NewLogRouter()
 		defer cleanup()
 
