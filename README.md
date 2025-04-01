@@ -142,11 +142,19 @@ The SQL schema and configuration are located in the `./sql` directory. Running `
    {
      "rpc": "YOUR_RPC_ENDPOINT",  // e.g., "https://arb1.arbitrum.io/rpc"
      "privatekey": "YOUR_PRIVATE_KEY",  // Your wallet private key (without 0x prefix)
+     "ipfs": {
+       "strategy": "http_client",
+       "http_client": {
+         "url": "/ip4/127.0.0.1/tcp/5001"  // IPFS daemon address
+       }
+     }
      // ... other optional settings ...
    }
    ```
 
    > ⚠️ **Important**: Never share or commit your private key. Keep your config.json file secure.
+
+   > **Note**: Ensure your IPFS daemon is running and accessible at the configured URL. If you're running IPFS on a different host or port, adjust the URL accordingly.
 
 ### Deployed Contracts
 
