@@ -74,6 +74,9 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
      ```bash
      ipfs daemon
      ```
+     **Identifying the API Address**: When the daemon starts, look for lines in the output similar to:
+     `RPCS API server listening on /ip4/127.0.0.1/tcp/5001`
+     This tells you the address the daemon is using. The default `/ip4/127.0.0.1/tcp/5001` is what you'll typically use in `config.json` if running IPFS locally.
    - **Firewall**: If running IPFS on the same machine as Gobius, typically no extra firewall rules are needed for Gobius to connect to IPFS. IPFS itself requires port 4001 (TCP/UDP) open for external peering, but the local connection from Gobius uses port 5001.
    - **Advanced Setup**: If you choose to run IPFS on a separate server, you must configure your firewalls to allow Gobius to connect to the IPFS daemon's API port (usually 5001 TCP) on the remote server. You will also need to update the `ipfs.http_client.url` in your `config.json` accordingly (e.g., `/ip4/<remote-ipfs-ip>/tcp/5001`).
 
@@ -102,12 +105,10 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
    ```json
    {
      "db_path": "storage.db",
-     "rpc": "YOUR_RPC_ENDPOINT",  // e.g., "https://arb1.arbitrum.io/rpc"
-     "privatekey": "YOUR_PRIVATE_KEY",  // Your wallet private key (without 0x prefix)
      "ipfs": {
        "strategy": "http_client",
        "http_client": {
-         "url": "/ip4/127.0.0.1/tcp/5001"  // IPFS daemon address
+         "url": "/ip4/127.0.0.1/tcp/5001"  // Default for local IPFS. Replace 127.0.0.1 if remote. This IP may be needed for GPU setup.
        }
      },
      "ml": {
@@ -152,7 +153,7 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
 
    > ⚠️ **Important**: Never share or commit your private key. Keep your `config.json` file secure.
 
-   > **Note**: Ensure your IPFS daemon is running and accessible at the configured URL. If you're running IPFS on a different host or port, adjust the URL accordingly.
+   > **Note**: Ensure your IPFS daemon is running and accessible at the configured URL (`ipfs.http_client.url`). If you're running IPFS on a different host or port, adjust the URL accordingly. The default `/ip4/127.0.0.1/tcp/5001` assumes IPFS is running locally.
 
    > **Cog Model URLs**: Replace `<cog-url>` with the actual URL of the Cog model you are using. You can add multiple URLs if needed.
 
@@ -270,12 +271,12 @@ Gobius requires a WebSocket or IPC connection to the Arbitrum network.
 
 1. Update the `rpc` field in your `config.json`:
    ```json
-   "rpc": "wss://arb1.arbitrum.io/ws"  // Example WebSocket URL
+   "rpc": "wss://arbitrum-one-rpc.publicnode.com"  // Example WebSocket URL
    ```
 
 2. You can use public WebSocket URLs or a provider like QuickNode for a more reliable connection.
-   - **Public WebSocket**: `wss://arb1.arbitrum.io/ws`
-   - **QuickNode**: Sign up at [QuickNode](https://www.quicknode.com/) and get your RPC URL.
+   - **Public WebSocket**: `wss://arbitrum-one-rpc.publicnode.com`
+   - **QuickNode**: Sign up at [QuickNode](https://www.quicknode.com/) and get your websocket RPC URL.
 
 > **Note**: Ensure your RPC connection is stable and secure for optimal performance.
 
@@ -293,6 +294,8 @@ This Model ID is used in the `config.json` file when specifying the Cog model UR
 To run the Cog model `r8.im/kasumi-1/qwen-qwq-32b`, you need to set up a GPU instance with the following specifications:
 
 **Important**: You **must** use an NVIDIA A100 GPU with 80GB of VRAM. No other GPU type or VRAM configuration is supported for this model.
+
+**Note on Multiple GPUs**: While you might rent instances with multiple GPUs, the current Cog model (`r8.im/kasumi-1/qwen-qwq-32b`) will only utilize **one** GPU for processing tasks. Additional GPUs on the instance will not be used by the model.
 
 ### RunPod Setup
 
@@ -318,6 +321,16 @@ To run the Cog model `r8.im/kasumi-1/qwen-qwq-32b`, you need to set up a GPU ins
 
 3. **Deploy the Model**:
    - Use the image `r8.im/kasumi-1/qwen-qwq-32b` to deploy your model.
+
+**Advanced (CLI)**:
+
+If you prefer using the [Vast.ai CLI](https://docs.vast.ai/api/overview-and-quickstart), you can create a compatible instance using a specific offer ID. Find suitable offer IDs using `vastai search offers 'gpu_name in ["A100_SXM4", "A100_PCI"] gpu_ram>=80 disk_space>100'` (filtering for NVIDIA A100s with 80GB VRAM and sufficient disk space). Replace `<OFFER_ID>` with the desired ID:
+
+```bash
+vastai create instance <OFFER_ID> --image r8.im/kasumi-1/qwen-qwq-32b:latest --env '-p 5000:5000 --gpus=all' --disk 100 --ssh --direct
+```
+
+This command sets up the instance with the required image, exposes port 5000, allocates disk space, and enables SSH access.
 
 > **Note**: Ensure your instance meets the model's resource requirements for optimal performance.
 

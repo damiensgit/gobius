@@ -1,135 +1,139 @@
 {
-  "db_path": "storage.db",
-  "log_path": "log.txt",
-  "log_level": 1,
-  "cache_path": "cache",
-  "listen_to_task_submitted": false,
-  "check_commitment": true,
-  "evil_mode": false,
-  "evil_mode_min": 2000,
-  "evil_mode_int": 1000,
-  "num_workers_per_gpu": 1,
-  "solver": {
-      "enabled": true,
-      "commitments_and_solutions": "doboth",
-      "commitment_batch": {
-          "min_batch_size": 10,
-          "max_batch_size": 10,
-          "number_of_batches": 1
-      },
-      "solution_batch": {
-          "min_batch_size": 10,
-          "max_batch_size": 10,
-          "number_of_batches": 1
-      },
-      "concurrent_batches": false,
-      "profit_mode": "fixed",
-      "min_profit": 0,
-      "max_profit": -10,
-      "pause_stake_buffer_level": 0,
-      "use_polling": true,
-      "polling_time": "1m",
-      "batch_mode": 1,
-      "no_checks": false,
-      "error_max_retries": 5,
-      "error_backoff": 425,
-      "error_backoff_multiplier": 1.5,
-      "metrics_sample_rate": "10s"
-  },
-  "validator_config": {
-      "initial_stake": 0,
-      "stake_buffer_amount": 0,
-      "stake_buffer_topup_amount": 0,
-      "stake_buffer_percent": 2,
-      "stake_buffer_topup_percent": 1,
-      "stake_check": true,
-      "stake_check_interval": "120s",
-      "eth_low_threshold": 0.01,
-      "min_basetoken_threshold": 10,
-      "sell_interval": 600,
-      "sell_buffer": 0.5,
-      "sell_profit_in_eth": 0.01,
-      "sell_all_over_threshold": false,
-      "sell_min_amount": 0.001,
-      "sell_max_amount": 0,
-      "sell_eth_bal_target": 0,
-      "treasury_address": "0x0000000000000000000000000000000000000000",
-      "private_keys": ["<validator-private-key>"]
-  },
-  "batchtasks": {
-      "enabled": true,
-      "min_tasks_in_queue": 10,
-      "only_tasks": false,
-      "batch_mode": "normal",
-      "batch_size": 10,
-      "number_of_batches": 1,
-      "hoard_mode": false,
-      "hoard_mode_batch_size": 10,
-      "hoard_mode_number_of_batches": 1,
-      "hoard_min_gas_price": 0,
-      "hoard_max_queue_size": 1000,
-      "use_bens_tasks": false,
-      "private_keys": ["<batch-manager-private-key>"]
-  },
-  "strategies": {
-      "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
-      "strategy": "bulkmine",
-      "automine": {
-          "enabled": true,
-          "version": 0,
-          "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
-          "fee": 7000000000000000,
-          "input": {
-              "prompt": "What is the capital of the moon?"
-          }
-      }
-  },
-  "blockchain": {
-      "private_key": "CHANGME",
-      "rpc_url": "CHANGME",
-      "sender_rpc_url": "",
-      "client_rpc_urls": [],
-      "use_ethers_gas_oracle": false,
-      "cache_nonce": false,
-      "basefee_x": 2,
-      "gas_override": false,
-      "gas_override_gwei": 0
-  },
-  "claim": {
-      "enabled": true,
-      "number_of_batches": 0,
-      "max_claims_per_batch": 250,
-      "min_claims_per_batch": 10,
-      "delay": 60,
-      "validate_claims": true,
-      "min_reward": 0.0001,
-      "max_claim_gas": 0,
-      "sort_by_cost": false,
-      "max_claims_buffer": 2000,
-      "claim_min_reward": 0,
-      "claim_on_approach": false,
-      "stake_buffer_level": 0,
-      "min_batch_profit": 0,
-      "hoard_mode": false,
-      "hoard_max_queue_size": 0
-  },
-  "ml": {
-      "strategy": "cog",
-      "replicate": {
-          "api_token": ""
-      },
-      "cog": {
-        "0xdafc13d7e9529e278bf40038524f20841ba8879c0b5d7667d438cd60c64a118d": {
-            "url": [
-            "<cog-url>"  
-            ]
+    "db_path": "storage.db",
+    "log_path": "log.txt",
+    "log_level": 1,
+    "cache_path": "cache",
+    "listen_to_task_submitted": false,
+    "check_commitment": true,
+    "evil_mode": false,
+    "evil_mode_min": 2000,
+    "evil_mode_int": 1000,
+    "num_workers_per_gpu": 1,
+    "solver": {
+        "enabled": true,
+        "commitments_and_solutions": "doboth",
+        "commitment_batch": {
+            "min_batch_size": 10,
+            "max_batch_size": 10,
+            "number_of_batches": 1
+        },
+        "solution_batch": {
+            "min_batch_size": 10,
+            "max_batch_size": 10,
+            "number_of_batches": 1
+        },
+        "concurrent_batches": false,
+        "profit_mode": "fixed",
+        "min_profit": 0,
+        "max_profit": -10,
+        "pause_stake_buffer_level": 0,
+        "use_polling": true,
+        "polling_time": "1m",
+        "batch_mode": 1,
+        "no_checks": false,
+        "error_max_retries": 5,
+        "error_backoff": 425,
+        "error_backoff_multiplier": 1.5,
+        "metrics_sample_rate": "10s"
+    },
+    "validator_config": {
+        "initial_stake": 0,
+        "stake_buffer_amount": 0,
+        "stake_buffer_topup_amount": 0,
+        "stake_buffer_percent": 2,
+        "stake_buffer_topup_percent": 1,
+        "stake_check": true,
+        "stake_check_interval": "120s",
+        "eth_low_threshold": 0.01,
+        "min_basetoken_threshold": 10,
+        "sell_interval": 600,
+        "sell_buffer": 0.5,
+        "sell_profit_in_eth": 0.01,
+        "sell_all_over_threshold": false,
+        "sell_min_amount": 0.001,
+        "sell_max_amount": 0,
+        "sell_eth_bal_target": 0,
+        "treasury_address": "0x0000000000000000000000000000000000000000",
+        "private_keys": [
+            "<validator-private-key>"
+        ]
+    },
+    "batchtasks": {
+        "enabled": true,
+        "min_tasks_in_queue": 10,
+        "only_tasks": false,
+        "batch_mode": "normal",
+        "batch_size": 10,
+        "number_of_batches": 1,
+        "hoard_mode": false,
+        "hoard_mode_batch_size": 10,
+        "hoard_mode_number_of_batches": 1,
+        "hoard_min_gas_price": 0,
+        "hoard_max_queue_size": 1000,
+        "use_bens_tasks": false,
+        "private_keys": [
+            "<batch-manager-private-key>"
+        ]
+    },
+    "strategies": {
+        "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
+        "strategy": "bulkmine",
+        "automine": {
+            "enabled": true,
+            "version": 0,
+            "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
+            "fee": 7000000000000000,
+            "input": {
+                "prompt": "What is the capital of the moon?"
+            }
         }
-      }
-  },
-  "ipfs": {
-      "strategy": "http_client",
-      "http_client": {
-          "url": ""
-      }
-  }
+    },
+    "blockchain": {
+        "private_key": "CHANGME",
+        "rpc_url": "CHANGME",
+        "sender_rpc_url": "",
+        "client_rpc_urls": [],
+        "use_ethers_gas_oracle": false,
+        "cache_nonce": false,
+        "basefee_x": 2,
+        "gas_override": false,
+        "gas_override_gwei": 0
+    },
+    "claim": {
+        "enabled": true,
+        "number_of_batches": 0,
+        "max_claims_per_batch": 250,
+        "min_claims_per_batch": 10,
+        "delay": 60,
+        "validate_claims": true,
+        "min_reward": 0.0001,
+        "max_claim_gas": 0,
+        "sort_by_cost": false,
+        "max_claims_buffer": 2000,
+        "claim_min_reward": 0,
+        "claim_on_approach": false,
+        "stake_buffer_level": 0,
+        "min_batch_profit": 0,
+        "hoard_mode": false,
+        "hoard_max_queue_size": 0
+    },
+    "ml": {
+        "strategy": "cog",
+        "replicate": {
+            "api_token": ""
+        },
+        "cog": {
+            "0xdafc13d7e9529e278bf40038524f20841ba8879c0b5d7667d438cd60c64a118d": {
+                "url": [
+                    "<cog-url>"
+                ]
+            }
+        }
+    },
+    "ipfs": {
+        "strategy": "http_client",
+        "http_client": {
+            "url": "/ip4/127.0.0.1/tcp/5001"
+        }
+    }
 }
