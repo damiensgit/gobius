@@ -509,6 +509,7 @@ func (tm *BatchTransactionManager) processBatch(
 		sendTasks := func(account *account.Account, wg *sync.WaitGroup) {
 			defer wg.Done()
 
+			// TODO: compute if we have enough aius to send the batch based on model fee * batch size
 			tm.services.Logger.Warn().Int("batch_size", taskBatchSize).Str("account", account.Address.String()).Msgf("** task queue is low - sending batch **")
 			receipt, err := tm.BulkTasks(account, taskBatchSize)
 			if err != nil {
@@ -2062,19 +2063,20 @@ func (m *BatchTransactionManager) ProcessValidatorsStakes() {
 	if balAsFloat < m.services.Config.ValidatorConfig.EthLowThreshold {
 		m.services.Logger.Warn().Float64("threshold", m.services.Config.ValidatorConfig.EthLowThreshold).Msg("⚠️ balance is below threshold")
 	}
-	// get the baseTokenBalance
-	baseTokenBalance, err := m.services.Basetoken.BalanceOf(nil, m.services.OwnerAccount.Address)
-	if err != nil {
-		m.services.Logger.Err(err).Msg("failed to get balance")
-		return
-	}
-
-	ethAsFmt := fmt.Sprintf("%.8g Ξ", balAsFloat)
-	baseAsFmt := fmt.Sprintf("%.8g %s", m.services.Config.BaseConfig.BaseToken.ToFloat(baseTokenBalance), m.services.Config.BaseConfig.BaseToken.Symbol)
-	//m.services.Config.BaseConfig.BaseToken.Symbol, m.services.Config.BaseConfig.BaseToken.ToFloat(baseTokenBalance)
-	m.services.Logger.Info().Str("eth_bal", ethAsFmt).Str("basetoken_bal", baseAsFmt).Msg("wallet balances")
 
 	for _, v := range m.validators {
+
+		// get the baseTokenBalance on owner account as balance may change between checks
+		baseTokenBalance, err := m.services.Basetoken.BalanceOf(nil, m.services.OwnerAccount.Address)
+		if err != nil {
+			m.services.Logger.Err(err).Msg("failed to get balance")
+			return
+		}
+
+		ethAsFmt := fmt.Sprintf("%.8g Ξ", balAsFloat)
+		baseAsFmt := fmt.Sprintf("%.8g %s", m.services.Config.BaseConfig.BaseToken.ToFloat(baseTokenBalance), m.services.Config.BaseConfig.BaseToken.Symbol)
+		m.services.Logger.Info().Str("eth_bal", ethAsFmt).Str("basetoken_bal", baseAsFmt).Msg("wallet balances of owner account")
+
 		v.ProcessValidatorStake(baseTokenBalance)
 	}
 

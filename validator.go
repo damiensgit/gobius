@@ -279,6 +279,7 @@ func (v *Validator) GetValidatorStakeBuffer() (float64, error) {
 	return stakedAmountFloat - validatorPendingFloat - validatorMinFloat, nil
 }
 
+// TODO: return error
 func (v *Validator) ProcessValidatorStake(baseTokenBalance *big.Int) {
 
 	// get the baseTokenBalance
@@ -322,7 +323,7 @@ func (v *Validator) ProcessValidatorStake(baseTokenBalance *big.Int) {
 	}
 
 	// FormatFixed is used because we cant represent the full amount in float64
-	v.services.Logger.Info().Msgf("allowance amount: %s", v.services.Config.BaseConfig.BaseToken.FormatFixed(allowance))
+	v.services.Logger.Debug().Msgf("allowance amount: %s", v.services.Config.BaseConfig.BaseToken.FormatFixed(allowance))
 
 	// check if the allowance is less than the balance
 	if allowance.Cmp(baseTokenBalance) < 0 {
@@ -378,7 +379,7 @@ func (v *Validator) ProcessValidatorStake(baseTokenBalance *big.Int) {
 
 		minWithTopupBufferAF := v.services.Config.BaseConfig.BaseToken.ToFloat(minWithTopupBuffer)
 
-		v.services.Logger.Info().Float64("amount", minWithTopupBufferAF).Msgf("minWithTopupBufferAF")
+		v.services.Logger.Debug().Float64("amount", minWithTopupBufferAF).Msgf("minWithTopupBufferAF")
 
 		// check if the staked amount is greater than or equal to the minimum with topup buffer
 		if stakedAmount.Cmp(minWithTopupBuffer) >= 0 {

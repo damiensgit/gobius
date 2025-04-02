@@ -117,8 +117,7 @@
       "stake_buffer_level": 0,
       "min_batch_profit": 0,
       "hoard_mode": false,
-      "hoard_max_queue_size": 0,
-      "claimer_private_keys": null
+      "hoard_max_queue_size": 0
   },
   "ml": {
       "strategy": "cog",

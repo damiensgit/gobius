@@ -6,6 +6,12 @@ A high-performance, multi-GPU mining client for the [Arbius protocol](https://ar
 
 Gobius enables decentralized machine learning by allowing miners to participate in the Arbius network - an on-chain, reproducible AI model execution platform similar to services like Midjourney or ChatGPT, but in a censorship-resistant way.
 
+## Getting Started as a Miner
+
+**Are you looking to start mining with Gobius?** Please read our dedicated [QUICKSTART.md](QUICKSTART.md) guide, which provides a step-by-step walkthrough specifically designed for miners.
+
+The rest of this README document contains more detailed information about the project structure, development setup, and advanced configuration options primarily intended for developers or advanced users.
+
 ## Features
 
 - **Multi-GPU Support**
@@ -142,11 +148,19 @@ The SQL schema and configuration are located in the `./sql` directory. Running `
    {
      "rpc": "YOUR_RPC_ENDPOINT",  // e.g., "https://arb1.arbitrum.io/rpc"
      "privatekey": "YOUR_PRIVATE_KEY",  // Your wallet private key (without 0x prefix)
+     "ipfs": {
+       "strategy": "http_client",
+       "http_client": {
+         "url": "/ip4/127.0.0.1/tcp/5001"  // IPFS daemon address
+       }
+     }
      // ... other optional settings ...
    }
    ```
 
    > ⚠️ **Important**: Never share or commit your private key. Keep your config.json file secure.
+
+   > **Note**: Ensure your IPFS daemon is running and accessible at the configured URL. If you're running IPFS on a different host or port, adjust the URL accordingly.
 
 ### Deployed Contracts
 

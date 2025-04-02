@@ -118,8 +118,8 @@ type ValidatorConfig struct {
 }
 
 type BatchTasks struct {
-	Enabled                  bool     `json:"enabled"`
-	MinTasksInQueue          int      `json:"min_tasks_in_queue"` //  the number of tasks left in the queue before we start creating new batches
+	Enabled                  bool     `json:"enabled"`            // enable batch task creation
+	MinTasksInQueue          int      `json:"min_tasks_in_queue"` // the number of tasks left in the queue before we start creating new batches
 	OnlyTasks                bool     `json:"only_tasks"`         // stop after a task batches are submitted
 	BatchMode                string   `json:"batch_mode"`         // "normal", "account"
 	BatchSize                int      `json:"batch_size"`
@@ -165,12 +165,12 @@ type Strategies struct {
 }
 
 type Automine struct {
-	Enabled      bool     `json:"enabled"`
-	Version      int      `json:"version"`
-	Model        string   `json:"model"`
-	Fee          *big.Int `json:"fee"`
-	Input        Input    `json:"input"`
-	ModelAsBytes [32]byte `json:"-"`
+	Version      int               `json:"version"`
+	Model        string            `json:"model"`
+	Fee          *big.Int          `json:"fee"`
+	Input        Input             `json:"input"`
+	Owner        ethcommon.Address `json:"owner"`
+	ModelAsBytes [32]byte          `json:"-"`
 }
 
 type Blockchain struct {
@@ -413,6 +413,7 @@ func NewAppConfig(testnetType int) AppConfig {
 var (
 	ErrNoAutomineModel      = errors.New("automine model not set")
 	ErrAutomineModelInvalid = errors.New("automine model could not be converted to [32]byte")
+	ErrNoAutomineOwner      = errors.New("automine owner not set")
 )
 
 // TODO: some basic validation of the values
@@ -432,6 +433,10 @@ func InitAppConfig(file string, testnetType int) (*AppConfig, error) {
 
 	if cfg.Strategies.Automine.Model == "" {
 		return nil, ErrNoAutomineModel
+	}
+
+	if cfg.Strategies.Automine.Owner == (ethcommon.Address{}) {
+		return nil, ErrNoAutomineOwner
 	}
 
 	cfg.Strategies.Automine.ModelAsBytes, err = common.ConvertTaskIdString2Bytes(cfg.Strategies.Automine.Model)
