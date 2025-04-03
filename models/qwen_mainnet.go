@@ -257,6 +257,11 @@ func (m *QwenMainnetModel) GetFiles(gpu *common.GPU, taskid string, input any) (
 	}
 	defer postResp.Body.Close()
 
+	if postResp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(postResp.Body)
+		return nil, fmt.Errorf("server returned non-200 status: %d - %s", postResp.StatusCode, string(bodyBytes))
+	}
+
 	body, err := io.ReadAll(postResp.Body)
 	if err != nil {
 		return nil, err
