@@ -376,8 +376,18 @@ func (s *BulkMineStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmi
 	solveElapsed := time.Since(solveStart)
 
 	if err != nil {
-		workerLogger.Error().Err(err).Msg("solve task failed")
-		s.taskQueue.TaskFailed(ts.TaskId)
+		workerLogger.Error().Msg("solve taks failed, requeueing task")
+
+		requeued, err := s.services.TaskStorage.RequeueTaskIfNoCommitmentOrSolution(ts.TaskId)
+		if err != nil {
+			workerLogger.Error().Err(err).Msg("failed to requeue task")
+		} else if requeued {
+			workerLogger.Info().Msg("task requeued successfully")
+		} else {
+			workerLogger.Error().Msg("task not requeued due to existing commitment and/or solution")
+		}
+
+		s.taskQueue.TaskFailed(ts.TaskId) // Mark as failed in the in-memory queue regardless
 		gpu.SetStatus("Error")
 	} else {
 		workerLogger.Info().Str("elapsed", solveElapsed.String()).Msg("task solved successfully")
@@ -410,13 +420,6 @@ func (s *BulkMineStrategy) pullTasksFromStorage() {
 			if s.ctx.Err() != nil {
 				continue
 			}
-
-			// Limit queue size before pulling more?
-			// if s.taskQueue.Len() > s.taskQueue.maxTasks * 2 { // Example threshold
-			// 	s.logger.Debug().Int("queue_size", s.taskQueue.Len()).Msg("task queue is large, pausing storage pull")
-			//  time.Sleep(5 * time.Second)
-			// 	continue
-			// }
 
 			taskId, txHash, err := s.services.TaskStorage.PopTask()
 			if err != nil {

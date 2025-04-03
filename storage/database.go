@@ -479,3 +479,10 @@ func (ts *TaskStorageDB) GetAllCommitments() (TaskDataSlice, error) {
 
 	return tasks, nil
 }
+
+// RequeueTaskIfNoCommitmentOrSolution re-enqueues a task if it has no commitment or solution
+func (ts *TaskStorageDB) RequeueTaskIfNoCommitmentOrSolution(taskId task.TaskId) (requeued bool, err error) {
+	rows, err := ts.queries.RequeueTaskIfNoCommitmentOrSolution(ts.ctx, taskId)
+
+	return rows > 0, err
+}

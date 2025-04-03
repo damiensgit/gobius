@@ -557,6 +557,42 @@ func main() {
 			recoverStaleTasks(appContext)
 		case "claimbatchinfo":
 			getBatchPricingInfo(appContext)
+		case "unsolvedtasks":
+			var startBlock, endBlock int64
+			var err error
+			var senderFilter common.Address
+
+			if len(args) < 2 {
+				log.Fatal("unsolvedtasks requires at least a startblock argument")
+			}
+
+			startBlock, err = strconv.ParseInt(args[1], 10, 64)
+			if err != nil {
+				log.Fatalf("Invalid startblock value: %v", err)
+			}
+
+			if len(args) >= 3 {
+				endBlock, err = strconv.ParseInt(args[2], 10, 64)
+				if err != nil {
+					log.Fatalf("Invalid endblock value: %v", err)
+				}
+			} else {
+				endBlock = 0 // Signal to getUnsolvedTasks to use the latest block
+			}
+
+			// Check for optional sender filter address
+			if len(args) >= 4 {
+				if !common.IsHexAddress(args[3]) {
+					log.Fatalf("Invalid sender filter address: %s", args[3])
+				}
+				senderFilter = common.HexToAddress(args[3])
+			} else {
+				senderFilter = common.Address{} // Use zero address if not provided
+			}
+
+			// Define a reasonable initial block size for the scan
+			initialBlockSize := int64(10000) // Example initial size
+			getUnsolvedTasks(appQuit, appServices, rpcClient, startBlock, endBlock, initialBlockSize, senderFilter)
 		case "fundtaskwallets":
 			var amount, minbal float64
 			if len(args) == 3 {
@@ -674,6 +710,9 @@ func main() {
 			}
 			// Assuming RunAutoTaskSubmit is defined in commands.go (in the same package)
 			RunAutoTaskSubmit(appQuit, appServices, interval)
+		case "getunsolved": // Renamed case from previous attempt
+			// This case is now handled by "unsolvedtasks" below
+			log.Fatal("Use 'unsolvedtasks <startblock> [endblock]' command format.")
 		default:
 			log.Fatalf("unknown command: %s", command)
 		}

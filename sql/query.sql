@@ -176,3 +176,19 @@ AND NOT EXISTS (
     FROM solutions
     WHERE solutions.taskid = tasks.taskid
 );
+
+-- name: RequeueTaskIfNoCommitmentOrSolution :execrows
+UPDATE tasks
+SET status = 0 -- Set back to pending
+WHERE taskid = ? -- For the specific task that failed
+  AND status = 1 -- Only reset if it was in the 'processing' state (set by PopTask)
+  AND NOT EXISTS (
+      SELECT 1
+      FROM commitments c
+      WHERE c.taskid = tasks.taskid
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM solutions s
+      WHERE s.taskid = tasks.taskid
+  );

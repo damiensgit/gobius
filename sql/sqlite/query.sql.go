@@ -545,6 +545,31 @@ func (q *Queries) RecoverStaleTasks(ctx context.Context) error {
 	return err
 }
 
+const requeueTaskIfNoCommitmentOrSolution = `-- name: RequeueTaskIfNoCommitmentOrSolution :execrows
+UPDATE tasks
+SET status = 0 -- Set back to pending
+WHERE taskid = ? -- For the specific task that failed
+  AND status = 1 -- Only reset if it was in the 'processing' state (set by PopTask)
+  AND NOT EXISTS (
+      SELECT 1
+      FROM commitments c
+      WHERE c.taskid = tasks.taskid
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM solutions s
+      WHERE s.taskid = tasks.taskid
+  )
+`
+
+func (q *Queries) RequeueTaskIfNoCommitmentOrSolution(ctx context.Context, taskid task.TaskId) (int64, error) {
+	result, err := q.db.ExecContext(ctx, requeueTaskIfNoCommitmentOrSolution, taskid)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const setTaskQueuedStatus = `-- name: SetTaskQueuedStatus :execrows
 UPDATE tasks SET status = 1 WHERE taskid = ? and status = 0
 `

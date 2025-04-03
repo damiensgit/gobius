@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"gobius/account"
+	"gobius/bindings/engine"
 	"gobius/client"
 	task "gobius/common"
 	"gobius/metrics"
 	"log"
+	"math/big"
 	"math/rand"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/briandowns/spinner"
@@ -987,4 +990,152 @@ func recoverStaleTasks(ctx context.Context) error {
 	}
 
 	return nil
+}
+
+// getUnsolvedTasks scans blocks for TaskSubmitted events and adds unsolved ones to storage.
+// If endBlock is 0 or less, it scans up to the current latest block.
+// If senderFilter is not the zero address, only tasks submitted by that sender are processed.
+func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *client.Client, fromBlock int64, endBlock int64, initialBlockSize int64, senderFilter common.Address) {
+
+	eventAbi, err := engine.EngineMetaData.GetAbi()
+	if err != nil {
+		panic("error getting engine abi")
+	}
+
+	taskSubmittedEvent := eventAbi.Events["TaskSubmitted"].ID
+
+	// Determine the end block if not provided or invalid
+	if endBlock <= 0 || endBlock < fromBlock {
+		log.Printf("End block not specified or invalid (%d), fetching latest block number...", endBlock)
+		currentBlockUint, err := rpcClient.Client.BlockNumber(context.Background())
+		if err != nil {
+			log.Fatalf("Failed to get current block number: %v", err)
+		}
+		endBlock = int64(currentBlockUint)
+		log.Printf("Scanning up to latest block: %d", endBlock)
+	}
+
+	if fromBlock >= endBlock {
+		log.Printf("From block %d is already at or beyond end block %d. Nothing to scan.", fromBlock, endBlock)
+		return
+	}
+
+	log.Printf("Scanning for unsolved tasks from block %d to %d", fromBlock, endBlock)
+
+	currentBlockSize := initialBlockSize
+	minBlockSize := int64(100)   // Don't go smaller than this
+	maxBlockSize := int64(50000) // Limit increase
+	increaseStep := int64(500)   // How much to increase size on success
+
+	// Ensure initial size is within bounds
+	if currentBlockSize < minBlockSize {
+		currentBlockSize = minBlockSize
+	}
+	if currentBlockSize > maxBlockSize {
+		currentBlockSize = maxBlockSize
+	}
+
+	query := ethereum.FilterQuery{
+		Addresses: []common.Address{services.Config.BaseConfig.EngineAddress},
+		Topics:    [][]common.Hash{{taskSubmittedEvent}},
+	}
+
+	loopFromBlock := fromBlock // Use a separate variable for loop iteration
+	totalFound := 0
+	totalAdded := 0
+
+	isFiltering := senderFilter != (common.Address{}) // Check if filter is active
+	if isFiltering {
+		log.Printf("Filtering for tasks submitted by sender: %s", senderFilter.Hex())
+	}
+
+	for loopFromBlock <= endBlock {
+		select {
+		case <-appQuit.Done():
+			log.Printf("WARN: getUnsolvedTasks received shutdown signal. Aborting scan at block %d.", loopFromBlock)
+			return // Exit the function early
+		default:
+		}
+
+		// Calculate the end block for this specific query batch
+		loopToBlock := loopFromBlock + currentBlockSize - 1 // Range is inclusive
+		if loopToBlock > endBlock {
+			loopToBlock = endBlock
+		}
+
+		log.Printf("Querying logs from %d to %d (size %d)...", loopFromBlock, loopToBlock, currentBlockSize)
+		query.FromBlock = big.NewInt(loopFromBlock)
+		query.ToBlock = big.NewInt(loopToBlock)
+
+		logs, err := rpcClient.FilterLogs(context.Background(), query)
+
+		if err != nil {
+			// Check if error suggests block range is too large (heuristic check)
+			errStr := strings.ToLower(err.Error())
+			isRangeError := strings.Contains(errStr, "block range") ||
+				strings.Contains(errStr, "limit") ||
+				strings.Contains(errStr, "response size") ||
+				strings.Contains(errStr, "timeout") ||
+				strings.Contains(errStr, "too many logs")
+
+			if isRangeError && currentBlockSize > minBlockSize {
+				log.Printf("WARN: FilterLogs error (likely range too large) with size %d: %v. Reducing size.", currentBlockSize, err)
+				// Reduce block size significantly, e.g., halve it, but not below min
+				newSize := max(minBlockSize, currentBlockSize/2)
+				if newSize == currentBlockSize { // Ensure reduction if already near min
+					newSize = max(minBlockSize, newSize-increaseStep)
+				}
+				currentBlockSize = newSize
+				log.Printf("Retrying same range with smaller block size: %d", currentBlockSize)
+				// Loop continues without advancing loopFromBlock, trying the smaller size
+			} else {
+				// Error is not recognized as a range issue, or we're already at min size
+				log.Fatalf("Unrecoverable error filtering logs from %d to %d: %v", loopFromBlock, loopToBlock, err)
+			}
+		} else {
+			if len(logs) > 0 {
+				log.Printf("Found %d TaskSubmitted logs in range %d-%d", len(logs), loopFromBlock, loopToBlock)
+				totalFound += len(logs)
+			}
+
+			for _, currentlog := range logs {
+				parsedLog, err := services.Engine.Engine.ParseTaskSubmitted(currentlog)
+				if err != nil {
+					log.Printf("WARN: Failed to parse TaskSubmitted log at block %d, tx %s: %v", currentlog.BlockNumber, currentlog.TxHash.Hex(), err)
+					continue
+				}
+
+				// Apply sender filter if active
+				if isFiltering && parsedLog.Sender != senderFilter {
+					// log.Printf("DEBUG: Skipping task %s from sender %s (filter: %s)", task.TaskId(parsedLog.Id).String(), parsedLog.Sender.Hex(), senderFilter.Hex())
+					continue // Skip this task, does not match filter
+				}
+
+				sol, err := services.Engine.Engine.Solutions(nil, parsedLog.Id)
+				if err != nil {
+					log.Printf("WARN: Failed to get solution for task %s: %v", task.TaskId(parsedLog.Id).String(), err)
+					continue
+				}
+
+				if sol.Blocktime == 0 { // Task is unsolved
+					taskId := task.TaskId(parsedLog.Id)
+					err = services.TaskStorage.AddTaskWithStatus(taskId, currentlog.TxHash, 0, 0) // Add with status 0 (pending)
+					if err != nil {
+						log.Printf("WARN: Failed to add unsolved task %s to storage: %v", taskId.String(), err)
+					} else {
+						log.Printf("Added unsolved task to queue: %s (Tx: %s)", taskId.String(), currentlog.TxHash.Hex())
+						totalAdded++
+					}
+				}
+			}
+
+			// Successfully processed this range, advance to the next block
+			loopFromBlock = loopToBlock + 1
+
+			// Try increasing block size for the next iteration, up to the max
+			currentBlockSize = min(maxBlockSize, currentBlockSize+increaseStep)
+		}
+	}
+
+	log.Printf("Finished scanning. Total TaskSubmitted logs found: %d, Total unsolved tasks added: %d", totalFound, totalAdded)
 }
