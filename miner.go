@@ -10,6 +10,7 @@ import (
 	"flag"
 	"fmt"
 	enginewrapper "gobius/bindings/engine"
+	cmn "gobius/common"
 	"runtime"
 	"runtime/pprof"
 
@@ -696,6 +697,15 @@ func main() {
 	if modelToMine == nil {
 		logger.Fatal().Str("model", cfg.Strategies.Model).Msg("model specified in config was not found in enabled models")
 	}
+
+	modelAsBytes, _ := cmn.ConvertTaskIdString2Bytes(cfg.Strategies.Model)
+	totalReward, err := appServices.Engine.GetModelReward(modelAsBytes)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("could not get model reward")
+	}
+
+	rewardInAIUS := appServices.Config.BaseConfig.BaseToken.ToFloat(totalReward)
+	logger.Info().Str("model", cfg.Strategies.Model).Str("reward", fmt.Sprintf("%.8g", rewardInAIUS)).Msg("selected strategy model reward")
 
 	miner, err := NewMinerEngine(appServices, manager, &appQuitWG)
 	if err != nil {
