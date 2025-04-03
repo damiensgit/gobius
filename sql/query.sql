@@ -170,4 +170,9 @@ DELETE FROM ipfs_cids WHERE taskid = ?;
 -- name: RecoverStaleTasks :exec
 UPDATE tasks
 SET status = 0
-WHERE status = 1;
+WHERE status = 1
+AND NOT EXISTS (
+    SELECT 1
+    FROM solutions
+    WHERE solutions.taskid = tasks.taskid
+);

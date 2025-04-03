@@ -533,6 +533,11 @@ const recoverStaleTasks = `-- name: RecoverStaleTasks :exec
 UPDATE tasks
 SET status = 0
 WHERE status = 1
+AND NOT EXISTS (
+    SELECT 1
+    FROM solutions
+    WHERE solutions.taskid = tasks.taskid
+)
 `
 
 func (q *Queries) RecoverStaleTasks(ctx context.Context) error {
