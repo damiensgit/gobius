@@ -50,6 +50,31 @@ func (q *Queries) AddTask(ctx context.Context, arg AddTaskParams) error {
 	return err
 }
 
+const addTaskWithStatus = `-- name: AddTaskWithStatus :exec
+INSERT INTO tasks(
+  taskid, txhash, cumulativeGas, status
+) VALUES (
+  ?,?, ?, ? 
+)
+`
+
+type AddTaskWithStatusParams struct {
+	Taskid        task.TaskId
+	Txhash        common.Hash
+	Cumulativegas float64
+	Status        int64
+}
+
+func (q *Queries) AddTaskWithStatus(ctx context.Context, arg AddTaskWithStatusParams) error {
+	_, err := q.db.ExecContext(ctx, addTaskWithStatus,
+		arg.Taskid,
+		arg.Txhash,
+		arg.Cumulativegas,
+		arg.Status,
+	)
+	return err
+}
+
 const addTasks = `-- name: AddTasks :exec
 INSERT INTO tasks(
   taskid, txhash, cumulativeGas

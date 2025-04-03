@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"gobius/bindings/engine"
 	task "gobius/common"
 	"math/rand"
@@ -12,6 +13,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/event"
+	lru "github.com/hashicorp/golang-lru"
 	"github.com/rs/zerolog"
 )
 
@@ -21,22 +23,30 @@ type MiningStrategy interface {
 	Stop()
 	// Name returns the strategy name (e.g., "bulkmine", "solutionsampler")
 	Name() string
+	// HandleTaskSubmitted allows strategies to react to new tasks submitted on-chain.
+	// Not all strategies need to implement this.
+	HandleTaskSubmitted(event *engine.EngineTaskSubmitted)
 }
 
 type taskHandlerFunc func(workerId int, gpu *task.GPU, ts *TaskSubmitted)
 
 // --- Base Strategy (Common worker logic) ---
 type baseStrategy struct {
-	ctx        context.Context // Strategy's operational context
-	cancelFunc context.CancelFunc
-	services   *Services
-	miner      *Miner
-	gpuPool    *GPUPool
-	taskQueue  *TaskQueue
-	logger     zerolog.Logger
-	numWorkers int
-	wg         sync.WaitGroup
-	stopOnce   sync.Once
+	ctx               context.Context // Strategy's operational context
+	cancelFunc        context.CancelFunc
+	services          *Services
+	miner             *Miner
+	gpuPool           *GPUPool
+	taskQueue         *TaskQueue
+	logger            zerolog.Logger
+	numWorkers        int
+	wg                sync.WaitGroup
+	stopOnce          sync.Once
+	strategyName      string
+	txParamCache      *lru.Cache                       // Cache for TxHash -> *SubmitTaskParams (Using LRU)
+	needsTaskEvents   bool                             // Flag indicating if the strategy needs TaskSubmitted events
+	taskEventSub      event.Subscription               // Subscription object if listening
+	sinkTaskSubmitted chan *engine.EngineTaskSubmitted // Channel for receiving events if listening
 }
 
 func (b *baseStrategy) Go(f func()) {
@@ -47,19 +57,52 @@ func (b *baseStrategy) Go(f func()) {
 	}()
 }
 
-func newBaseStrategy(appCtx context.Context, services *Services, miner *Miner, gpuPool *GPUPool, taskQueue *TaskQueue, strategyName string) baseStrategy {
+// Generic implementation, can be overridden by specific strategies.
+func (bs *baseStrategy) HandleTaskSubmitted(event *engine.EngineTaskSubmitted) {
+	// Default: Do nothing or log a warning if unexpected
+	// bs.logger.Debug().Str("task", task.TaskId(event.Id).String()).Msg("received TaskSubmitted event but strategy does not handle it")
+}
+
+func newBaseStrategy(appCtx context.Context, services *Services, miner *Miner, gpuPool *GPUPool, strategyName string, needsTaskEvents bool) (baseStrategy, error) {
 	ctx, cancel := context.WithCancel(appCtx) // Create a derived context for the strategy
 	numWorkers := gpuPool.NumGPUs() * services.Config.NumWorkersPerGPU
-	return baseStrategy{
-		ctx:        ctx,
-		cancelFunc: cancel,
-		services:   services,
-		miner:      miner,
-		gpuPool:    gpuPool,
-		taskQueue:  taskQueue,
-		logger:     services.Logger.With().Str("strategy", strategyName).Logger(),
-		numWorkers: numWorkers,
+
+	var sink chan *engine.EngineTaskSubmitted
+	if needsTaskEvents {
+		sink = make(chan *engine.EngineTaskSubmitted, 1024)
 	}
+
+	// Initialize LRU cache for transaction parameters
+	paramCacheSize := defaultTaskCacheSize // Use the constant defined in task_queue.go
+	paramCache, err := lru.New(paramCacheSize)
+	if err != nil {
+		// Log fatal because cache is essential for performance
+		// services.Logger.Fatal().Err(err).Msg("failed to initialize transaction parameter LRU cache")
+		return baseStrategy{}, fmt.Errorf("failed to initialize transaction parameter LRU cache: %w", err) // Return error
+	}
+
+	// Initialize TaskQueue internally
+	taskQueue, err := NewTaskQueue(services.Logger, defaultMaxTasks, defaultTaskCacheSize) // Use constants from task_queue.go
+	if err != nil {
+		// services.Logger.Fatal().Err(err).Msg("failed to initialize task queue")
+		return baseStrategy{}, fmt.Errorf("failed to initialize task queue: %w", err) // Return error
+	}
+	services.Logger.Info().Msg("task queue initialized within strategy base")
+
+	return baseStrategy{
+		ctx:               ctx,
+		cancelFunc:        cancel,
+		services:          services,
+		miner:             miner,
+		gpuPool:           gpuPool,
+		taskQueue:         taskQueue, // Assign the newly created queue
+		logger:            services.Logger.With().Str("strategy", strategyName).Logger(),
+		numWorkers:        numWorkers,
+		strategyName:      strategyName,
+		txParamCache:      paramCache, // Use LRU cache
+		needsTaskEvents:   needsTaskEvents,
+		sinkTaskSubmitted: sink, // May be nil if needsTaskEvents is false
+	}, nil // Return nil error on success
 }
 
 func (bs *baseStrategy) gpuWorker(workerId int, gpu *task.GPU, taskHandler taskHandlerFunc) {
@@ -80,10 +123,7 @@ func (bs *baseStrategy) gpuWorker(workerId int, gpu *task.GPU, taskHandler taskH
 			}
 
 			if !gpu.IsEnabled() {
-				// Optimization: If GPU is known to be disabled, wait for next signal
-				// rather than attempting to grab a task immediately.
-				// Could add a small sleep here if desired.
-				workerLogger.Debug().Msg("GPU disabled, skipping task retrieval")
+				workerLogger.Debug().Msg("gpus disabled, skipping task retrieval")
 				continue
 			}
 
@@ -94,10 +134,8 @@ func (bs *baseStrategy) gpuWorker(workerId int, gpu *task.GPU, taskHandler taskH
 			}
 
 			workerLogger.Debug().Str("task", ts.TaskId.String()).Int("queue_len", bs.taskQueue.Len()).Msg("starting job")
-			gpu.SetStatus("Mining") // Set status before potentially long task
-
-			taskHandler(workerId, gpu, ts) // Execute the strategy-specific handler
-
+			gpu.SetStatus("Mining")
+			taskHandler(workerId, gpu, ts)
 			// Task processing finished (success or fail handled within taskHandlerFunc)
 			// Status is updated by taskHandlerFunc or remains Mining until next cycle
 			workerLogger.Debug().Str("task", ts.TaskId.String()).Msg("finished job processing")
@@ -106,13 +144,80 @@ func (bs *baseStrategy) gpuWorker(workerId int, gpu *task.GPU, taskHandler taskH
 
 }
 
-// startWorkers launches the common worker goroutines. Specific task handling logic
-// is provided by the actual strategy implementation via the taskHandlerFunc.
-func (bs *baseStrategy) startWorkers(taskHandler taskHandlerFunc) {
-	bs.logger.Info().Int("workerspergpu", bs.services.Config.NumWorkersPerGPU).Int("gpus", bs.gpuPool.NumGPUs()).Msgf("starting %d workers", bs.numWorkers)
+// connectToTaskEvents attempts to subscribe to TaskSubmitted events.
+// It should only be called by strategies where needsTaskEvents is true.
+func (bs *baseStrategy) connectToTaskEvents() {
+	if bs.taskEventSub != nil {
+		bs.taskEventSub.Unsubscribe()
+	}
+	bs.logger.Info().Msg("subscribing to TaskSubmitted events...")
+	subCtx, cancel := context.WithTimeout(bs.ctx, 15*time.Second)
+	defer cancel()
+	blockNo, err := bs.services.OwnerAccount.Client.Client.BlockNumber(subCtx)
+	if err != nil {
+		bs.logger.Error().Err(err).Msg("failed to get current block number for task event subscription")
+		// Consider implementing retry logic here or rely on the event loop to retry
+		return
+	}
+
+	engineContract, err := engine.NewEngine(bs.services.Config.BaseConfig.EngineAddress, bs.services.OwnerAccount.Client.Client)
+	if err != nil {
+		bs.logger.Error().Err(err).Msg("failed to create engine contract instance for event watching")
+		return
+	}
+
+	bs.taskEventSub, err = engineContract.WatchTaskSubmitted(&bind.WatchOpts{
+		Start:   &blockNo,
+		Context: bs.ctx,
+	}, bs.sinkTaskSubmitted, nil, nil, nil)
+	if err != nil {
+		bs.logger.Error().Err(err).Msg("failed to subscribe to TaskSubmitted events")
+	} else {
+		bs.logger.Info().Msg("subscribed to TaskSubmitted events")
+	}
+}
+
+// listenForTaskEvents runs in a goroutine for strategies that need TaskSubmitted events.
+func (bs *baseStrategy) listenForTaskEvents(handler func(event *engine.EngineTaskSubmitted)) {
+
+	bs.logger.Info().Msg("started task event listener")
+
+	maxBackoff := 30 * time.Second
+	currentBackoff := 1 * time.Second
+
+	for {
+		select {
+		case <-bs.ctx.Done():
+			bs.logger.Info().Msg("stopping task event listener")
+			return
+		case event := <-bs.sinkTaskSubmitted:
+			if event == nil {
+				continue // Channel closed or nil event
+			}
+			currentBackoff = 1 * time.Second // Reset backoff on success
+			bs.logger.Info().Str("taskid", task.TaskId(event.Id).String()).Str("txHash", event.Raw.TxHash.Hex()).Uint64("block", event.Raw.BlockNumber).Msg("received TaskSubmitted event")
+			handler(event) // Call the strategy-specific handler
+
+		case err := <-bs.taskEventSub.Err():
+			if err == nil {
+				continue
+			}
+			bs.logger.Warn().Err(err).Msgf("task event subscription error, retrying connection in %s", currentBackoff)
+			time.Sleep(currentBackoff)
+			currentBackoff = (currentBackoff * 2) + time.Duration(rand.Intn(500))*time.Millisecond
+			if currentBackoff > maxBackoff {
+				currentBackoff = maxBackoff
+			}
+			bs.connectToTaskEvents() // Attempt to reconnect
+		}
+	}
+}
+
+// start initializes common strategy components like workers and optionally the event listener.
+func (bs *baseStrategy) start(taskHandler taskHandlerFunc, eventHandler func(event *engine.EngineTaskSubmitted)) error {
+	bs.logger.Info().Int("workerspergpu", bs.services.Config.NumWorkersPerGPU).Int("gpus", bs.gpuPool.NumGPUs()).Msgf("starting %d workers for %s strategy", bs.numWorkers, bs.strategyName)
 
 	gpus := bs.gpuPool.GetGPUs() // Get a snapshot of GPUs at worker start time
-
 	for i := 0; i < bs.numWorkers; i++ {
 		workerId := i
 		// Assign GPU in round-robin fashion based on NumWorkersPerGPU
@@ -126,47 +231,112 @@ func (bs *baseStrategy) startWorkers(taskHandler taskHandlerFunc) {
 			bs.gpuWorker(workerId, gpu, taskHandler)
 		})
 	}
+
+	// Start event listener if needed
+	if bs.needsTaskEvents {
+		if eventHandler == nil {
+			return fmt.Errorf("strategy %s needs task events but no handler provided", bs.strategyName)
+		}
+		bs.connectToTaskEvents()
+		bs.Go(func() { bs.listenForTaskEvents(eventHandler) })
+	}
+
+	return nil
+}
+
+// decodeTransaction retrieves transaction details and decodes parameters using the miner's decoder.
+// It utilizes the txParamCache for efficiency.
+func (bs *baseStrategy) decodeTransaction(txHash common.Hash) (*SubmitTaskParams, error) {
+	// 1. Check cache
+	if cachedParams, found := bs.txParamCache.Get(txHash.String()); found {
+		if params, ok := cachedParams.(*SubmitTaskParams); ok {
+			bs.logger.Debug().Str("txHash", txHash.String()).Msg("using cached task parameters")
+			return params, nil
+		}
+		bs.logger.Warn().Str("txHash", txHash.String()).Msg("invalid type found in txParamCache")
+		// Continue to fetch and decode if type assertion failed
+	}
+
+	// 2. Fetch transaction if not cached
+	txFetchStart := time.Now()
+	tx, _, err := bs.services.OwnerAccount.Client.Client.TransactionByHash(bs.ctx, txHash)
+	txFetchElapsed := time.Since(txFetchStart)
+	if err != nil {
+		bs.logger.Error().Err(err).Str("txHash", txHash.String()).Msg("could not get transaction from hash")
+		return nil, err
+	}
+	if tx == nil {
+		bs.logger.Error().Str("txHash", txHash.String()).Msg("transaction not found for hash")
+		return nil, fmt.Errorf("transaction %s not found", txHash.String())
+	}
+
+	bs.logger.Debug().Str("elapsed", txFetchElapsed.String()).Str("hash", txHash.String()).Msg("fetched transaction details")
+
+	// 3. Decode transaction
+	params, err := bs.miner.DecodeTaskTransaction(tx)
+	if err != nil {
+		bs.logger.Error().Err(err).Str("txHash", txHash.String()).Msg("could not decode task transaction")
+		return nil, err
+	}
+
+	// 4. Store in cache
+	bs.txParamCache.Add(txHash.String(), params) // Use Add method of LRU cache
+	bs.logger.Debug().Str("txHash", txHash.String()).Msg("cached decoded task parameters")
+
+	return params, nil
 }
 
 func (bs *baseStrategy) Stop() {
 	bs.stopOnce.Do(func() {
-		bs.logger.Info().Msg("stopping strategy workers")
+		bs.logger.Info().Msgf("stopping %s strategy workers", bs.strategyName)
 		if bs.cancelFunc != nil {
 			bs.cancelFunc()
 		}
+		// Unsubscribe from events if subscribed
+		if bs.taskEventSub != nil {
+			bs.taskEventSub.Unsubscribe()
+			bs.logger.Info().Msg("unsubscribed from task events")
+		}
 		bs.wg.Wait()
-		bs.logger.Info().Msg("all strategy workers stopped")
+		bs.logger.Info().Msgf("all %s strategy workers stopped", bs.strategyName)
 	})
 }
 
 // --- BulkMine Strategy ---
+// This strategy mines tasks from the storage queue.
+// It does NOT listen for TaskSubmitted events.
+// It assumes tasks in storage could be from single or bulk submits.
 
 type BulkMineStrategy struct {
-	baseStrategy
+	*baseStrategy // Embed pointer
 }
 
-func NewBulkMineStrategy(appContext context.Context, services *Services, miner *Miner, gpuPool *GPUPool, taskQueue *TaskQueue) *BulkMineStrategy {
-	return &BulkMineStrategy{
-		baseStrategy: newBaseStrategy(appContext, services, miner, gpuPool, taskQueue, "bulkmine"),
+func NewBulkMineStrategy(appContext context.Context, services *Services, miner *Miner, gpuPool *GPUPool) (*BulkMineStrategy, error) {
+	base, err := newBaseStrategy(appContext, services, miner, gpuPool, "bulkmine", false) // false = does not need task events
+	if err != nil {
+		return nil, err // Propagate error
 	}
+	return &BulkMineStrategy{
+		baseStrategy: &base, // Store pointer to base
+	}, nil
 }
 
-func (s *BulkMineStrategy) Name() string { return "bulkmine" }
+func (s *BulkMineStrategy) Name() string { return s.strategyName }
 
 func (s *BulkMineStrategy) Start() error {
 	s.logger.Info().Msgf("starting %s strategy", s.Name())
-
-	// Start the common worker pool
-	s.baseStrategy.startWorkers(s.handleTask)
-
+	// Start workers
+	err := s.baseStrategy.start(s.handleTask, nil) // No event handler needed
+	if err != nil {
+		return err
+	}
+	// Start pulling tasks from storage
 	s.Go(s.pullTasksFromStorage)
-
 	return nil
 }
 
 // handleTask is the specific task processing logic for BulkMine.
 func (s *BulkMineStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmitted) {
-
 	// assert that the task is not nil
 	if ts == nil {
 		s.logger.Error().Msg("task is nil")
@@ -175,29 +345,22 @@ func (s *BulkMineStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmi
 
 	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", ts.TaskId.String()).Logger()
 
-	// Fetch the full transaction if needed (might already be cached)
-	// This potentially blocks, consider timeout or context
-	txFetchStart := time.Now()
-	tx, _, err := s.services.OwnerAccount.Client.Client.TransactionByHash(s.ctx, ts.TxHash)
-	txFetchElapsed := time.Since(txFetchStart)
+	// Decode the transaction (uses cache internally)
+	params, err := s.decodeTransaction(ts.TxHash)
 	if err != nil {
-		workerLogger.Error().Err(err).Str("txHash", ts.TxHash.String()).Msg("could not get transaction from hash, failing task")
+		// Error already logged by decodeTransaction
 		s.taskQueue.TaskFailed(ts.TaskId)
 		return
 	}
 
-	workerLogger.Debug().Str("elapsed", txFetchElapsed.String()).Str("hash", ts.TxHash.String()).Msg("fetched transaction details")
-
-	// Solve the task
+	// Solve the task using decoded params
 	solveStart := time.Now()
-	_, err = s.miner.SolveTask(s.ctx, ts.TaskId, tx, gpu, false) // false = not validateOnly
+	_, err = s.miner.SolveTask(s.ctx, ts.TaskId, params, gpu, false) // false = not validateOnly
 	solveElapsed := time.Since(solveStart)
 
 	if err != nil {
 		workerLogger.Error().Err(err).Msg("solve task failed")
 		s.taskQueue.TaskFailed(ts.TaskId)
-		// Error handling (e.g., incrementing GPU error count) is likely done within SolveTask or GPU client
-		// Set status based on error type if possible, otherwise generic Error
 		gpu.SetStatus("Error")
 	} else {
 		workerLogger.Info().Str("elapsed", solveElapsed.String()).Msg("task solved successfully")
@@ -270,24 +433,63 @@ func (s *BulkMineStrategy) pullTasksFromStorage() {
 			if !added {
 				s.logger.Warn().Str("task", taskId.String()).Msg("popped task from storage was already known/inflight")
 			}
-			// Optional small delay to prevent overwhelming the queue 
+			// Optional small delay to prevent overwhelming the queue
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
 }
 
+// Stop ensures base strategy stop is called.
 func (s *BulkMineStrategy) Stop() {
-	s.logger.Info().Msg("stopping BulkMine strategy")
-	s.baseStrategy.Stop() // Stop the workers first
-	s.logger.Info().Msg("BulkMine strategy stopped")
+	s.baseStrategy.Stop()
+}
+
+// --- AutoMine Strategy ---
+// Inherits directly from BulkMineStrategy. Its behavior is identical in terms of
+// task processing (pulls from storage, decodes Tx, solves).
+// The selection of this strategy signals that BatchTransactionManager should be
+// configured to automatically create tasks.
+
+type AutoMineStrategy struct {
+	*BulkMineStrategy // Embed BulkMineStrategy as a pointer
+}
+
+func NewAutoMineStrategy(appContext context.Context, services *Services, miner *Miner, gpuPool *GPUPool) (*AutoMineStrategy, error) {
+	// Initialize the embedded BulkMineStrategy part, but name it "automine"
+	bulkStrategy, err := NewBulkMineStrategy(appContext, services, miner, gpuPool)
+	if err != nil {
+		return nil, err // Propagate error
+	}
+	bulkStrategy.strategyName = "automine"
+	return &AutoMineStrategy{
+		BulkMineStrategy: bulkStrategy, // Store the pointer
+	}, nil
+}
+
+// Name accesses the embedded strategy's method via the pointer.
+func (s *AutoMineStrategy) Name() string { return s.strategyName }
+
+// Start accesses the embedded strategy's method via the pointer.
+func (s *AutoMineStrategy) Start() error {
+	return s.BulkMineStrategy.Start()
+}
+
+// Stop accesses the embedded strategy's method via the pointer.
+func (s *AutoMineStrategy) Stop() {
+	s.BulkMineStrategy.Stop()
+}
+
+// HandleTaskSubmitted accesses the embedded strategy's method via the pointer.
+func (s *AutoMineStrategy) HandleTaskSubmitted(event *engine.EngineTaskSubmitted) {
+	s.BulkMineStrategy.HandleTaskSubmitted(event)
 }
 
 // --- SolutionSampler Strategy ---
+// Samples tasks from the solution submitted event and adds them to the queue for validation
 
 type SolutionSamplerStrategy struct {
-	baseStrategy
-	solutionSourceWG      *sync.WaitGroup // WG for the solution event handling goroutine
-	sampleTicker          *time.Ticker    // Ticker for periodic sampling batch processing
+	*baseStrategy                      // Embed pointer
+	sampleTicker          *time.Ticker // Ticker for periodic sampling batch processing
 	maxTaskSampleSize     int
 	tasksSamples          []*TaskSubmitted
 	sampleIndex           int
@@ -295,25 +497,32 @@ type SolutionSamplerStrategy struct {
 	sinkSolutionSubmitted chan *engine.EngineSolutionSubmitted
 }
 
-func NewSolutionSamplerStrategy(appCtx context.Context, services *Services, miner *Miner, gpuPool *GPUPool, taskQueue *TaskQueue) *SolutionSamplerStrategy {
+func NewSolutionSamplerStrategy(appCtx context.Context, services *Services, miner *Miner, gpuPool *GPUPool) (*SolutionSamplerStrategy, error) {
 	numWorkers := gpuPool.NumGPUs() * services.Config.NumWorkersPerGPU
 
 	sinkSolutionSubmitted := make(chan *engine.EngineSolutionSubmitted, 1024)
 
+	base, err := newBaseStrategy(appCtx, services, miner, gpuPool, "solutionsampler", true) // true = needs task events
+	if err != nil {
+		return nil, err // Propagate error
+	}
+
 	return &SolutionSamplerStrategy{
-		baseStrategy:          newBaseStrategy(appCtx, services, miner, gpuPool, taskQueue, "solutionsampler"),
-		solutionSourceWG:      &sync.WaitGroup{},
+		// Needs task events to populate the TaskID -> TxHash cache
+		baseStrategy:          &base,      // Store pointer to base
 		maxTaskSampleSize:     numWorkers, // Sample size based on worker capacity
 		tasksSamples:          make([]*TaskSubmitted, 0, numWorkers),
 		sinkSolutionSubmitted: sinkSolutionSubmitted,
 		solutionEventSub:      nil,
-	}
+	}, nil
+}
+
+// HandleTaskSubmitted caches the TaskID -> TxHash mapping for later lookup when a solution is seen.
+func (s *SolutionSamplerStrategy) HandleTaskSubmitted(event *engine.EngineTaskSubmitted) {
+	s.taskQueue.CacheTxHash(event.Id, event.Raw.TxHash)
 }
 
 func (s *SolutionSamplerStrategy) connectToSolutionSubmittedEvents() {
-
-	var solutionEventSub event.Subscription
-
 	if s.solutionEventSub != nil {
 		s.solutionEventSub.Unsubscribe()
 	}
@@ -327,7 +536,13 @@ func (s *SolutionSamplerStrategy) connectToSolutionSubmittedEvents() {
 		return
 	}
 
-	solutionEventSub, err = s.services.Engine.Engine.WatchSolutionSubmitted(&bind.WatchOpts{
+	engineContract, err := engine.NewEngine(s.services.Config.BaseConfig.EngineAddress, s.services.OwnerAccount.Client.Client)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("failed to create engine contract instance for solution event watching")
+		return
+	}
+
+	s.solutionEventSub, err = engineContract.WatchSolutionSubmitted(&bind.WatchOpts{
 		Start:   &blockNo,
 		Context: s.ctx,
 	}, s.sinkSolutionSubmitted, nil, nil)
@@ -335,38 +550,38 @@ func (s *SolutionSamplerStrategy) connectToSolutionSubmittedEvents() {
 	if err != nil {
 		s.logger.Error().Err(err).Msg("failed to subscribe to SolutionSubmitted events")
 	} else {
-		s.solutionEventSub = solutionEventSub
 		s.logger.Info().Msg("subscribed to SolutionSubmitted events")
 	}
 
 }
 
-func (s *SolutionSamplerStrategy) Name() string { return "solutionsampler" }
+func (s *SolutionSamplerStrategy) Name() string { return s.strategyName }
 
 func (s *SolutionSamplerStrategy) Start() error {
 	s.logger.Info().Msg("starting SolutionSampler strategy")
 
-	// Start the common worker pool - for this strategy, workers process sampled tasks
-	s.baseStrategy.startWorkers(s.handleSampledTask)
+	// Start common components (workers, task event listener)
+	err := s.baseStrategy.start(s.handleSampledTask, s.HandleTaskSubmitted)
+	if err != nil {
+		return err
+	}
 
 	// Start the goroutine to listen for SolutionSubmitted events
-	//s.solutionSourceWG.Add(1)
-	go s.listenForSolutions()
+	s.connectToSolutionSubmittedEvents() // Initial connection
+	s.Go(s.listenForSolutions)
 
 	// Start the ticker for processing samples periodically
 	s.sampleTicker = time.NewTicker(1 * time.Minute) // Process samples every minute
-	//s.solutionSourceWG.Add(1)                        // Track the ticker goroutine as well
-	go s.periodicSampleProcessor()
+	s.Go(s.periodicSampleProcessor)
 
 	return nil
 }
 
 // listenForSolutions handles incoming solution events and adds them to the sample pool.
 func (s *SolutionSamplerStrategy) listenForSolutions() {
-	defer s.solutionSourceWG.Done()
 	s.logger.Info().Msg("started solution event listener")
 
-	//maxBackoff := 30 * time.Second
+	maxBackoff := 30 * time.Second
 	currentBackoff := 1 * time.Second
 
 	for {
@@ -375,15 +590,17 @@ func (s *SolutionSamplerStrategy) listenForSolutions() {
 			s.logger.Info().Msg("stopping solution event listener")
 			return
 		case err := <-s.solutionEventSub.Err():
+			if err == nil {
+				continue
+			}
 			s.logger.Warn().Err(err).Msgf("solution submitted subscription error, attempting reconnect in %s", currentBackoff)
-			// Need a way to get the new subscription object after reconnecting
 			time.Sleep(currentBackoff)
+			currentBackoff = (currentBackoff * 2) + time.Duration(rand.Intn(500))*time.Millisecond
+			if currentBackoff > maxBackoff {
+				currentBackoff = maxBackoff
+			}
 			s.connectToSolutionSubmittedEvents() // Call the reconnect func
 
-			// currentBackoff *= 2
-			// if currentBackoff > maxBackoff {
-			// 	currentBackoff = maxBackoff
-			// }
 		case event := <-s.sinkSolutionSubmitted:
 			if event == nil {
 				continue
@@ -395,9 +612,7 @@ func (s *SolutionSamplerStrategy) listenForSolutions() {
 			// Get the TxHash from cache (essential for this strategy)
 			txHash, found := s.taskQueue.GetCachedTxHash(event.Task)
 			if !found {
-				// Maybe the task wasn't submitted via our node or cache expired.
-				// We could try fetching the tx hash here, but it adds latency/complexity.
-				//s.logger.Warn().Str("task", event.Task.String()).Msg("received solution for task not found in cache, cannot sample")
+				s.logger.Warn().Str("task", task.TaskId(event.Task).String()).Msg("solution event received but no TxHash found in cache, skipping sample")
 				continue
 			}
 
@@ -412,7 +627,7 @@ func (s *SolutionSamplerStrategy) listenForSolutions() {
 				s.tasksSamples = append(s.tasksSamples, ts)
 				s.logger.Debug().Str("task", ts.TaskId.String()).Int("sample_size", len(s.tasksSamples)).Msg("added solution to sample pool")
 			} else {
-				j := rand.Intn(s.sampleIndex) 
+				j := rand.Intn(s.sampleIndex)
 				if j < s.maxTaskSampleSize {
 					s.tasksSamples[j] = ts
 					s.logger.Debug().Str("task", ts.TaskId.String()).Int("replaced_index", j).Msg("replaced task in sample pool")
@@ -481,23 +696,19 @@ func (s *SolutionSamplerStrategy) handleSampledTask(workerId int, gpu *task.GPU,
 	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", ts.TaskId.String()).Logger()
 	workerLogger.Info().Msg("validating sampled task")
 
-	// Fetch the transaction
-	txFetchStart := time.Now()
-	tx, _, err := s.services.OwnerAccount.Client.Client.TransactionByHash(s.ctx, ts.TxHash)
-	txFetchElapsed := time.Since(txFetchStart)
+	// Decode the transaction (uses cache internally)
+	params, err := s.decodeTransaction(ts.TxHash)
 	if err != nil {
-		workerLogger.Error().Err(err).Str("txHash", ts.TxHash.String()).Msg("validation: could not get transaction from hash")
+		// Error logged by decodeTransaction
 		s.taskQueue.TaskFailed(ts.TaskId)
 		gpu.IncrementErrorCount()
-		gpu.SetStatus("Error - Tx Fetch")
+		gpu.SetStatus("Error - Decode")
 		return
 	}
 
-	workerLogger.Debug().Str("elapsed", txFetchElapsed.String()).Msg("validation: fetched transaction details")
-
-	// Solve the task in validateOnly mode
+	// Solve the task in validateOnly mode using decoded params
 	solveStart := time.Now()
-	ourCidBytes, err := s.miner.SolveTask(s.ctx, ts.TaskId, tx, gpu, true) // true = validateOnly
+	ourCidBytes, err := s.miner.SolveTask(s.ctx, ts.TaskId, params, gpu, true) // true = validateOnly
 	solveElapsed := time.Since(solveStart)
 
 	if err != nil {
@@ -522,7 +733,12 @@ func (s *SolutionSamplerStrategy) handleSampledTask(workerId int, gpu *task.GPU,
 	}
 	workerLogger.Info().Str("elapsed", solveElapsed.String()).Msg("validation: task solved locally")
 
-	engineContract := s.services.Engine.Engine
+	// Fetch on-chain solution for comparison
+	engineContract, err := engine.NewEngine(s.services.Config.BaseConfig.EngineAddress, s.services.OwnerAccount.Client.Client)
+	if err != nil {
+		workerLogger.Error().Err(err).Msg("validation: failed to create engine contract instance")
+		return
+	}
 
 	// Use CallOpts with the strategy's context
 	callOpts := &bind.CallOpts{Context: s.ctx}
@@ -561,7 +777,114 @@ func (s *SolutionSamplerStrategy) Stop() {
 	if s.sampleTicker != nil {
 		s.sampleTicker.Stop()
 	}
-	s.baseStrategy.Stop()     // Stop workers
-	s.solutionSourceWG.Wait() // Wait for event listener and processor
+	// Unsubscribe from solution events
+	if s.solutionEventSub != nil {
+		s.solutionEventSub.Unsubscribe()
+		s.logger.Info().Msg("unsubscribed from solution events")
+	}
+	s.baseStrategy.Stop() // Stop base (workers, task listener)
 	s.logger.Info().Msg("SolutionSampler strategy stopped")
+}
+
+// --- Listen Strategy ---
+// This strategy listens for TaskSubmitted events and adds them directly to the queue.
+
+type ListenStrategy struct {
+	*baseStrategy // Embed pointer
+}
+
+func NewListenStrategy(appContext context.Context, services *Services, miner *Miner, gpuPool *GPUPool) (*ListenStrategy, error) {
+	base, err := newBaseStrategy(appContext, services, miner, gpuPool, "listen", true) // true = needs task events
+	if err != nil {
+		return nil, err // Propagate error
+	}
+
+	return &ListenStrategy{
+		baseStrategy: &base, // Store pointer to base
+	}, nil
+}
+
+func (s *ListenStrategy) Name() string { return s.strategyName }
+
+func (s *ListenStrategy) Start() error {
+	s.logger.Info().Msgf("starting %s strategy", s.Name())
+	// Start workers and task event listener
+	return s.baseStrategy.start(s.handleTask, s.HandleTaskSubmitted)
+}
+
+// HandleTaskSubmitted adds the received task event to the processing queue
+// and ensures it's recorded in the local task storage.
+func (s *ListenStrategy) HandleTaskSubmitted(event *engine.EngineTaskSubmitted) {
+	taskId := event.Id
+	txHash := event.Raw.TxHash
+
+	// Cast to task.TaskId for String() method and for AddTasks
+	taskIdTyped := task.TaskId(taskId)
+	taskIdStr := taskIdTyped.String()
+
+	ts := &TaskSubmitted{
+		TaskId: taskId, // Store original [32]byte in TaskSubmitted struct
+		TxHash: txHash,
+	}
+	// Add to the queue, AddTask handles deduplication and signalling workers
+	added := s.taskQueue.AddTask(ts)
+	if !added {
+		s.logger.Warn().Str("task", taskIdStr).Msg("received task event but task was already known/inflight in memory queue")
+		return
+	}
+
+	// zero cost as these are external tasks
+	// status 1 = queued
+	err := s.services.TaskStorage.AddTaskWithStatus(taskIdTyped, txHash, 0, 1)
+	if err != nil {
+		s.logger.Error().Err(err).Str("task", taskIdStr).Str("txHash", txHash.Hex()).
+			Msg("failed to store received task event in database")
+	} else {
+		s.logger.Info().Str("task", taskIdStr).Str("txHash", txHash.Hex()).
+			Msg("stored received task event in database via AddTask")
+	}
+
+}
+
+// handleTask processes a task from the queue (which originated from an event).
+func (s *ListenStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmitted) {
+	// Logic is very similar to BulkMineStrategy's handleTask
+	if ts == nil {
+		s.logger.Error().Msg("task is nil")
+		return
+	}
+	// Cast TaskId here for logging
+	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task.TaskId(ts.TaskId).String()).Logger()
+
+	// Decode the transaction (uses cache internally)
+	params, err := s.decodeTransaction(ts.TxHash)
+	if err != nil {
+		// Error already logged by decodeTransaction
+		s.taskQueue.TaskFailed(ts.TaskId)
+		// TODO: Update task status in DB to indicate decode failure?
+		return
+	}
+
+	// Solve the task using decoded params
+	solveStart := time.Now()
+	_, err = s.miner.SolveTask(s.ctx, ts.TaskId, params, gpu, false) // false = not validateOnly
+	solveElapsed := time.Since(solveStart)
+
+	if err != nil {
+		workerLogger.Error().Err(err).Msg("solve task failed")
+		s.taskQueue.TaskFailed(ts.TaskId)
+		// TODO: Update task status in DB to indicate solve failure?
+		gpu.SetStatus("Error")
+	} else {
+		workerLogger.Info().Str("elapsed", solveElapsed.String()).Msg("task solved successfully")
+		s.taskQueue.TaskCompleted(ts.TaskId)
+		// TODO: Update task status in DB to indicate solve success?
+		s.gpuPool.AddSolveTime(solveElapsed)
+		gpu.SetStatus("Idle")
+	}
+}
+
+// Stop ensures base strategy stop is called.
+func (s *ListenStrategy) Stop() {
+	s.baseStrategy.Stop()
 }

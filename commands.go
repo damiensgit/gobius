@@ -15,6 +15,7 @@ import (
 
 	"github.com/briandowns/spinner"
 	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/rs/zerolog"
@@ -782,4 +783,63 @@ func fundTaskWallets(ctx context.Context, amount float64, minbal float64) {
 	}
 
 	services.Logger.Info().Msg("transfers complete")
+}
+
+// RunAutoTaskSubmit periodically submits single tasks based on config using Engine bindings.
+func RunAutoTaskSubmit(appCtx context.Context, services *Services, interval time.Duration) {
+	logger := services.Logger.With().Str("command", "autotasksubmit").Logger()
+	logger.Info().Dur("interval", interval).Msg("Starting automatic task submitter...")
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	ownerAccount := services.OwnerAccount
+
+	autoParams := services.AutoMineParams
+	if autoParams == nil {
+		logger.Fatal().Msg("AutoMine parameters not initialized in services")
+		return
+	}
+
+	feeFloat := services.Eth.ToFloat(autoParams.Fee) // Use ToFloat
+	feeFormatted := fmt.Sprintf("%.6f", feeFloat)    // Format to 6 decimal places
+
+	logger.Info().
+		Str("sender", ownerAccount.Address.Hex()).
+		Str("taskOwner", autoParams.Owner.Hex()).
+		Str("model", common.Bytes2Hex(autoParams.Model[:])).
+		Str("fee", feeFormatted+" aius").
+		Uint8("version", autoParams.Version).
+		Msg("Task parameters loaded from AutoMineParams")
+
+	// --- Submission Loop ---
+	for {
+		select {
+		case <-appCtx.Done():
+			logger.Info().Msg("Shutting down automatic task submitter...")
+			return
+		case <-ticker.C:
+			if appCtx.Err() != nil { // Check context again after ticker
+				continue
+			}
+
+			logger.Debug().Msg("Preparing to submit new task...")
+
+			submitFunc := func(opts *bind.TransactOpts) (interface{}, error) {
+				// Pass parameters directly from autoParams
+				return services.Engine.Engine.SubmitTask(opts, autoParams.Version, autoParams.Owner, autoParams.Model, autoParams.Fee, autoParams.Input)
+			}
+
+			maxRetries := services.Config.Miner.ErrorMaxRetries
+			backoffTime := services.Config.Miner.ErrorBackoffTime
+			backoffMultiplier := services.Config.Miner.ErrorBackofMultiplier
+			tx, err := ownerAccount.NonceManagerWrapper(maxRetries, backoffTime, backoffMultiplier, false, submitFunc)
+
+			if err != nil {
+				logger.Error().Err(err).Msg("Failed to submit task transaction via wrapper")
+			} else {
+				logger.Info().Str("txHash", tx.Hash().Hex()).Msg("Task submitted successfully using AutoMineParams")
+			}
+		}
+	}
 }

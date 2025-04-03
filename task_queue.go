@@ -60,11 +60,27 @@ func NewTaskQueue(logger zerolog.Logger, maxTasks int, cacheSize int) (*TaskQueu
 }
 
 // AddTask adds a new task to the front of the queue and signals workers.
-// Returns true if the task was added, false if it was already known or inflight.
+// Returns true if the task was added, false if it was already known (completed or inflight or cached).
 func (tq *TaskQueue) AddTask(ts *TaskSubmitted) bool {
 	tq.mu.Lock()
 
-	taskIdStr := ts.TaskId.String()
+	taskId := ts.TaskId
+	taskIdStr := taskId.String()
+
+	// 1. Check if already inflight
+	if _, inflight := tq.inflightTasks[taskIdStr]; inflight {
+		tq.mu.Unlock()
+		tq.logger.Warn().Str("task", taskIdStr).Msg("task already inflight, not adding to queue")
+		return false
+	}
+
+	// 2. Check if recently completed or known via TxHash cache
+	// Contains checks both TaskID (key) and potentially TxHash (if cached before adding)
+	if tq.taskHashCache.Contains(taskId) {
+		tq.mu.Unlock()
+		tq.logger.Warn().Str("task", taskIdStr).Str("txHash", ts.TxHash.Hex()).Msg("task already known in cache, not adding to queue")
+		return false
+	}
 
 	// Add task to the front
 	tq.deque.PushFront(ts)
@@ -154,6 +170,12 @@ func (tq *TaskQueue) GetCachedTxHash(taskId task.TaskId) (common.Hash, bool) {
 		return common.Hash{}, false
 	}
 	return hash, true
+}
+
+// CacheTxHash explicitly adds a task ID and tx hash to the cache.
+// This is an alias for AddToCache, potentially used by specific strategies.
+func (tq *TaskQueue) CacheTxHash(taskId task.TaskId, txHash common.Hash) {
+	tq.AddToCache(taskId, txHash)
 }
 
 // AddToCache explicitly adds a task ID and tx hash to the cache.

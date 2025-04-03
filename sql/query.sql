@@ -37,6 +37,13 @@ INSERT INTO tasks(
   ?,?, ?
 );
 
+-- name: AddTaskWithStatus :exec
+INSERT INTO tasks(
+  taskid, txhash, cumulativeGas, status
+) VALUES (
+  ?,?, ?, ? 
+);
+
 -- name: AddTasks :exec
 INSERT INTO tasks(
   taskid, txhash, cumulativeGas

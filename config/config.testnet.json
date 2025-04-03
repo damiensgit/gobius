@@ -17,7 +17,7 @@
         "cid": "0x12204b352d8f12ef72450a3475d245134f2c798f25674b592c7401c369bf122d3cdf"
       }
     },
-    "qwen": {
+    "qwen-qwq-32b": {
       "id": "0xdafc13d7e9529e278bf40038524f20841ba8879c0b5d7667d438cd60c64a118d",
       "mineable": true,
       "contracts": {},
