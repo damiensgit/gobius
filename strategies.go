@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"gobius/bindings/engine"
 	task "gobius/common"
@@ -63,7 +64,9 @@ func (bs *baseStrategy) HandleTaskSubmitted(event *engine.EngineTaskSubmitted) {
 	// bs.logger.Debug().Str("task", task.TaskId(event.Id).String()).Msg("received TaskSubmitted event but strategy does not handle it")
 }
 
-func newBaseStrategy(appCtx context.Context, services *Services, miner *Miner, gpuPool *GPUPool, strategyName string, needsTaskEvents bool) (baseStrategy, error) {
+// newBaseStrategy initializes the common components for any mining strategy.
+// enableQueueEviction controls if the task queue drops old tasks when full.
+func newBaseStrategy(appCtx context.Context, services *Services, miner *Miner, gpuPool *GPUPool, strategyName string, needsTaskEvents bool, enableQueueEviction bool) (baseStrategy, error) {
 	ctx, cancel := context.WithCancel(appCtx) // Create a derived context for the strategy
 	numWorkers := gpuPool.NumGPUs() * services.Config.NumWorkersPerGPU
 
@@ -73,21 +76,29 @@ func newBaseStrategy(appCtx context.Context, services *Services, miner *Miner, g
 	}
 
 	// Initialize LRU cache for transaction parameters
-	paramCacheSize := defaultTaskCacheSize // Use the constant defined in task_queue.go
+	paramCacheSize := defaultTaskCacheSize
 	paramCache, err := lru.New(paramCacheSize)
 	if err != nil {
-		// Log fatal because cache is essential for performance
-		// services.Logger.Fatal().Err(err).Msg("failed to initialize transaction parameter LRU cache")
-		return baseStrategy{}, fmt.Errorf("failed to initialize transaction parameter LRU cache: %w", err) // Return error
+		return baseStrategy{}, fmt.Errorf("failed to initialize transaction parameter LRU cache: %w", err)
 	}
 
 	// Initialize TaskQueue internally
-	taskQueue, err := NewTaskQueue(services.Logger, defaultMaxTasks, defaultTaskCacheSize) // Use constants from task_queue.go
-	if err != nil {
-		// services.Logger.Fatal().Err(err).Msg("failed to initialize task queue")
-		return baseStrategy{}, fmt.Errorf("failed to initialize task queue: %w", err) // Return error
+	// Use a queue size based on worker capacity for strategies that don't evict.
+	// Strategies that evict can use a larger, fixed size.
+	queueSize := defaultMaxTasks // Default for evicting strategies
+	if !enableQueueEviction {    // Use the passed parameter
+		queueSize = numWorkers * 2 // Smaller queue for non-evicting
+		if queueSize < 1 {         // Ensure queue size is at least 1, even with 0 GPUs/workers
+			queueSize = 1
+		}
 	}
-	services.Logger.Info().Msg("task queue initialized within strategy base")
+
+	// Pass the context and enableQueueEviction parameter directly to NewTaskQueue
+	taskQueue, err := NewTaskQueue(appCtx, services.Logger, queueSize, defaultTaskCacheSize, enableQueueEviction)
+	if err != nil {
+		return baseStrategy{}, fmt.Errorf("failed to initialize task queue: %w", err)
+	}
+	services.Logger.Info().Str("strategy", strategyName).Int("queue_size", queueSize).Bool("eviction_enabled", enableQueueEviction).Msg("task queue configured for strategy")
 
 	return baseStrategy{
 		ctx:               ctx,
@@ -95,14 +106,14 @@ func newBaseStrategy(appCtx context.Context, services *Services, miner *Miner, g
 		services:          services,
 		miner:             miner,
 		gpuPool:           gpuPool,
-		taskQueue:         taskQueue, // Assign the newly created queue
+		taskQueue:         taskQueue,
 		logger:            services.Logger.With().Str("strategy", strategyName).Logger(),
 		numWorkers:        numWorkers,
 		strategyName:      strategyName,
-		txParamCache:      paramCache, // Use LRU cache
+		txParamCache:      paramCache,
 		needsTaskEvents:   needsTaskEvents,
-		sinkTaskSubmitted: sink, // May be nil if needsTaskEvents is false
-	}, nil // Return nil error on success
+		sinkTaskSubmitted: sink,
+	}, nil
 }
 
 func (bs *baseStrategy) gpuWorker(workerId int, gpu *task.GPU, taskHandler taskHandlerFunc) {
@@ -299,6 +310,11 @@ func (bs *baseStrategy) Stop() {
 		}
 		bs.wg.Wait()
 		bs.logger.Info().Msgf("all %s strategy workers stopped", bs.strategyName)
+
+		// Explicitly stop the task queue after workers are done
+		if bs.taskQueue != nil {
+			bs.taskQueue.Stop()
+		}
 	})
 }
 
@@ -312,12 +328,13 @@ type BulkMineStrategy struct {
 }
 
 func NewBulkMineStrategy(appContext context.Context, services *Services, miner *Miner, gpuPool *GPUPool) (*BulkMineStrategy, error) {
-	base, err := newBaseStrategy(appContext, services, miner, gpuPool, "bulkmine", false) // false = does not need task events
+	// BulkMine processes tasks from DB, MUST NOT EVICT.
+	base, err := newBaseStrategy(appContext, services, miner, gpuPool, "bulkmine", false, false) // false = does not need task events, false = disable eviction
 	if err != nil {
-		return nil, err // Propagate error
+		return nil, err
 	}
 	return &BulkMineStrategy{
-		baseStrategy: &base, // Store pointer to base
+		baseStrategy: &base,
 	}, nil
 }
 
@@ -433,7 +450,7 @@ func (s *BulkMineStrategy) pullTasksFromStorage() {
 			if !added {
 				s.logger.Warn().Str("task", taskId.String()).Msg("popped task from storage was already known/inflight")
 			}
-			// Optional small delay to prevent overwhelming the queue
+			// Small delay to prevent overwhelming the queue
 			time.Sleep(10 * time.Millisecond)
 		}
 	}
@@ -455,31 +472,38 @@ type AutoMineStrategy struct {
 }
 
 func NewAutoMineStrategy(appContext context.Context, services *Services, miner *Miner, gpuPool *GPUPool) (*AutoMineStrategy, error) {
-	// Initialize the embedded BulkMineStrategy part, but name it "automine"
-	bulkStrategy, err := NewBulkMineStrategy(appContext, services, miner, gpuPool)
-	if err != nil {
-		return nil, err // Propagate error
+	if !services.Config.BatchTasks.Enabled {
+		return nil, errors.New("automine strategy requires batch tasks to be enabled (batchtasks.enabled=true)")
 	}
-	bulkStrategy.strategyName = "automine"
+	if services.Config.Miner.BatchMode != 1 {
+		return nil, errors.New("automine strategy requires solver batch mode to be 1 (solver.batch_mode=1)")
+	}
+
+	// AutoMine relies on BulkMine logic (processing from DB), MUST NOT EVICT.
+	// Note: We pass the correct strategy name "automine" here.
+	base, err := newBaseStrategy(appContext, services, miner, gpuPool, "automine", false, false) // false = no task events needed, false = disable eviction
+	if err != nil {
+		return nil, err
+	}
+
+	// We need to create the *embedded* BulkMineStrategy using the base we just configured
+	bulkStrategy := &BulkMineStrategy{baseStrategy: &base}
+
 	return &AutoMineStrategy{
-		BulkMineStrategy: bulkStrategy, // Store the pointer
+		BulkMineStrategy: bulkStrategy,
 	}, nil
 }
 
-// Name accesses the embedded strategy's method via the pointer.
 func (s *AutoMineStrategy) Name() string { return s.strategyName }
 
-// Start accesses the embedded strategy's method via the pointer.
 func (s *AutoMineStrategy) Start() error {
 	return s.BulkMineStrategy.Start()
 }
 
-// Stop accesses the embedded strategy's method via the pointer.
 func (s *AutoMineStrategy) Stop() {
 	s.BulkMineStrategy.Stop()
 }
 
-// HandleTaskSubmitted accesses the embedded strategy's method via the pointer.
 func (s *AutoMineStrategy) HandleTaskSubmitted(event *engine.EngineTaskSubmitted) {
 	s.BulkMineStrategy.HandleTaskSubmitted(event)
 }
@@ -498,19 +522,18 @@ type SolutionSamplerStrategy struct {
 }
 
 func NewSolutionSamplerStrategy(appCtx context.Context, services *Services, miner *Miner, gpuPool *GPUPool) (*SolutionSamplerStrategy, error) {
-	numWorkers := gpuPool.NumGPUs() * services.Config.NumWorkersPerGPU
-
 	sinkSolutionSubmitted := make(chan *engine.EngineSolutionSubmitted, 1024)
 
-	base, err := newBaseStrategy(appCtx, services, miner, gpuPool, "solutionsampler", true) // true = needs task events
+	// SolutionSampler uses TaskSubmitted events for caching, might receive many, CAN EVICT.
+	base, err := newBaseStrategy(appCtx, services, miner, gpuPool, "solutionsampler", true, true) // true = needs task events, true = enable eviction
 	if err != nil {
-		return nil, err // Propagate error
+		return nil, err
 	}
 
+	numWorkers := gpuPool.NumGPUs() * services.Config.NumWorkersPerGPU // Get numWorkers again for sample size
 	return &SolutionSamplerStrategy{
-		// Needs task events to populate the TaskID -> TxHash cache
-		baseStrategy:          &base,      // Store pointer to base
-		maxTaskSampleSize:     numWorkers, // Sample size based on worker capacity
+		baseStrategy:          &base,
+		maxTaskSampleSize:     numWorkers,
 		tasksSamples:          make([]*TaskSubmitted, 0, numWorkers),
 		sinkSolutionSubmitted: sinkSolutionSubmitted,
 		solutionEventSub:      nil,
@@ -794,13 +817,14 @@ type ListenStrategy struct {
 }
 
 func NewListenStrategy(appContext context.Context, services *Services, miner *Miner, gpuPool *GPUPool) (*ListenStrategy, error) {
-	base, err := newBaseStrategy(appContext, services, miner, gpuPool, "listen", true) // true = needs task events
+	// Listen processes tasks from events, might receive many, CAN EVICT.
+	base, err := newBaseStrategy(appContext, services, miner, gpuPool, "listen", true, true) // true = needs task events, true = enable eviction
 	if err != nil {
-		return nil, err // Propagate error
+		return nil, err
 	}
 
 	return &ListenStrategy{
-		baseStrategy: &base, // Store pointer to base
+		baseStrategy: &base,
 	}, nil
 }
 

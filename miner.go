@@ -10,6 +10,8 @@ import (
 	"flag"
 	"fmt"
 	enginewrapper "gobius/bindings/engine"
+	"runtime"
+	"runtime/pprof"
 
 	"gobius/client"
 	task "gobius/common"
@@ -888,13 +890,13 @@ exit_app:
 	}
 
 	// Wait for all workers to finish
-	appQuitWG.Wait()
+	//appQuitWG.Wait()
 
 	logger.Info().Msg("bye! 👋")
 
 	// for debugging purposes
 	// Create a timeout channel to detect if the wait takes too long
-	/* waitDone := make(chan struct{})
+	waitDone := make(chan struct{})
 	go func() {
 		appQuitWG.Wait()
 		close(waitDone)
@@ -918,5 +920,5 @@ exit_app:
 
 		// Continue with the wait
 		logger.Warn().Msg("continuing to wait for goroutines to finish")
-	} */
+	}
 }

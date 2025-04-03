@@ -237,7 +237,7 @@ func (tm *BatchTransactionManager) batchClaimPoller(appQuit context.Context, wg 
 	for {
 		select {
 		case <-appQuit.Done():
-			tm.services.Logger.Error().Msg("batch claimer shutting down")
+			tm.services.Logger.Info().Msg("batch claimer shutting down")
 			return
 		case <-ticker.C:
 
@@ -308,7 +308,7 @@ func (tm *BatchTransactionManager) processBatchBlockTrigger(appQuit context.Cont
 		select {
 
 		case <-appQuit.Done():
-			tm.services.Logger.Warn().Msg("delegated batch processor shutting down")
+			tm.services.Logger.Info().Msg("delegated batch processor shutting down")
 			return
 		case <-headers:
 
@@ -370,7 +370,7 @@ func (tm *BatchTransactionManager) processValidatorStakePoller(appQuit context.C
 		case <-ticker.C:
 			tm.ProcessValidatorsStakes()
 		case <-appQuit.Done():
-			tm.services.Logger.Warn().Msg("validator stake processor shutting down")
+			tm.services.Logger.Info().Msg("validator stake processor shutting down")
 			return
 		}
 	}
@@ -395,7 +395,7 @@ func (tm *BatchTransactionManager) processBatchPoller(appQuit context.Context, w
 			batchWG.Wait()
 			tm.services.Logger.Warn().Str("duration", time.Since(start).String()).Msg("batch processed")
 		case <-appQuit.Done():
-			tm.services.Logger.Warn().Msg("delegated batch processor shutting down")
+			tm.services.Logger.Info().Msg("delegated batch processor shutting down")
 			return
 		}
 	}
