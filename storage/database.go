@@ -363,7 +363,7 @@ func (ts *TaskStorageDB) PopTask() (task.TaskId, common.Hash, error) {
 
 func (ts *TaskStorageDB) GetClaims(batchSize int) (ClaimTaskSlice, float64, error) {
 	claimsFromDb, err := ts.queries.GetTasksByLowestCost(ts.ctx, db.GetTasksByLowestCostParams{
-		Claimtime: time.Now().Unix() * 2,
+		Claimtime: time.Now().Unix(),
 		Limit:     int64(batchSize),
 	})
 
