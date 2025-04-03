@@ -15,8 +15,10 @@ import (
 )
 
 var (
-	// as per the engine contract
-	RewardDenominator = big.NewInt(1e18).Mul(big.NewInt(2), big.NewInt(1e18))
+	// as per the engine contract V5_1, calculation is (reward * modelRate * gaugeMultiplier) / (2 * 1e18 * 1e18);
+	denom1e18         = big.NewInt(1e18)
+	denom2e36         = new(big.Int).Mul(denom1e18, denom1e18)     // 1e36
+	RewardDenominator = new(big.Int).Mul(big.NewInt(2), denom2e36) // 2 * 1e36
 )
 
 type EngineWrapper struct {
@@ -283,6 +285,10 @@ func (m *EngineWrapper) GetModelReward(modelId [32]byte) (*big.Int, error) {
 		return nil, err
 	}
 
+	//0.016461004670253767
+
+	m.logger.Debug().Str("model", common.Bytes2Hex(modelId[:])).Str("reward", reward.String()).Msg("model reward")
+
 	// get model rate from engine
 	modelRate, err := m.Engine.Models(nil, modelId)
 	if err != nil {
@@ -310,6 +316,8 @@ func (m *EngineWrapper) GetModelReward(modelId [32]byte) (*big.Int, error) {
 	// if model rate is 0 and gauge multiplier is 0, return 0
 	if modelRate.Rate.Cmp(big.NewInt(0)) > 0 && gaugeMultiplier.Cmp(big.NewInt(0)) > 0 {
 
+		m.logger.Debug().Str("model", common.Bytes2Hex(modelId[:])).Str("rate", modelRate.Rate.String()).Str("gauge", gaugeMultiplier.String()).Msg("model reward")
+
 		// Calculate total reward with gauge multiplier
 		totalReward := new(big.Int).Mul(reward, modelRate.Rate)
 		totalReward = totalReward.Mul(totalReward, gaugeMultiplier)
@@ -317,6 +325,7 @@ func (m *EngineWrapper) GetModelReward(modelId [32]byte) (*big.Int, error) {
 
 		return totalReward, nil
 	} else {
+		m.logger.Debug().Str("model", common.Bytes2Hex(modelId[:])).Msg("model reward is 0")
 		return big.NewInt(0), nil
 	}
 }
