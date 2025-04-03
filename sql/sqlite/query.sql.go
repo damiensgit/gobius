@@ -360,6 +360,7 @@ FROM tasks
 WHERE status = 0
 `
 
+
 type GetQueuedTasksRow struct {
 	Taskid task.TaskId
 	Txhash common.Hash
@@ -527,6 +528,17 @@ func (q *Queries) PopTask(ctx context.Context) (PopTaskRow, error) {
 	var i PopTaskRow
 	err := row.Scan(&i.Taskid, &i.Txhash)
 	return i, err
+}
+
+const recoverStaleTasks = `-- name: RecoverStaleTasks :exec
+UPDATE tasks
+SET status = 0
+WHERE status = 1
+`
+
+func (q *Queries) RecoverStaleTasks(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, recoverStaleTasks)
+	return err
 }
 
 const setTaskQueuedStatus = `-- name: SetTaskQueuedStatus :execrows

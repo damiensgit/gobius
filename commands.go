@@ -843,3 +843,18 @@ func RunAutoTaskSubmit(appCtx context.Context, services *Services, interval time
 		}
 	}
 }
+
+func recoverStaleTasks(ctx context.Context) error {
+	services, ok := ctx.Value(servicesKey{}).(*Services)
+	if !ok {
+		log.Fatal("Could not get services from context")
+	}
+
+	err := services.TaskStorage.RecoverStaleTasks()
+	if err != nil {
+		services.Logger.Error().Err(err).Msg("error recovering stale tasks")
+		return err
+	}
+
+	return nil
+}

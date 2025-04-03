@@ -551,6 +551,8 @@ func main() {
 			blockMonitor(appContext, rpcClient)
 		case "cleantaskdata":
 			cleanTaskData(appContext)
+		case "recoverstale":
+			recoverStaleTasks(appContext)
 		case "claimbatchinfo":
 			getBatchPricingInfo(appContext)
 		case "fundtaskwallets":

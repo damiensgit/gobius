@@ -166,3 +166,8 @@ INSERT INTO ipfs_cids (
 
 -- name: DeletedIPFSCid :execrows
 DELETE FROM ipfs_cids WHERE taskid = ?;
+
+-- name: RecoverStaleTasks :exec
+UPDATE tasks
+SET status = 0
+WHERE status = 1;

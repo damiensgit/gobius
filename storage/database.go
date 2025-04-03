@@ -453,3 +453,9 @@ func (ts *TaskStorageDB) DeleteIpfsCid(taskId task.TaskId) error {
 
 	return err
 }
+
+func (ts *TaskStorageDB) RecoverStaleTasks() error {
+	err := ts.queries.RecoverStaleTasks(ts.ctx)
+
+	return err
+}
