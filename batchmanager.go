@@ -509,6 +509,29 @@ func (tm *BatchTransactionManager) processBatch(
 		sendTasks := func(account *account.Account, wg *sync.WaitGroup) {
 			defer wg.Done()
 
+			// Calculate total fee required for the batch
+			feePerTask := tm.services.AutoMineParams.Fee
+			totalFee := new(big.Int).Mul(feePerTask, big.NewInt(int64(taskBatchSize)))
+
+			// Get the account's AIUS balance
+			aiusBalance, err := tm.services.Basetoken.BalanceOf(nil, account.Address)
+			if err != nil {
+				tm.services.Logger.Error().Err(err).Str("account", account.Address.String()).Msg("failed to get AIUS balance for task submission")
+				return
+			}
+
+			// Check if balance is sufficient
+			// TODO: make level this configurable e.g. some min balance level
+			if aiusBalance.Cmp(totalFee) < 0 {
+				tm.services.Logger.Warn().
+					Str("account", account.Address.String()).
+					Float64("balance", tm.services.Config.BaseConfig.BaseToken.ToFloat(aiusBalance)).
+					Float64("required", tm.services.Config.BaseConfig.BaseToken.ToFloat(totalFee)).
+					Int("batch_size", taskBatchSize).
+					Msg("** insufficient AIUS balance to send task batch, skipping **")
+				return
+			}
+
 			// TODO: compute if we have enough aius to send the batch based on model fee * batch size
 			tm.services.Logger.Warn().Int("batch_size", taskBatchSize).Str("account", account.Address.String()).Msgf("** task queue is low - sending batch **")
 			receipt, err := tm.BulkTasks(account, taskBatchSize)
