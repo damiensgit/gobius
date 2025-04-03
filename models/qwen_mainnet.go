@@ -82,7 +82,7 @@ func NewQwenMainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig, lo
 	}
 
 	http := &http.Client{
-		Timeout: time.Second * 30,
+		Timeout: time.Second * 90,
 	}
 
 	m := &QwenMainnetModel{
