@@ -459,3 +459,23 @@ func (ts *TaskStorageDB) RecoverStaleTasks() error {
 
 	return err
 }
+
+// get all commiments:
+func (ts *TaskStorageDB) GetAllCommitments() (TaskDataSlice, error) {
+	commitments, err := ts.queries.GetCommitments(ts.ctx)
+
+	if err != nil {
+		return nil, err
+	}
+
+	tasks := make(TaskDataSlice, len(commitments))
+
+	for i, c := range commitments {
+		tasks[i] = TaskData{
+			TaskId:     c.Taskid,
+			Commitment: c.Commitment,
+		}
+	}
+
+	return tasks, nil
+}

@@ -621,6 +621,136 @@ func verifySolutions(ctx context.Context) error {
 
 }
 
+func verifyCommitment(ctx context.Context) error {
+
+	// Get the services from the context
+	services, ok := ctx.Value(servicesKey{}).(*Services)
+	if !ok {
+		log.Fatal("Could not get services from context")
+	}
+
+	deleteCommitments := func(_commitmentsToDelete []task.TaskId) error {
+		const batchSize = 1000
+
+		if len(_commitmentsToDelete) > 0 {
+
+			for i := 0; i < len(_commitmentsToDelete); i += batchSize {
+				end := i + batchSize
+				if end > len(_commitmentsToDelete) {
+					end = len(_commitmentsToDelete)
+				}
+
+				batch := _commitmentsToDelete[i:end]
+
+				err := services.TaskStorage.DeleteProcessedCommitments(batch)
+				if err != nil {
+					services.Logger.Error().Err(err).Msg("error deleting commitment(s) from storage")
+					return err
+				}
+				services.Logger.Warn().Msgf("deleted %d commitments from storage", len(batch))
+			}
+		}
+		return nil
+	}
+
+	deleteSolutions := func(_solutionsToDelete []task.TaskId) error {
+		const batchSize = 1000
+
+		if len(_solutionsToDelete) > 0 {
+
+			for i := 0; i < len(_solutionsToDelete); i += batchSize {
+				end := i + batchSize
+				if end > len(_solutionsToDelete) {
+					end = len(_solutionsToDelete)
+				}
+
+				batch := _solutionsToDelete[i:end]
+
+				err := services.TaskStorage.DeleteProcessedSolutions(batch)
+				if err != nil {
+					services.Logger.Error().Err(err).Msg("error deleting solution(s) from storage")
+					return err
+				}
+				services.Logger.Warn().Msgf("deleted %d solutions from storage", len(batch))
+			}
+		}
+		return nil
+	}
+
+	tasks, err := services.TaskStorage.GetAllCommitments()
+	if err != nil {
+		services.Logger.Err(err).Msg("failed to get tasks from storage")
+	}
+
+	services.Logger.Info().Int("commitments", len(tasks)).Msg("verifying commitments")
+
+	var commitmentsToDelete []task.TaskId
+	var solutionsToDelete []task.TaskId
+	solvedByMap := map[common.Address]int{}
+
+	s := spinner.New(spinner.CharSets[11], 500*time.Millisecond)
+	s.Suffix = " processing tasks..."
+	s.FinalMSG = "completed!\n"
+	s.Start()
+	totalItemstoProcess := len(tasks)
+	for index, t := range tasks {
+		s.Suffix = fmt.Sprintf(" processing tasks [%d/%d]", index, totalItemstoProcess)
+
+		if t.Commitment != [32]byte{} {
+			// commitStr := task.TaskId(t.Commitment).String()
+			// // commitStr := task.
+
+			// tm.services.Logger.Info().Msgf("bulk submitting commitment: %s ", commitStr)
+
+			block, err := services.Engine.Engine.Commitments(nil, t.Commitment)
+			if err != nil {
+				services.Logger.Error().Err(err).Msg("error getting commitment")
+				continue
+			}
+
+			blockNo := block.Uint64()
+			if blockNo > 0 {
+				commitmentsToDelete = append(commitmentsToDelete, t.TaskId)
+				t.Commitment = [32]byte{}
+			}
+		}
+
+		res, err := services.Engine.Engine.Solutions(nil, t.TaskId)
+
+		if err != nil {
+			services.Logger.Err(err).Msg("error getting solution information")
+			return nil
+		}
+
+		if res.Blocktime > 0 {
+			solvedByMap[res.Validator] = solvedByMap[res.Validator] + 1
+			solutionsToDelete = append(solutionsToDelete, t.TaskId)
+			commitmentsToDelete = append(commitmentsToDelete, t.TaskId)
+			// Flag we need to delete both the commitment and the solution
+			t.Commitment = [32]byte{}
+			t.Solution = nil
+		}
+	}
+
+	s.Suffix = fmt.Sprintf(" deleting %d commitments", len(commitmentsToDelete))
+	if err := deleteCommitments(commitmentsToDelete); err != nil {
+		return nil
+	}
+
+	s.Suffix = fmt.Sprintf(" deleting %d solutions", len(solutionsToDelete))
+	if err := deleteSolutions(solutionsToDelete); err != nil {
+		return nil
+	}
+
+	s.Stop()
+
+	for owner, v := range solvedByMap {
+		services.Logger.Info().Int("tasks", v).Str("val", owner.String()).Msg("solved tasks per validator")
+	}
+	return nil
+
+}
+
 func blockMonitor(ctx context.Context, rpcClient *client.Client) error {
 	// Get the services from the context
 	services, ok := ctx.Value(servicesKey{}).(*Services)

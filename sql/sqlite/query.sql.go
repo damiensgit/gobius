@@ -252,11 +252,11 @@ func (q *Queries) GetCommitmentBatch(ctx context.Context, limit int64) ([]GetCom
 
 const getCommitments = `-- name: GetCommitments :many
 SELECT taskid, commitment, validator, added FROM commitments
-ORDER BY added ASC LIMIT ?
+ORDER BY added ASC
 `
 
-func (q *Queries) GetCommitments(ctx context.Context, limit int64) ([]Commitment, error) {
-	rows, err := q.db.QueryContext(ctx, getCommitments, limit)
+func (q *Queries) GetCommitments(ctx context.Context) ([]Commitment, error) {
+	rows, err := q.db.QueryContext(ctx, getCommitments)
 	if err != nil {
 		return nil, err
 	}
@@ -359,7 +359,6 @@ taskid, txhash
 FROM tasks 
 WHERE status = 0
 `
-
 
 type GetQueuedTasksRow struct {
 	Taskid task.TaskId

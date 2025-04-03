@@ -1,6 +1,6 @@
 -- name: GetCommitments :many
 SELECT * FROM commitments
-ORDER BY added ASC LIMIT ?;
+ORDER BY added ASC;
 
 -- name: CreateCommitment :exec
 INSERT INTO commitments (

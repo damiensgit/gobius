@@ -547,6 +547,8 @@ func main() {
 			taskCheck(&logger, appContext)
 		case "verifysolutions":
 			verifySolutions(appContext)
+		case "verifycommitments":
+			verifyCommitment(appContext)
 		case "blockmonitor":
 			blockMonitor(appContext, rpcClient)
 		case "cleantaskdata":
