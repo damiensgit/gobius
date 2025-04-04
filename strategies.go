@@ -82,6 +82,8 @@ func newBaseStrategy(appCtx context.Context, services *Services, miner *Miner, g
 		return baseStrategy{}, fmt.Errorf("failed to initialize transaction parameter LRU cache: %w", err)
 	}
 
+	logger := services.Logger.With().Str("strategy", strategyName).Logger()
+
 	// Initialize TaskQueue internally
 	// Use a queue size based on worker capacity for strategies that don't evict.
 	// Strategies that evict can use a larger, fixed size.
@@ -94,11 +96,11 @@ func newBaseStrategy(appCtx context.Context, services *Services, miner *Miner, g
 	}
 
 	// Pass the context and enableQueueEviction parameter directly to NewTaskQueue
-	taskQueue, err := NewTaskQueue(appCtx, services.Logger, queueSize, defaultTaskCacheSize, enableQueueEviction)
+	taskQueue, err := NewTaskQueue(appCtx, logger, queueSize, defaultTaskCacheSize, enableQueueEviction)
 	if err != nil {
 		return baseStrategy{}, fmt.Errorf("failed to initialize task queue: %w", err)
 	}
-	services.Logger.Info().Str("strategy", strategyName).Int("queue_size", queueSize).Bool("eviction_enabled", enableQueueEviction).Msg("task queue configured for strategy")
+	logger.Info().Str("strategy", strategyName).Int("queue_size", queueSize).Bool("eviction_enabled", enableQueueEviction).Msg("task queue configured for strategy")
 
 	return baseStrategy{
 		ctx:               ctx,
@@ -107,7 +109,7 @@ func newBaseStrategy(appCtx context.Context, services *Services, miner *Miner, g
 		miner:             miner,
 		gpuPool:           gpuPool,
 		taskQueue:         taskQueue,
-		logger:            services.Logger.With().Str("strategy", strategyName).Logger(),
+		logger:            logger,
 		numWorkers:        numWorkers,
 		strategyName:      strategyName,
 		txParamCache:      paramCache,
@@ -476,7 +478,9 @@ type AutoMineStrategy struct {
 
 func NewAutoMineStrategy(appContext context.Context, services *Services, miner *Miner, gpuPool *GPUPool) (*AutoMineStrategy, error) {
 	if !services.Config.BatchTasks.Enabled {
-		return nil, errors.New("automine strategy requires batch tasks to be enabled (batchtasks.enabled=true)")
+		// if the batch tasks are disabled, we can still use the automine strategy
+		// but we need to warn the user that batch tasks are disabled
+		services.Logger.Warn().Msg("note: batch tasks are disabled so no new tasks will be generated (enable with batchtasks.enabled=true)")
 	}
 	if services.Config.Miner.BatchMode != 1 {
 		return nil, errors.New("automine strategy requires solver batch mode to be 1 (solver.batch_mode=1)")
