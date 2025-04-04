@@ -488,3 +488,17 @@ func (ts *TaskStorageDB) RequeueTaskIfNoCommitmentOrSolution(taskId task.TaskId)
 
 	return rows > 0, err
 }
+
+func (ts *TaskStorageDB) DeleteTask(taskid task.TaskId) error {
+	_, err := ts.queries.DeletedTask(ts.ctx, taskid)
+	return err
+}
+
+func (ts *TaskStorageDB) UpsertTaskToClaimable(taskid task.TaskId, txhash common.Hash, claimtime int64) error {
+	params := db.UpsertTaskToClaimableParams{
+		Taskid:    taskid,
+		Txhash:    txhash,
+		Claimtime: claimtime,
+	}
+	return ts.queries.UpsertTaskToClaimable(ts.ctx, params)
+}

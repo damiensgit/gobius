@@ -117,6 +117,9 @@ UPDATE tasks SET status = ? WHERE taskid = ?;
 -- name: DeletedClaimedTask :execrows
 DELETE FROM tasks WHERE taskid = ? AND status = 3;
 
+-- name: DeletedTask :execrows
+DELETE FROM tasks WHERE taskid = ?;
+
 -- name: DeletedCommitment :execrows
 DELETE FROM commitments WHERE taskid = ?;
 
@@ -197,4 +200,12 @@ WHERE taskid = ? -- For the specific task that failed
 INSERT INTO tasks (taskid, txhash, status)
 VALUES (?, ?, ?) 
 ON CONFLICT(taskid) DO UPDATE SET
-    status = excluded.status
+    status = excluded.status;
+
+-- name: UpsertTaskToClaimable :exec
+INSERT INTO tasks (taskid, txhash, status, claimtime)
+VALUES (?, ?, 3, ?)
+ON CONFLICT(taskid) DO UPDATE SET
+    status = 3,
+    claimtime = excluded.claimtime,
+    txhash = excluded.txhash; -- Keep txhash updated too

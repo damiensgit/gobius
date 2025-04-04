@@ -228,6 +228,18 @@ func (q *Queries) DeletedSolution(ctx context.Context, taskid task.TaskId) (int6
 	return result.RowsAffected()
 }
 
+const deletedTask = `-- name: DeletedTask :execrows
+DELETE FROM tasks WHERE taskid = ?
+`
+
+func (q *Queries) DeletedTask(ctx context.Context, taskid task.TaskId) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deletedTask, taskid)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
 const getCommitmentBatch = `-- name: GetCommitmentBatch :many
 SELECT 
 commitments.taskid, commitments.commitment, commitments.validator
@@ -718,4 +730,24 @@ func (q *Queries) UpdateTaskStatusAndGas(ctx context.Context, arg UpdateTaskStat
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const upsertTaskToClaimable = `-- name: UpsertTaskToClaimable :exec
+INSERT INTO tasks (taskid, txhash, status, claimtime)
+VALUES (?, ?, 3, ?)
+ON CONFLICT(taskid) DO UPDATE SET
+    status = 3,
+    claimtime = excluded.claimtime,
+    txhash = excluded.txhash
+`
+
+type UpsertTaskToClaimableParams struct {
+	Taskid    task.TaskId
+	Txhash    common.Hash
+	Claimtime int64
+}
+
+func (q *Queries) UpsertTaskToClaimable(ctx context.Context, arg UpsertTaskToClaimableParams) error {
+	_, err := q.db.ExecContext(ctx, upsertTaskToClaimable, arg.Taskid, arg.Txhash, arg.Claimtime)
+	return err
 }

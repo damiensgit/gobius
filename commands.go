@@ -1138,19 +1138,64 @@ func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *cl
 					continue
 				}
 
-				if sol.Blocktime == 0 { // Task is unsolved
-					// delete any existing solutions for this task
-					err = services.TaskStorage.DeleteProcessedSolutions([]task.TaskId{taskId})
-					if err != nil {
-						log.Printf("WARN: Failed to delete solution for task %s: %v", taskId.String(), err)
+				// --- New Sync Logic ---
+				log.Printf("DEBUG: Processing task %s (Sender: %s)", taskId.String(), parsedLog.Sender.Hex())
+
+				hasCommitmentOnChain := commitment.Cmp(big.NewInt(0)) != 0
+				hasSolutionOnChain := sol.Blocktime != 0
+
+				log.Printf("DEBUG: Task %s - OnChain State: Commitment=%t, Solution=%t, Claimed=%t",
+					taskId.String(), hasCommitmentOnChain, hasSolutionOnChain, sol.Claimed)
+
+				if hasSolutionOnChain {
+					if sol.Claimed {
+						// Solution exists and is claimed on-chain
+						log.Printf("DEBUG: Task %s already claimed on-chain. Ensuring local cleanup.", taskId.String())
+						// Ensure task is removed locally if present (might exist in a pending state)
+						_ = services.TaskStorage.DeleteTask(taskId)
+						_ = services.TaskStorage.DeleteProcessedCommitments([]task.TaskId{taskId})
+						_ = services.TaskStorage.DeleteProcessedSolutions([]task.TaskId{taskId})
+						continue // Skip to next log entry
+					} else {
+						// Solution exists but is not claimed on-chain
+						log.Printf("DEBUG: Task %s has unclaimed solution on-chain. Upserting to claimable locally.", taskId.String())
+						// Ensure local commitment/solution records are removed
+						_ = services.TaskStorage.DeleteProcessedCommitments([]task.TaskId{taskId})
+						_ = services.TaskStorage.DeleteProcessedSolutions([]task.TaskId{taskId})
+						// Add/Update task to claimable state (status 3) with current timestamp
+						err = services.TaskStorage.UpsertTaskToClaimable(taskId, currentlog.TxHash, time.Now().Unix())
+						if err != nil {
+							log.Printf("WARN: Failed to upsert task %s to claimable: %v", taskId.String(), err)
+						}
+						continue
 					}
-					err = services.TaskStorage.AddOrUpdateTaskWithStatus(taskId, currentlog.TxHash, 0) // Add with status 0 (pending)
+				} else if hasCommitmentOnChain {
+					// Commitment exists, but no solution on-chain
+					log.Printf("DEBUG: Task %s has commitment but no solution on-chain. Adding/Updating to pending (status 0) locally.", taskId.String())
+					// Ensure local commitment/solution records are removed
+					_ = services.TaskStorage.DeleteProcessedCommitments([]task.TaskId{taskId})
+					_ = services.TaskStorage.DeleteProcessedSolutions([]task.TaskId{taskId})
+					// Add/Update task status to 0 (pending) - the regular flow will handle the commitment later
+					err = services.TaskStorage.AddOrUpdateTaskWithStatus(taskId, currentlog.TxHash, 0)
+					if err != nil {
+						log.Printf("WARN: Failed to add/update task %s with status 0: %v", taskId.String(), err)
+					}
+					continue
+				} else {
+					// No commitment and no solution on-chain (unsolved)
+					log.Printf("DEBUG: Task %s has no commitment or solution on-chain. Adding/Updating to pending (status 0) locally.", taskId.String())
+					// Ensure local commitment/solution records are removed just in case
+					_ = services.TaskStorage.DeleteProcessedCommitments([]task.TaskId{taskId})
+					_ = services.TaskStorage.DeleteProcessedSolutions([]task.TaskId{taskId})
+					// Add/Update task status to 0 (pending)
+					err = services.TaskStorage.AddOrUpdateTaskWithStatus(taskId, currentlog.TxHash, 0)
 					if err != nil {
 						log.Printf("WARN: Failed to add unsolved task %s to storage: %v", taskId.String(), err)
 					} else {
-						log.Printf("Added unsolved task to queue: %s (Tx: %s)", taskId.String(), currentlog.TxHash.Hex())
+						log.Printf("Added/Updated unsolved task to queue: %s (Tx: %s)", taskId.String(), currentlog.TxHash.Hex())
 						totalAdded++
 					}
+					continue
 				}
 			}
 

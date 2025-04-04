@@ -439,22 +439,7 @@ func (tm *BatchTransactionManager) processBatch(
 	isProfitable := true
 	usegwei := false
 	switch profitMode {
-	/*case "profitfeed":
-	// use the profit feed to decide if we should process a batch
-	basefeeBig, err := tm.services.OwnerAccount.Client.GetBaseFee()
-	if err != nil {
-		tm.services.Logger.Error().Err(err).Msg("could not get basefee!")
-	}
-	_, _, pl, _, pt, err := tm.services.ProfitFeed.PriceOracle(basefeeBig)
-	if err != nil {
-		tm.services.Logger.Error().Err(err).Msg("price oracle error")
-	} else if pt > 0 && pl > 0 {
-		minProfit = pt
-		profitLevel = pl
-		tm.services.Logger.Info().Float64("price_target", pt).Float64("profit_level", pl).Msg("onchain oracle values")
-	} else {
-		tm.services.Logger.Warn().Msg("profit feed is not set, cannot use profit feed mode")
-	}*/
+
 	case "fixed":
 		// just use a fixed min profit set above in defaults
 	case "gwei":
