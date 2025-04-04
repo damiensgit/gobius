@@ -532,6 +532,10 @@ func (tm *BatchTransactionManager) processBatch(
 				return
 			}
 
+			// log the amount of aius reqiured for this batch in a human readable format
+			feeTransferAsfloat := tm.services.Config.BaseConfig.BaseToken.ToFloat(totalFee)
+
+			tm.services.Logger.Warn().Str("fee_transfer", fmt.Sprintf("%.4g", feeTransferAsfloat)).Int("batch_size", taskBatchSize).Str("account", account.Address.String()).Msgf("** task queue is low - sending batch **")
 			// TODO: compute if we have enough aius to send the batch based on model fee * batch size
 			tm.services.Logger.Warn().Int("batch_size", taskBatchSize).Str("account", account.Address.String()).Msgf("** task queue is low - sending batch **")
 			receipt, err := tm.BulkTasks(account, taskBatchSize)
