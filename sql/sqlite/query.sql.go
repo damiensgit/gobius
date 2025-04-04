@@ -31,6 +31,24 @@ func (q *Queries) AddIPFSCid(ctx context.Context, arg AddIPFSCidParams) error {
 	return err
 }
 
+const addOrUpdateTaskWithStatus = `-- name: AddOrUpdateTaskWithStatus :exec
+INSERT INTO tasks (taskid, txhash, status)
+VALUES (?, ?, ?) 
+ON CONFLICT(taskid) DO UPDATE SET
+    status = excluded.status
+`
+
+type AddOrUpdateTaskWithStatusParams struct {
+	Taskid task.TaskId
+	Txhash common.Hash
+	Status int64
+}
+
+func (q *Queries) AddOrUpdateTaskWithStatus(ctx context.Context, arg AddOrUpdateTaskWithStatusParams) error {
+	_, err := q.db.ExecContext(ctx, addOrUpdateTaskWithStatus, arg.Taskid, arg.Txhash, arg.Status)
+	return err
+}
+
 const addTask = `-- name: AddTask :exec
 INSERT INTO tasks(
   taskid, txhash, cumulativeGas

@@ -1067,7 +1067,8 @@ func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *cl
 		query.FromBlock = big.NewInt(loopFromBlock)
 		query.ToBlock = big.NewInt(loopToBlock)
 
-		logs, err := rpcClient.FilterLogs(context.Background(), query)
+		// Use the appQuit context for the potentially long-running FilterLogs call
+		logs, err := rpcClient.FilterLogs(appQuit, query)
 
 		if err != nil {
 			// Check if error suggests block range is too large (heuristic check)
@@ -1111,6 +1112,26 @@ func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *cl
 					continue // Skip this task, does not match filter
 				}
 
+				taskId := task.TaskId(parsedLog.Id)
+
+				// check if task has commitment
+				commitment, err := services.Engine.Engine.Commitments(nil, parsedLog.Id)
+				if err != nil {
+					log.Printf("WARN: Failed to get commitment for task %s: %v", task.TaskId(parsedLog.Id).String(), err)
+					continue
+				}
+
+				if commitment.Cmp(big.NewInt(0)) != 0 {
+					log.Printf("WARN: Task %s has commitment", task.TaskId(parsedLog.Id).String()) // add to
+				} else {
+					// delete any existing commitments for this task
+					err = services.TaskStorage.DeleteProcessedCommitments([]task.TaskId{taskId})
+					if err != nil {
+						log.Printf("WARN: Failed to delete commitment for task %s: %v", taskId.String(), err)
+					}
+				}
+
+				// check if task has solution
 				sol, err := services.Engine.Engine.Solutions(nil, parsedLog.Id)
 				if err != nil {
 					log.Printf("WARN: Failed to get solution for task %s: %v", task.TaskId(parsedLog.Id).String(), err)
@@ -1118,8 +1139,12 @@ func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *cl
 				}
 
 				if sol.Blocktime == 0 { // Task is unsolved
-					taskId := task.TaskId(parsedLog.Id)
-					err = services.TaskStorage.AddTaskWithStatus(taskId, currentlog.TxHash, 0, 0) // Add with status 0 (pending)
+					// delete any existing solutions for this task
+					err = services.TaskStorage.DeleteProcessedSolutions([]task.TaskId{taskId})
+					if err != nil {
+						log.Printf("WARN: Failed to delete solution for task %s: %v", taskId.String(), err)
+					}
+					err = services.TaskStorage.AddOrUpdateTaskWithStatus(taskId, currentlog.TxHash, 0) // Add with status 0 (pending)
 					if err != nil {
 						log.Printf("WARN: Failed to add unsolved task %s to storage: %v", taskId.String(), err)
 					} else {

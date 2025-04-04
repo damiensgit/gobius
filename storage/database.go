@@ -159,8 +159,6 @@ func (ts *TaskStorageDB) GetPendingCommitments(batchSize int) (TaskDataSlice, er
 }
 
 func (ts *TaskStorageDB) DeleteProcessedCommitments(taskIds []task.TaskId) error {
-	start := time.Now()
-
 	tx, err := ts.sqlite.Begin()
 	if err != nil {
 		return err
@@ -176,14 +174,10 @@ func (ts *TaskStorageDB) DeleteProcessedCommitments(taskIds []task.TaskId) error
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	ts.logger.Println("DeleteProcessedCommitments time:", time.Since(start))
-
 	return nil
 }
 
 func (ts *TaskStorageDB) DeleteProcessedSolutions(taskIds []task.TaskId) error {
-	start := time.Now()
-
 	tx, err := ts.sqlite.Begin()
 	if err != nil {
 		return err
@@ -199,8 +193,6 @@ func (ts *TaskStorageDB) DeleteProcessedSolutions(taskIds []task.TaskId) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	ts.logger.Println("DeleteProcessedSolutions time:", time.Since(start))
-
 	return nil
 }
 
@@ -299,6 +291,16 @@ func (ts *TaskStorageDB) AddTaskWithStatus(taskId task.TaskId, txhash common.Has
 		Cumulativegas: gasPerTask,
 		Txhash:        txhash,
 		Status:        status,
+	})
+
+	return err
+}
+
+func (ts *TaskStorageDB) AddOrUpdateTaskWithStatus(taskId task.TaskId, txhash common.Hash, status int64) error {
+	err := ts.queries.AddOrUpdateTaskWithStatus(ts.ctx, db.AddOrUpdateTaskWithStatusParams{
+		Taskid: taskId,
+		Txhash: txhash,
+		Status: status,
 	})
 
 	return err

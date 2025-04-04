@@ -192,3 +192,9 @@ WHERE taskid = ? -- For the specific task that failed
       FROM solutions s
       WHERE s.taskid = tasks.taskid
   );
+
+-- name: AddOrUpdateTaskWithStatus :exec
+INSERT INTO tasks (taskid, txhash, status)
+VALUES (?, ?, ?) 
+ON CONFLICT(taskid) DO UPDATE SET
+    status = excluded.status
