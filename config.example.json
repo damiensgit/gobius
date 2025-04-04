@@ -3,7 +3,6 @@
     "log_path": "log.txt",
     "log_level": 1,
     "cache_path": "cache",
-    "listen_to_task_submitted": false,
     "check_commitment": true,
     "evil_mode": false,
     "evil_mode_min": 2000,
@@ -74,9 +73,9 @@
     },
     "strategies": {
         "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
-        "strategy": "bulkmine",
+        "strategy": "automine",
         "automine": {
-            "owner": "0x0000000000000000000000000000000000000000",
+            "owner": "SET_YOUR_WALLET_ADDRESS",
             "version": 0,
             "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
             "fee": 7000000000000000,

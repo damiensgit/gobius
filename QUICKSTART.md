@@ -2,6 +2,8 @@
 
 **Important Note:** While Gobius runs on Windows, Linux, and macOS, this guide primarily assumes you are setting up the miner on a **Linux server**, preferably a recent Ubuntu release hosted by a cheap cloud provider (e.g., Vultr, Hetzner, etc.).
 
+**Disclaimer on Profit Calculation (Important):** As of the current version, the profit calculation logic within Gobius **does not yet factor in the task submission fee (`automine.fee`) or the task creation reward earned by the `automine.owner`**. Therefore, the profit values displayed by the miner (and used by the `solver.min_profit` setting) are **not fully representative of real-world profitability**. Users should **manually monitor their AIUS and ETH balances** and consider these external factors when assessing overall profitability. Do not rely solely on the miner's reported profit figures at this time.
+
 Running the miner on a server ensures it can operate 24/7. To keep Gobius running even after you disconnect your SSH session, you should run it inside a terminal multiplexer like `screen` or `tmux`. Here's a very basic guide:
 
 1.  **Connect to Your Server via SSH**:
@@ -134,7 +136,14 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
             -   **If Empty (Default)**: If the `batchtasks.private_keys` array is left **empty** (`[]`), Gobius will **default** to using the **Main Operational Account** for all of the above operations.
         -   **Recommendation**: For most users, the default behavior is recommended.
 
-   **Recommendation**: For security and clarity, it's strongly advised to use **separate, dedicated wallets** for the Main Operational role and each Validator role, rather than reusing a single personal wallet for everything.
+   **Recommendation on Account Separation**: 
+
+   -   **Security Best Practice**: For optimal security, it's generally advised to use **separate, dedicated wallets** for the Main Operational role (`blockchain.private_key`) and each Validator role (`validator_config.private_keys`), distinct from personal wallets holding significant funds.
+   -   **Recommendation for New Miners (Simplicity)**: However, for **new users starting out**, managing multiple accounts and ensuring each has the correct balance (ETH for gas, AIUS for stake/fees) can be complex. A simpler initial approach is to use the **same wallet address** for:
+        1.  The Main Operational Account (`blockchain.private_key`)
+        2.  The Validator Account (`validator_config.private_keys` - in an array like `["YOUR_KEY"]`)
+        3.  The Task Owner (`strategies.automine.owner`)
+      Using the same address ensures that validator rewards, task owner rewards, stake top-ups, and task fees all flow through a single account, reducing the chance of the validator running out of AIUS needed for task fees (`automine.fee`). While less secure than full separation, this consolidation significantly simplifies initial setup and balance management. You can transition to separate accounts later as you become more familiar with the system.
 
    **Exporting Your Private Key (Security Warning!)**
 
@@ -277,6 +286,30 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
    -   **`stake_check_interval`**: Determines how frequently Gobius checks the validator's stake level and performs health checks (default is every 120 seconds).
 
    **Important Note on Solution Rate Limit**: The Arbius network currently enforces a rate limit on solution submissions: **each validator account can only successfully submit 1 solution per second**. This means that to submit a batch containing *N* solutions, that specific validator must have been inactive (not submitted any solutions) for at least *N* seconds prior to the batch submission. If you attempt to submit a batch too quickly after a previous submission, the transaction may fail due to this rate limit. This is a key consideration when configuring batch sizes and observing miner behavior.
+
+   **Understanding Solver Settings (`solver.*`)**:
+
+   The `solver` section in `config.json` controls the core logic for committing to tasks, solving them, and managing profitability checks.
+
+   ```json
+   "solver": {
+     "enabled": true,
+     // ... other solver settings ...
+     "min_profit": 0, // Minimum profit threshold (in AIUS) to perform work
+     "polling_time": "1m", // How often to check profitability and perform actions
+     // ... other solver settings ...
+   }
+   ```
+
+   -   **`min_profit`**: This value determines the minimum estimated profit (in AIUS) required for the miner to actively perform work (like submitting commitments or processing solution batches). The profit calculation is generally based on a standard batch size (e.g., 200 tasks).
+        -   If the calculated profit for an action is less than `min_profit`, the miner will pause those specific actions (committing/solving) until profitability improves. 
+        -   **Important**: This setting does **not** affect the claiming of already completed solutions; claiming is managed separately by the `claim` section settings.
+        -   To **force the miner to work** even if the current estimated profit is negative, set `min_profit` to a negative value (e.g., `-10`).
+        -   The default value is `0`, meaning the miner will only work if the estimated profit is zero or positive.
+
+   -   **`polling_time`**: This controls how frequently the miner checks profitability, looks for available tasks, and decides whether to perform batch operations (commitments, solutions). 
+        -   It accepts time duration strings like `"10s"` (10 seconds), `"1m"` (1 minute), `"5m"` (5 minutes), `"1h"` (1 hour), etc.
+        -   A shorter interval means the miner reacts faster to changing network conditions but performs checks more often. A longer interval reduces the frequency of checks.
 
 ## Deployed Contract Addresses
 
