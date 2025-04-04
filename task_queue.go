@@ -4,7 +4,8 @@ import (
 	"container/list"
 	task "gobius/common"
 	"sync"
-	"time"
+
+	"context"
 
 	"github.com/ethereum/go-ethereum/common"
 	lru "github.com/hashicorp/golang-lru"
@@ -24,19 +25,22 @@ type TaskSubmitted struct {
 	// Could add BlockNumber, Timestamp here if needed later
 }
 
-// TaskQueue manages an in-memory queue of tasks and associated caches.
+// TaskQueue manages tasks waiting for GPU processing.
 type TaskQueue struct {
-	mu            sync.Mutex
-	deque         *list.List           // Holds *TaskSubmitted, newest at front
-	inflightTasks map[string]time.Time // Tracks tasks currently being processed: TaskID -> StartTime
-	taskHashCache *lru.Cache           // Caches TaskID -> TxHash mapping (primarily for SolutionSampler)
-	newTaskSignal chan struct{}        // Signals workers that a new task is available
-	maxTasks      int                  // Max size of the deque
-	logger        zerolog.Logger
+	logger         zerolog.Logger
+	deque          *list.List               // Stores *TaskSubmitted
+	maxTasks       int                      // Max size of the deque
+	taskMap        map[string]*list.Element // TaskId.String() -> Element
+	taskHashCache  *lru.Cache               // Cache TaskId -> TxHash
+	mu             sync.Mutex
+	newTaskSignal  chan struct{} // Buffered channel (size 1) to signal workers AND block producer
+	closed         bool
+	enableEviction bool            // Flag to control eviction behavior
+	ctx            context.Context // Add context for shutdown signal in AddTask
 }
 
 // NewTaskQueue creates and initializes a new TaskQueue.
-func NewTaskQueue(logger zerolog.Logger, maxTasks int, cacheSize int) (*TaskQueue, error) {
+func NewTaskQueue(ctx context.Context, logger zerolog.Logger, maxTasks int, cacheSize int, enableEviction bool) (*TaskQueue, error) {
 	if maxTasks <= 0 {
 		maxTasks = defaultMaxTasks
 	}
@@ -49,90 +53,127 @@ func NewTaskQueue(logger zerolog.Logger, maxTasks int, cacheSize int) (*TaskQueu
 		return nil, err
 	}
 
-	return &TaskQueue{
-		deque:         list.New(),
-		inflightTasks: make(map[string]time.Time),
-		taskHashCache: taskCache,
-		newTaskSignal: make(chan struct{}, taskSignalBufferSize), // Buffered channel
-		maxTasks:      maxTasks,
-		logger:        logger.With().Str("component", "TaskQueue").Logger(),
-	}, nil
+	tq := &TaskQueue{
+		logger:         logger.With().Str("component", "TaskQueue").Logger(),
+		deque:          list.New(),
+		maxTasks:       maxTasks,
+		taskMap:        make(map[string]*list.Element),
+		taskHashCache:  taskCache,
+		newTaskSignal:  make(chan struct{}, 1), // Explicitly buffer size 1
+		closed:         false,
+		enableEviction: enableEviction,
+		ctx:            ctx, // Store context
+	}
+	return tq, nil
 }
 
-// AddTask adds a new task to the front of the queue and signals workers.
-// Returns true if the task was added, false if it was already known or inflight.
+// AddTask adds a task to the queue. Checks capacity if eviction is disabled.
+// Performs a BLOCKING send to signal workers, providing backpressure.
+// Returns true if the task was added and signaled, false otherwise.
 func (tq *TaskQueue) AddTask(ts *TaskSubmitted) bool {
 	tq.mu.Lock()
 
+	if tq.closed {
+		tq.mu.Unlock()
+		return false
+	}
+
 	taskIdStr := ts.TaskId.String()
 
-	// Add task to the front
-	tq.deque.PushFront(ts)
-
-	//Add to hash cache immediately if needed by samplers even before processing
-	tq.taskHashCache.Add(ts.TaskId, ts.TxHash)
-
-	// Evict oldest task if queue exceeds max size
-	if tq.deque.Len() > tq.maxTasks {
-		tq.deque.Remove(tq.deque.Back())
+	// Check duplicates
+	if _, exists := tq.taskMap[taskIdStr]; exists {
+		tq.logger.Warn().Str("task", taskIdStr).Msg("task already in queue")
+		tq.mu.Unlock()
+		return false
 	}
-	tq.mu.Unlock()
 
-	tq.logger.Debug().Str("task", taskIdStr).Int("queue_size", tq.deque.Len()).Msg("added task to queue")
+	// Check capacity ONLY if eviction is disabled
+	if !tq.enableEviction && tq.deque.Len() >= tq.maxTasks {
+		tq.logger.Debug().Int("deque_len", tq.deque.Len()).Int("max_tasks", tq.maxTasks).Msg("Queue full and eviction disabled, not adding task")
+		tq.mu.Unlock()
+		return false // Indicate queue is full
+	}
 
-	// Signal workers non-blockingly
+	// Evict oldest if enabled and queue is full
+	if tq.enableEviction && tq.deque.Len() >= tq.maxTasks {
+		tq.EvictOldest()
+	}
+
+	// Add the new task
+	element := tq.deque.PushFront(ts)
+	tq.taskMap[taskIdStr] = element
+	tq.CacheTxHash(ts.TaskId, ts.TxHash)
+	qLen := tq.deque.Len()
+
+	tq.mu.Unlock() // Unlock *before* blocking send
+
+	tq.logger.Debug().Str("task", taskIdStr).Int("queue_len", qLen).Msg("added task to deque, attempting blocking signal")
+
+	// Blocking send on size-1 channel. Waits if buffer is full (worker is busy).
+	// Also selects on context cancellation to allow shutdown while blocked.
 	select {
 	case tq.newTaskSignal <- struct{}{}:
-	default:
-		// Signal buffer is full, workers are likely busy or backed up.
-		// This is usually fine, a worker will pick up the task eventually.
+		tq.logger.Debug().Str("task", taskIdStr).Msg("signalled worker successfully")
+		return true // Signal sent, task effectively added
+	case <-tq.ctx.Done():
+		tq.logger.Info().Str("task", taskIdStr).Msg("add task interrupted by context cancellation")
+		// We added the task to the deque but couldn't signal.
+		// Need to potentially remove it to maintain consistency?
+		tq.mu.Lock()
+		if elem, ok := tq.taskMap[taskIdStr]; ok {
+			// Check it wasn't processed in the meantime
+			delete(tq.taskMap, taskIdStr)
+			tq.deque.Remove(elem)
+			//tq.logger.Warn().Str("task", taskIdStr).Msg("removed task from deque due to context cancellation during signal send")
+		}
+		tq.mu.Unlock()
+		return false // Indicate failure due to shutdown
 	}
-
-	return true
 }
 
-// GetTask retrieves the latest task from the queue for processing.
-// Marks the task as inflight. Returns nil if the queue is empty.
+// GetTask retrieves the next available task from the queue.
+// Returns nil if the queue is empty.
 func (tq *TaskQueue) GetTask() *TaskSubmitted {
 	tq.mu.Lock()
 	defer tq.mu.Unlock()
 
 	if tq.deque.Len() == 0 {
-		return nil // No tasks available
+		return nil
 	}
 
-	// Get the latest task from the front
-	element := tq.deque.Front()
+	element := tq.deque.Back()
+	tq.deque.Remove(element)
 	ts := element.Value.(*TaskSubmitted)
-	tq.deque.Remove(element) // Remove from deque
-
 	taskIdStr := ts.TaskId.String()
-	tq.inflightTasks[taskIdStr] = time.Now() // Mark as inflight
 
-	tq.logger.Debug().Str("task", taskIdStr).Int("remaining", tq.deque.Len()).Msg("dequeued task for processing")
+	delete(tq.taskMap, taskIdStr)
+
+	tq.logger.Debug().Str("task", taskIdStr).Int("queue_len", tq.deque.Len()).Msg("retrieved task from queue")
 
 	return ts
 }
 
-// TaskCompleted marks a task as no longer inflight.
-func (tq *TaskQueue) TaskCompleted(taskId task.TaskId) {
+// Stop signals the queue to stop accepting new tasks.
+func (tq *TaskQueue) Stop() {
 	tq.mu.Lock()
 	defer tq.mu.Unlock()
-	taskIdStr := taskId.String()
-	delete(tq.inflightTasks, taskIdStr)
-	// Keep the task in the hash cache for potential future checks (like solution sampling)
-	tq.logger.Debug().Str("task", taskIdStr).Msg("marked task as completed")
+
+	if tq.closed {
+		return
+	}
+	tq.closed = true
+	close(tq.newTaskSignal)
+	tq.logger.Info().Msg("task queue stopped")
+}
+
+// TaskCompleted marks a task as no longer inflight.
+func (tq *TaskQueue) TaskCompleted(taskId task.TaskId) {
+	tq.logger.Debug().Str("task", taskId.String()).Msg("marked task as completed")
 }
 
 // TaskFailed marks a task as no longer inflight but potentially requeueable.
-// Currently just removes from inflight, could add back to queue if needed.
 func (tq *TaskQueue) TaskFailed(taskId task.TaskId) {
-	tq.mu.Lock()
-	defer tq.mu.Unlock()
-	taskIdStr := taskId.String()
-	delete(tq.inflightTasks, taskIdStr)
-	// Optionally add back to the queue with logic to prevent infinite retries
-	tq.logger.Warn().Str("task", taskIdStr).Msg("marked task as failed")
+	tq.logger.Warn().Str("task", taskId.String()).Msg("marked task as failed")
 }
 
 // GetTaskSignal returns the channel workers listen on for new task notifications.
@@ -156,6 +197,12 @@ func (tq *TaskQueue) GetCachedTxHash(taskId task.TaskId) (common.Hash, bool) {
 	return hash, true
 }
 
+// CacheTxHash explicitly adds a task ID and tx hash to the cache.
+// This is an alias for AddToCache, potentially used by specific strategies.
+func (tq *TaskQueue) CacheTxHash(taskId task.TaskId, txHash common.Hash) {
+	tq.AddToCache(taskId, txHash)
+}
+
 // AddToCache explicitly adds a task ID and tx hash to the cache.
 // Used when a task isn't added via AddTask but needs caching (e.g., SolutionSampler).
 func (tq *TaskQueue) AddToCache(taskId task.TaskId, txHash common.Hash) {
@@ -170,9 +217,17 @@ func (tq *TaskQueue) Len() int {
 	return tq.deque.Len()
 }
 
-// InflightCount returns the number of tasks currently being processed.
-func (tq *TaskQueue) InflightCount() int {
-	tq.mu.Lock()
-	defer tq.mu.Unlock()
-	return len(tq.inflightTasks)
+// EvictOldest removes the oldest task from the queue.
+func (tq *TaskQueue) EvictOldest() {
+	// Called under lock
+	oldest := tq.deque.Back()
+	if oldest != nil {
+		ts := oldest.Value.(*TaskSubmitted)
+		tq.deque.Remove(oldest)
+		taskIdStr := ts.TaskId.String()
+		delete(tq.taskMap, taskIdStr)
+		tq.taskHashCache.Remove(ts.TaskId)
+		// No need to consume signal here
+		tq.logger.Debug().Str("task", taskIdStr).Msg("evicted oldest task")
+	}
 }

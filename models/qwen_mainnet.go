@@ -82,7 +82,7 @@ func NewQwenMainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig, lo
 	}
 
 	http := &http.Client{
-		Timeout: time.Second * 30,
+		Timeout: time.Second * 90,
 	}
 
 	m := &QwenMainnetModel{
@@ -256,6 +256,12 @@ func (m *QwenMainnetModel) GetFiles(gpu *common.GPU, taskid string, input any) (
 		return nil, err
 	}
 	defer postResp.Body.Close()
+
+	// TODO: cog returns 409 if already runnign a prediction, maybe handle this better
+	if postResp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(postResp.Body)
+		return nil, fmt.Errorf("server returned non-200 status: %d - %s", postResp.StatusCode, string(bodyBytes))
+	}
 
 	body, err := io.ReadAll(postResp.Body)
 	if err != nil {

@@ -237,7 +237,7 @@ func (tm *BatchTransactionManager) batchClaimPoller(appQuit context.Context, wg 
 	for {
 		select {
 		case <-appQuit.Done():
-			tm.services.Logger.Error().Msg("batch claimer shutting down")
+			tm.services.Logger.Info().Msg("batch claimer shutting down")
 			return
 		case <-ticker.C:
 
@@ -308,7 +308,7 @@ func (tm *BatchTransactionManager) processBatchBlockTrigger(appQuit context.Cont
 		select {
 
 		case <-appQuit.Done():
-			tm.services.Logger.Warn().Msg("delegated batch processor shutting down")
+			tm.services.Logger.Info().Msg("delegated batch processor shutting down")
 			return
 		case <-headers:
 
@@ -370,7 +370,7 @@ func (tm *BatchTransactionManager) processValidatorStakePoller(appQuit context.C
 		case <-ticker.C:
 			tm.ProcessValidatorsStakes()
 		case <-appQuit.Done():
-			tm.services.Logger.Warn().Msg("validator stake processor shutting down")
+			tm.services.Logger.Info().Msg("validator stake processor shutting down")
 			return
 		}
 	}
@@ -395,7 +395,7 @@ func (tm *BatchTransactionManager) processBatchPoller(appQuit context.Context, w
 			batchWG.Wait()
 			tm.services.Logger.Warn().Str("duration", time.Since(start).String()).Msg("batch processed")
 		case <-appQuit.Done():
-			tm.services.Logger.Warn().Msg("delegated batch processor shutting down")
+			tm.services.Logger.Info().Msg("delegated batch processor shutting down")
 			return
 		}
 	}
@@ -509,6 +509,33 @@ func (tm *BatchTransactionManager) processBatch(
 		sendTasks := func(account *account.Account, wg *sync.WaitGroup) {
 			defer wg.Done()
 
+			// Calculate total fee required for the batch
+			feePerTask := tm.services.AutoMineParams.Fee
+			totalFee := new(big.Int).Mul(feePerTask, big.NewInt(int64(taskBatchSize)))
+
+			// Get the account's AIUS balance
+			aiusBalance, err := tm.services.Basetoken.BalanceOf(nil, account.Address)
+			if err != nil {
+				tm.services.Logger.Error().Err(err).Str("account", account.Address.String()).Msg("failed to get AIUS balance for task submission")
+				return
+			}
+
+			// Check if balance is sufficient
+			// TODO: make level this configurable e.g. some min balance level
+			if aiusBalance.Cmp(totalFee) < 0 {
+				tm.services.Logger.Warn().
+					Str("account", account.Address.String()).
+					Float64("balance", tm.services.Config.BaseConfig.BaseToken.ToFloat(aiusBalance)).
+					Float64("required", tm.services.Config.BaseConfig.BaseToken.ToFloat(totalFee)).
+					Int("batch_size", taskBatchSize).
+					Msg("** insufficient AIUS balance to send task batch, skipping **")
+				return
+			}
+
+			// log the amount of aius reqiured for this batch in a human readable format
+			feeTransferAsfloat := tm.services.Config.BaseConfig.BaseToken.ToFloat(totalFee)
+
+			tm.services.Logger.Warn().Str("fee_transfer", fmt.Sprintf("%.4g", feeTransferAsfloat)).Int("batch_size", taskBatchSize).Str("account", account.Address.String()).Msgf("** task queue is low - sending batch **")
 			// TODO: compute if we have enough aius to send the batch based on model fee * batch size
 			tm.services.Logger.Warn().Int("batch_size", taskBatchSize).Str("account", account.Address.String()).Msgf("** task queue is low - sending batch **")
 			receipt, err := tm.BulkTasks(account, taskBatchSize)
@@ -1689,7 +1716,10 @@ func (tm *BatchTransactionManager) BatchSolutions() error {
 }
 
 func (tm *BatchTransactionManager) SubmitIpfsCid(validator common.Address, taskId task.TaskId, cid []byte) error {
-	return tm.services.TaskStorage.AddIpfsCid(taskId, cid)
+	if tm.services.Config.IPFS.IncentiveClaim {
+		return tm.services.TaskStorage.AddIpfsCid(taskId, cid)
+	}
+	return nil
 }
 
 func (tm *BatchTransactionManager) SignalCommitment(validator common.Address, taskId task.TaskId, commitment [32]byte) error {
@@ -1700,7 +1730,7 @@ func (tm *BatchTransactionManager) SignalCommitment(validator common.Address, ta
 		tm.commitments = append(tm.commitments, commitment)
 		tm.Unlock()
 	case 1:
-		tm.services.Logger.Debug().Str("taskid", taskId.String()).Msg("adding task commitment to batch")
+		tm.services.Logger.Debug().Str("taskid", taskId.String()).Msg("adding task commitment to storage")
 		err := tm.services.TaskStorage.AddCommitment(validator, taskId, commitment)
 		if err != nil {
 			tm.services.Logger.Error().Err(err).Msg("error adding commitment to storage")
@@ -1735,7 +1765,7 @@ func (tm *BatchTransactionManager) SubmitSolution(validator common.Address, task
 		}
 		return err
 	case 0:
-		return tm.singleSubmitSolution(taskId, cid)
+		return tm.singleSubmitSolution(validator, taskId, cid)
 	default:
 
 	}
@@ -1770,34 +1800,62 @@ func (m *BatchTransactionManager) singleSignalCommitment(taskId task.TaskId, com
 	m.services.Logger.Info().Str("taskid", taskIdStr).Uint64("nonce", tx.Nonce()).Str("txhash", tx.Hash().String()).Str("elapsed", elapsed.String()).Msg("signal commitment tx sent")
 
 	go func() {
-		receipt, _, _, _ := m.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+		receipt, success, _, err := m.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+		if err != nil {
+			m.services.Logger.Error().Err(err).Msg("error waiting for commitment confirmation")
+			return
+		}
+		if !success {
+			m.services.Logger.Error().Msg("commitment tx reverted")
+			return
+		}
 		if receipt != nil {
 			txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
-			m.services.Logger.Info().Uint64("gas", receipt.GasUsed).Uint64("gas_per_commit", receipt.GasUsed).Msg("**** single commitment gas used *****")
+			m.services.Logger.Info().Uint64("gas", receipt.GasUsed).Uint64("gas_per_commit", receipt.GasUsed).Msg("single commitment gas used")
 			m.cumulativeGasUsed.AddCommitment(txCost)
+		}
+
+		var signalledCommitments [][32]byte
+		for _, log := range receipt.Logs {
+
+			if len(log.Topics) > 0 && log.Topics[0] == m.signalCommitmentEvent {
+				parsed, err := m.services.Engine.Engine.ParseSignalCommitment(*log)
+				if err != nil {
+					m.services.Logger.Error().Err(err).Msg("could not parse signal commitment event")
+					continue
+				}
+				signalledCommitments = append(signalledCommitments, parsed.Commitment)
+			}
+		}
+
+		if len(signalledCommitments) != 1 {
+			m.services.Logger.Error().Msg("ASSERT: NO COMMITMENTS SIGNALLLED!")
 		}
 	}()
 
-	// wait a bit to hope commitment is mined
-	duration := 200 + rand.Intn(150)
+	// wait a bit to hope commitment is mined before submitting solution
+	duration := 2010 + rand.Intn(150)
 	time.Sleep(time.Duration(duration) * time.Millisecond)
 
 	return nil
 }
 
-func (m *BatchTransactionManager) singleSubmitSolution(taskId task.TaskId, cid []byte) error {
+func (m *BatchTransactionManager) singleSubmitSolution(validator common.Address, taskId task.TaskId, cid []byte) error {
+
+	val := m.validators.GetValidatorByAddress(validator)
+	if val == nil {
+		return errors.New("validator not found")
+	}
 
 	taskIdStr := taskId.String()
 	m.services.Logger.Info().Str("taskid", taskIdStr).Msg("sending single solution")
 
 	start := time.Now()
-	tx, err := m.services.SenderOwnerAccount.NonceManagerWrapper(8, 250, 1.5, false, func(opts *bind.TransactOpts) (interface{}, error) {
-		// nonce := 0
-		// if opts.Nonce != nil {
-		// 	nonce = int(opts.Nonce.Int64())
-		// }
-		// m.services.Logger.Info().Int("nonce", nonce).Str("taskId", taskId.String()).Msg("NonceManagerWrapper [sending solution]")
-
+	retries := m.services.Config.Miner.ErrorMaxRetries
+	backoff := m.services.Config.Miner.ErrorBackoffTime
+	backoffMultiplier := m.services.Config.Miner.ErrorBackofMultiplier
+	tx, err := val.Account.NonceManagerWrapper(retries, backoff, backoffMultiplier, false, func(opts *bind.TransactOpts) (interface{}, error) {
+		// avoid gas estimate
 		opts.GasLimit = 400_000
 
 		return m.services.Engine.Engine.SubmitSolution(opts, taskId, cid)
@@ -1991,10 +2049,10 @@ func (tm *BatchTransactionManager) BulkTasks(account *account.Account, count int
 
 					err := tm.services.TaskStorage.AddTasks(submittedTasks, tx.Hash(), costPerTask)
 					if err != nil {
-						tm.services.Logger.Error().Err(err).Msg("error adding tasks to claim in storage")
+						tm.services.Logger.Error().Err(err).Msg("error adding tasks in storage")
 						return receipt, err
 					}
-					tm.services.Logger.Info().Int("claims", len(submittedTasks)).Msgf("added tasks to storage")
+					tm.services.Logger.Info().Int("tasks", len(submittedTasks)).Msgf("added tasks to storage")
 				}
 			}
 		}

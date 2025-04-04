@@ -159,8 +159,6 @@ func (ts *TaskStorageDB) GetPendingCommitments(batchSize int) (TaskDataSlice, er
 }
 
 func (ts *TaskStorageDB) DeleteProcessedCommitments(taskIds []task.TaskId) error {
-	start := time.Now()
-
 	tx, err := ts.sqlite.Begin()
 	if err != nil {
 		return err
@@ -176,14 +174,10 @@ func (ts *TaskStorageDB) DeleteProcessedCommitments(taskIds []task.TaskId) error
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	ts.logger.Println("DeleteProcessedCommitments time:", time.Since(start))
-
 	return nil
 }
 
 func (ts *TaskStorageDB) DeleteProcessedSolutions(taskIds []task.TaskId) error {
-	start := time.Now()
-
 	tx, err := ts.sqlite.Begin()
 	if err != nil {
 		return err
@@ -199,13 +193,10 @@ func (ts *TaskStorageDB) DeleteProcessedSolutions(taskIds []task.TaskId) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	ts.logger.Println("DeleteProcessedSolutions time:", time.Since(start))
-
 	return nil
 }
 
 func (ts *TaskStorageDB) AddTasksToClaim(taskIds []task.TaskId, value float64) (time.Time, error) {
-	start := time.Now()
 
 	claimTime := time.Now().Add(ts.minclaimtime)
 
@@ -229,7 +220,6 @@ func (ts *TaskStorageDB) AddTasksToClaim(taskIds []task.TaskId, value float64) (
 	if err := tx.Commit(); err != nil {
 		return claimTime, err
 	}
-	ts.logger.Println("AddTasksToClaim time:", time.Since(start))
 
 	return claimTime, nil
 }
@@ -282,13 +272,41 @@ func (ts *TaskStorageDB) TotalSolutionsAndClaims() (int64, int64, error) {
 }
 
 // adds a task to the list
-func (ts *TaskStorageDB) AddTask(task string, txhash string) error {
-	return nil
+func (ts *TaskStorageDB) AddTask(taskId task.TaskId, txhash common.Hash, gasPerTask float64) error {
+
+	err := ts.queries.AddTask(ts.ctx, db.AddTaskParams{
+		Taskid:        taskId,
+		Cumulativegas: gasPerTask,
+		Txhash:        txhash,
+	})
+
+	return err
+}
+
+// adds a task to the list with explicit status
+func (ts *TaskStorageDB) AddTaskWithStatus(taskId task.TaskId, txhash common.Hash, gasPerTask float64, status int64) error {
+
+	err := ts.queries.AddTaskWithStatus(ts.ctx, db.AddTaskWithStatusParams{
+		Taskid:        taskId,
+		Cumulativegas: gasPerTask,
+		Txhash:        txhash,
+		Status:        status,
+	})
+
+	return err
+}
+
+func (ts *TaskStorageDB) AddOrUpdateTaskWithStatus(taskId task.TaskId, txhash common.Hash, status int64) error {
+	err := ts.queries.AddOrUpdateTaskWithStatus(ts.ctx, db.AddOrUpdateTaskWithStatusParams{
+		Taskid: taskId,
+		Txhash: txhash,
+		Status: status,
+	})
+
+	return err
 }
 
 func (ts *TaskStorageDB) AddTasks(tasks []task.TaskId, txhash common.Hash, gasPerTask float64) error {
-
-	start := time.Now()
 
 	// start a transaction
 	tx, err := ts.sqlite.Begin()
@@ -302,7 +320,7 @@ func (ts *TaskStorageDB) AddTasks(tasks []task.TaskId, txhash common.Hash, gasPe
 	for _, taskId := range tasks {
 		qtx.AddTask(ts.ctx, db.AddTaskParams{
 			Taskid:        taskId,
-			Cumulativegas: 0.0000000001,
+			Cumulativegas: gasPerTask,
 			Txhash:        txhash,
 		})
 	}
@@ -310,7 +328,6 @@ func (ts *TaskStorageDB) AddTasks(tasks []task.TaskId, txhash common.Hash, gasPe
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	ts.logger.Println("AddTasks time:", time.Since(start))
 
 	return nil
 }
@@ -348,7 +365,7 @@ func (ts *TaskStorageDB) PopTask() (task.TaskId, common.Hash, error) {
 
 func (ts *TaskStorageDB) GetClaims(batchSize int) (ClaimTaskSlice, float64, error) {
 	claimsFromDb, err := ts.queries.GetTasksByLowestCost(ts.ctx, db.GetTasksByLowestCostParams{
-		Claimtime: time.Now().Unix() * 2,
+		Claimtime: time.Now().Unix(),
 		Limit:     int64(batchSize),
 	})
 
@@ -377,8 +394,6 @@ func (ts *TaskStorageDB) GetClaims(batchSize int) (ClaimTaskSlice, float64, erro
 }
 
 func (ts *TaskStorageDB) UpdateTaskStatusAndCost(tasks []task.TaskId, status int64, value float64) error {
-	start := time.Now()
-
 	// start a transaction
 	tx, err := ts.sqlite.Begin()
 	if err != nil {
@@ -402,7 +417,6 @@ func (ts *TaskStorageDB) UpdateTaskStatusAndCost(tasks []task.TaskId, status int
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	ts.logger.Println("UpdateTaskStatusAndCost time:", time.Since(start))
 
 	return nil
 }
@@ -440,4 +454,37 @@ func (ts *TaskStorageDB) DeleteIpfsCid(taskId task.TaskId) error {
 	_, err := ts.queries.DeletedIPFSCid(ts.ctx, taskId)
 
 	return err
+}
+
+func (ts *TaskStorageDB) RecoverStaleTasks() error {
+	err := ts.queries.RecoverStaleTasks(ts.ctx)
+
+	return err
+}
+
+// get all commiments:
+func (ts *TaskStorageDB) GetAllCommitments() (TaskDataSlice, error) {
+	commitments, err := ts.queries.GetCommitments(ts.ctx)
+
+	if err != nil {
+		return nil, err
+	}
+
+	tasks := make(TaskDataSlice, len(commitments))
+
+	for i, c := range commitments {
+		tasks[i] = TaskData{
+			TaskId:     c.Taskid,
+			Commitment: c.Commitment,
+		}
+	}
+
+	return tasks, nil
+}
+
+// RequeueTaskIfNoCommitmentOrSolution re-enqueues a task if it has no commitment or solution
+func (ts *TaskStorageDB) RequeueTaskIfNoCommitmentOrSolution(taskId task.TaskId) (requeued bool, err error) {
+	rows, err := ts.queries.RequeueTaskIfNoCommitmentOrSolution(ts.ctx, taskId)
+
+	return rows > 0, err
 }

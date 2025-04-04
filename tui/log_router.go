@@ -11,84 +11,116 @@ import (
 
 // basic log output router to direct logging to either console or tui if avail
 type logrouter struct {
-	view           *CustomTextView
-	Headless       atomic.Bool
-	writer         io.Writer
+	viewPtr        atomic.Pointer[CustomTextView] // Use atomic pointer
+	writerPtr      atomic.Pointer[io.Writer]      // Use atomic pointer
 	logCh          chan []byte
 	originalStdout io.Writer
 	originalStderr io.Writer
 }
 
 func NewLogRouter() (*logrouter, func()) {
-	// Save original values
 	originalStdout := os.Stdout
 	originalStderr := os.Stderr
 
 	router := &logrouter{
-		view:           nil,
-		Headless:       atomic.Bool{},
+		// viewPtr and writerPtr start as nil implicitly
 		originalStdout: originalStdout,
 		originalStderr: originalStderr,
 		logCh:          make(chan []byte, 16*4096),
 	}
-	router.Start()
+	router.Start() // Start the log channel processor early
 
-	// Create a single pipe
+	// Create pipe and replace stdout/stderr
 	r, w, _ := os.Pipe()
-
-	// Replace both stdout and stderr with the same pipe writer
 	os.Stdout = w
 	os.Stderr = w
 
-	// Create exit channel
+	// Start Pipe Reader Goroutine
 	exit := make(chan bool)
-
-	// Start a single goroutine to handle both outputs
 	go func() {
-		io.Copy(router, r)
-		exit <- true
+		defer close(exit)
+		buffer := make([]byte, 4096) // Read buffer
+		for {
+			n, err := r.Read(buffer)
+			if err != nil {
+				if err != io.EOF {
+					fmt.Fprintf(originalStderr, "LogRouter pipe read error: %v\n", err)
+				}
+				break // Exit loop on EOF or error
+			}
+			if n > 0 {
+				dataToWrite := buffer[:n]
+				// Check view and headless state atomically
+				view := router.viewPtr.Load()
+
+				// If view is nil (never set or stopped) or headless, write directly
+				if view == nil {
+					_, _ = router.originalStderr.Write(dataToWrite)
+				} else {
+					// Otherwise, route via the Write method for TUI channel queuing
+					_, _ = router.Write(dataToWrite)
+				}
+			}
+		}
 	}()
 
-	// Return router and cleanup function
-	return router, func() {
-		w.Close()
-		<-exit
+	// Cleanup function
+	cleanup := func() {
+		w.Close() // Close pipe writer, signals EOF to reader goroutine
+		<-exit    // Wait for reader goroutine to finish processing pipe
+		close(router.logCh)
+		// Restore original stdout/stderr
 		os.Stdout = originalStdout
 		os.Stderr = originalStderr
 	}
+
+	return router, cleanup
 }
 
+// SetView is called once when the TUI is ready
 func (tw *logrouter) SetView(view *CustomTextView) {
-	tw.view = view
-	tw.writer = tview.ANSIWriter(view)
+	ansiWriter := tview.ANSIWriter(view)
+	tw.viewPtr.Store(view)
+	tw.writerPtr.Store(&ansiWriter) // Store address of the writer
 }
 
+// StopTUI reverts logging back to the original console stderr
+func (tw *logrouter) Stop() {
+	tw.viewPtr.Store(nil)
+	tw.writerPtr.Store(nil)
+}
+
+// Write is now only called when routing to TUI (view != nil and not headless)
 func (tw *logrouter) Write(p []byte) (n int, err error) {
-	isHeadless := tw.Headless.Load()
-	if tw.view == nil || isHeadless {
+	logCopy := make([]byte, len(p))
+	copy(logCopy, p)
+	select {
+	case tw.logCh <- logCopy:
+		return len(p), nil
+	default:
+		warning := fmt.Sprintf("[WARN] LogRouter channel full, TUI message dropped: %s\n", string(p))
+		tw.originalStderr.Write([]byte(warning))
 		return tw.originalStderr.Write(p)
-	} else {
-		// Queue log message in channel
-		logCopy := make([]byte, len(p))
-		copy(logCopy, p)
-		select {
-		case tw.logCh <- logCopy:
-			return len(p), nil
-		default:
-			// Channel full, fallback to stderr
-			return tw.originalStderr.Write(p)
-		}
 	}
 }
 
+// Start runs the goroutine that processes the log channel for the TUI view
 func (tw *logrouter) Start() {
 	go func() {
 		for msg := range tw.logCh {
-			// Re-check state before writing to view
-			if tw.view != nil && !tw.Headless.Load() {
-				fmt.Fprintf(tw.writer, "%s", msg)
+			// Load view and writer atomically
+			view := tw.viewPtr.Load()
+			writerAddr := tw.writerPtr.Load()
+
+			// If view is set (StopTUI not called) and not initially headless
+			if view != nil && writerAddr != nil {
+				// Dereference the writer pointer
+				writer := *writerAddr
+				fmt.Fprintf(writer, "%s", msg)
+				// Still need QueueUpdateDraw here if relying on this path
+				// (Let's omit it for now as per user preference, but be aware)
 			} else {
-				// State changed while message was in queue
+				// Fallback if view is nil (stopped)
 				tw.originalStderr.Write(msg)
 			}
 		}

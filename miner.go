@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"embed"
@@ -8,7 +9,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"gobius/arbius/engine"
+	enginewrapper "gobius/bindings/engine"
+	cmn "gobius/common"
+	"runtime"
+	"runtime/pprof"
+
 	"gobius/client"
 	task "gobius/common"
 	"gobius/config"
@@ -27,10 +32,9 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	"github.com/ethereum/go-ethereum/event"
 	"github.com/pressly/goose/v3"
 	"github.com/rs/zerolog"
 	"gopkg.in/natefinch/lumberjack.v2"
@@ -64,8 +68,11 @@ var minerEngineVersion = big.NewInt(5)
 
 // Types section
 type Miner struct {
-	services  *Services
-	validator IValidator
+	services         *Services
+	validator        IValidator
+	engineAbi        *abi.ABI
+	submitMethod     *abi.Method
+	bulkSubmitMethod *abi.Method
 }
 
 // zerologAdapter adapts a zerolog.Logger to satisfy goose.Logger interface
@@ -129,44 +136,161 @@ func setupCloseHandler(logger *zerolog.Logger) (ctx context.Context, cancel cont
 
 // connects miner account to the engine contract
 func NewMinerEngine(services *Services, validator IValidator, wg *sync.WaitGroup) (*Miner, error) {
+	// Get the parsed ABI once at startup
+	parsed, err := enginewrapper.EngineMetaData.GetAbi()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get engine ABI: %w", err)
+	}
+
+	// Get the submitTask method once at startup
+	submitMethod, exists := parsed.Methods["submitTask"]
+	if !exists {
+		return nil, fmt.Errorf("submitTask method not found in ABI")
+	}
+
+	// Get the bulkSubmitTask method once at startup
+	bulkSubmitMethod, exists := parsed.Methods["bulkSubmitTask"]
+	if !exists {
+		return nil, fmt.Errorf("bulkSubmitTask method not found in ABI")
+	}
 
 	miner := &Miner{
-		services:  services,
-		validator: validator,
+		services:         services,
+		validator:        validator,
+		engineAbi:        parsed,
+		submitMethod:     &submitMethod,
+		bulkSubmitMethod: &bulkSubmitMethod,
 	}
 
 	return miner, nil
 }
 
-func (m *Miner) SolveTask(ctx context.Context, taskId task.TaskId, tx *types.Transaction, gpu *task.GPU, validateOnly bool) ([]byte, error) {
+// DecodeTaskTransaction decodes either a submitTask or bulkSubmitTask transaction
+// and returns the relevant parameters.
+func (m *Miner) DecodeTaskTransaction(tx *types.Transaction) (*SubmitTaskParams, error) {
+	// First verify this is a transaction to the Engine contract
+	if tx.To() == nil || *tx.To() != m.services.Config.BaseConfig.EngineAddress {
+		return nil, fmt.Errorf("transaction not sent to Engine contract")
+	}
+
+	// Get the method signature (first 4 bytes)
+	methodSig := tx.Data()[:4]
+	var params []interface{}
+	var err error
+
+	// Verify method signature and unpack
+	if bytes.Equal(m.submitMethod.ID, methodSig) {
+		params, err = m.submitMethod.Inputs.Unpack(tx.Data()[4:])
+		if err != nil {
+			return nil, fmt.Errorf("failed to unpack submitTask: %w", err)
+		}
+	} else if bytes.Equal(m.bulkSubmitMethod.ID, methodSig) {
+		params, err = m.bulkSubmitMethod.Inputs.Unpack(tx.Data()[4:])
+		if err != nil {
+			return nil, fmt.Errorf("failed to unpack bulkSubmitTask: %w", err)
+		}
+		// Note: bulkSubmitTask has an extra 'numTasks' param at the end, which we ignore here.
+	} else {
+		return nil, fmt.Errorf("transaction is not submitTask or bulkSubmitTask")
+	}
+
+	// Check if enough parameters were unpacked
+	if len(params) < 5 {
+		return nil, fmt.Errorf("unpacked fewer parameters than expected")
+	}
+
+	// Extract parameters (common to both methods up to this point)
+	version, okV := params[0].(uint8)
+	owner, okO := params[1].(common.Address)
+	model, okM := params[2].([32]byte)
+	fee, okF := params[3].(*big.Int)
+	input, okI := params[4].([]byte)
+
+	if !okV || !okO || !okM || !okF || !okI {
+		return nil, fmt.Errorf("type assertion failed for one or more parameters")
+	}
+
+	submitTaskParams := &SubmitTaskParams{
+		Version: version,
+		Owner:   owner,
+		Model:   model,
+		Fee:     fee,
+		Input:   input,
+	}
+
+	return submitTaskParams, nil
+}
+
+// DecodeSubmitTask decodes a submitTask transaction and returns the parameters
+// This is a helper function to decode the parameters from a submitTask transaction to the engine contract only
+// Deprecated: Use DecodeTaskTransaction instead which handles both single and bulk submit.
+func (m *Miner) DecodeSubmitTask(tx *types.Transaction, taskId task.TaskId) (*SubmitTaskParams, error) {
+	// First verify this is a transaction to the Engine contract
+	if tx.To() == nil || *tx.To() != m.services.Config.BaseConfig.EngineAddress {
+		return nil, fmt.Errorf("transaction not sent to Engine contract")
+	}
+
+	// Get the method signature (first 4 bytes)
+	methodSig := tx.Data()[:4]
+
+	// Verify this is a submitTask call by checking method signature
+	if !bytes.Equal(m.submitMethod.ID, methodSig) {
+		return nil, fmt.Errorf("not a submitTask transaction")
+	}
+
+	// Now we can safely decode the parameters using cached method
+	params, err := m.submitMethod.Inputs.Unpack(tx.Data()[4:])
+	if err != nil {
+		return nil, err
+	}
+
+	// Now params contains your decoded parameters in order
+	version := params[0].(uint8)
+	owner := params[1].(common.Address)
+	model := params[2].([32]byte)
+	fee := params[3].(*big.Int)
+	input := params[4].([]byte)
+
+	submitTaskParams := &SubmitTaskParams{
+		Version: version,
+		Owner:   owner,
+		Model:   model,
+		Fee:     fee,
+		Input:   input,
+	}
+
+	return submitTaskParams, nil
+}
+
+// SolveTask takes decoded task parameters and attempts to solve the task.
+func (m *Miner) SolveTask(ctx context.Context, taskId task.TaskId, params *SubmitTaskParams, gpu *task.GPU, validateOnly bool) ([]byte, error) {
 
 	taskIdStr := taskId.String()
 
-	taskData := m.services.AutoMineParams
-
-	inputRaw := string(taskData.Input)
+	inputRaw := string(params.Input) // Use input from params
 
 	var result map[string]interface{}
-	err := json.Unmarshal(taskData.Input, &result)
+	err := json.Unmarshal(params.Input, &result) // Use input from params
 
 	if err != nil {
-		m.services.Logger.Error().Err(err).Msg("could not unmarshal input")
+		m.services.Logger.Error().Err(err).Str("task", taskIdStr).Msg("could not unmarshal input from transaction parameters")
 		return nil, err
 	}
 
-	m.services.Logger.Debug().Str("input", inputRaw).Msg("decoded information")
+	m.services.Logger.Debug().Str("input", inputRaw).Str("task", taskIdStr).Msg("decoded task input")
 
-	taskInfo, err := m.services.Engine.LookupTask(taskId)
-	if err != nil {
-		m.services.Logger.Error().Err(err).Msg("could not lookup task")
-		return nil, err
-	}
+	// taskInfo, err := m.services.Engine.LookupTask(taskId)
+	// if err != nil {
+	// 	m.services.Logger.Error().Err(err).Msg("could not lookup task")
+	// 	return nil, err
+	// }
 
-	modelId := common.Bytes2Hex(taskInfo.Model[:])
+	modelId := common.Bytes2Hex(params.Model[:]) // Use model from params
 	model := models.ModelRegistry.GetModel(modelId)
 	if model == nil {
-		m.services.Logger.Error().Str("model", modelId).Err(err).Msg("could not find model")
-		return nil, err
+		m.services.Logger.Error().Str("model", modelId).Str("task", taskIdStr).Msg("could not find model specified in task parameters")
+		// Consider returning a specific error type here
+		return nil, fmt.Errorf("model %s not found or enabled", modelId)
 	}
 
 	hydrated, err := model.HydrateInput(result, taskId.TaskId2Seed())
@@ -299,6 +423,10 @@ func main() {
 		*logLevel = int(cfg.LogLevel)
 	}
 
+	// this captures the log output and sends it to the logviewer
+	logWriter, cleanup := tui.NewLogRouter()
+	defer cleanup()
+
 	logFile, logger := initLogging(cfg.LogPath, zerolog.Level(*logLevel))
 	defer logFile.Close()
 
@@ -419,12 +547,52 @@ func main() {
 			taskCheck(&logger, appContext)
 		case "verifysolutions":
 			verifySolutions(appContext)
+		case "verifycommitments":
+			verifyCommitment(appContext)
 		case "blockmonitor":
 			blockMonitor(appContext, rpcClient)
 		case "cleantaskdata":
 			cleanTaskData(appContext)
+		case "recoverstale":
+			recoverStaleTasks(appContext)
 		case "claimbatchinfo":
 			getBatchPricingInfo(appContext)
+		case "unsolvedtasks":
+			var startBlock, endBlock int64
+			var err error
+			var senderFilter common.Address
+
+			if len(args) < 2 {
+				log.Fatal("unsolvedtasks requires at least a startblock argument")
+			}
+
+			startBlock, err = strconv.ParseInt(args[1], 10, 64)
+			if err != nil {
+				log.Fatalf("Invalid startblock value: %v", err)
+			}
+
+			if len(args) >= 3 {
+				endBlock, err = strconv.ParseInt(args[2], 10, 64)
+				if err != nil {
+					log.Fatalf("Invalid endblock value: %v", err)
+				}
+			} else {
+				endBlock = 0 // Signal to getUnsolvedTasks to use the latest block
+			}
+
+			// Check for optional sender filter address
+			if len(args) >= 4 {
+				if !common.IsHexAddress(args[3]) {
+					log.Fatalf("Invalid sender filter address: %s", args[3])
+				}
+				senderFilter = common.HexToAddress(args[3])
+			} else {
+				senderFilter = common.Address{} // Use zero address if not provided
+			}
+
+			// Define a reasonable initial block size for the scan
+			initialBlockSize := int64(10000) // Example initial size
+			getUnsolvedTasks(appQuit, appServices, rpcClient, startBlock, endBlock, initialBlockSize, senderFilter)
 		case "fundtaskwallets":
 			var amount, minbal float64
 			if len(args) == 3 {
@@ -529,9 +697,26 @@ func main() {
 			}
 
 			depositMonitor(appContext, rpcClient, startBlock, endBlock)
+		case "autotasksubmit":
+			var interval time.Duration
+			if len(args) == 2 {
+				var err error
+				interval, err = time.ParseDuration(args[1])
+				if err != nil {
+					log.Fatalf("Invalid duration format for autotasksubmit: %v. Use format like '5s', '1m', '300ms'", err)
+				}
+			} else {
+				log.Fatalf("autotasksubmit requires a duration argument (e.g., '10s')")
+			}
+			// Assuming RunAutoTaskSubmit is defined in commands.go (in the same package)
+			RunAutoTaskSubmit(appQuit, appServices, interval)
+		case "getunsolved": // Renamed case from previous attempt
+			// This case is now handled by "unsolvedtasks" below
+			log.Fatal("Use 'unsolvedtasks <startblock> [endblock]' command format.")
 		default:
 			log.Fatalf("unknown command: %s", command)
 		}
+		logger.Info().Msg("command executed successfully")
 		return
 	}
 
@@ -555,6 +740,15 @@ func main() {
 	if modelToMine == nil {
 		logger.Fatal().Str("model", cfg.Strategies.Model).Msg("model specified in config was not found in enabled models")
 	}
+
+	modelAsBytes, _ := cmn.ConvertTaskIdString2Bytes(cfg.Strategies.Model)
+	totalReward, err := appServices.Engine.GetModelReward(modelAsBytes)
+	if err != nil {
+		logger.Fatal().Err(err).Msg("could not get model reward")
+	}
+
+	rewardInAIUS := appServices.Config.BaseConfig.BaseToken.ToFloat(totalReward)
+	logger.Info().Str("model", cfg.Strategies.Model).Str("reward", fmt.Sprintf("%.8g", rewardInAIUS)).Msg("selected strategy model reward")
 
 	miner, err := NewMinerEngine(appServices, manager, &appQuitWG)
 	if err != nil {
@@ -606,72 +800,30 @@ func main() {
 
 	connectToHeaders()
 
-	engineContract, err := engine.NewEngine(cfg.BaseConfig.EngineAddress, rpcClient.Client)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("could not create engine contract")
-	}
-
-	// TaskSubmitted Event Subscription
-	sinkTaskSubmitted := make(chan *engine.EngineTaskSubmitted, 1024) // Buffer size
-	var taskEventSub event.Subscription
-	connectToTaskEvents := func() {
-		if taskEventSub != nil {
-			taskEventSub.Unsubscribe()
-		}
-		logger.Info().Msg("subscribing to TaskSubmitted events...")
-		// Get current block number to start watching from
-		subCtx, cancel := context.WithTimeout(appContext, 15*time.Second)
-		defer cancel()
-		blockNo, err := rpcClient.Client.BlockNumber(subCtx)
-		if err != nil {
-			logger.Fatal().Err(err).Msg("failed to get current block number for event subscription")
-		}
-
-		taskEventSub, err = engineContract.WatchTaskSubmitted(&bind.WatchOpts{
-			Start:   &blockNo,
-			Context: appContext,
-		}, sinkTaskSubmitted, nil, nil, nil)
-		if err != nil {
-			logger.Error().Err(err).Msg("failed to subscribe to TaskSubmitted events")
-		} else {
-			logger.Info().Msg("subscribed to TaskSubmitted events")
-		}
-	}
-
-	if cfg.ListenToTaskSubmitted {
-		connectToTaskEvents()
-	} else {
-		logger.Warn().Msg("listening to TaskSubmitted events is disabled in config")
-	}
-
-	// Task Queue
-	taskQueue, err := NewTaskQueue(logger, defaultMaxTasks, defaultTaskCacheSize) // Use constants or config
-	if err != nil {
-		logger.Fatal().Err(err).Msg("could not create task queue")
-	}
-	logger.Info().Msg("task queue initialized")
-
 	// --- Select and Start Mining Strategy ---
 	var strategy MiningStrategy
+	var strategyErr error // Variable to hold error from constructor
 	switch cfg.Strategies.Strategy {
 	case "bulkmine":
-		strategy = NewBulkMineStrategy(appQuit, appServices, miner, gpuPool, taskQueue)
+		strategy, strategyErr = NewBulkMineStrategy(appContext, appServices, miner, gpuPool)
 	case "solutionsampler":
 		// Need to connect to solution events *before* starting the strategy
-		strategy = NewSolutionSamplerStrategy(appContext, appServices, miner, gpuPool, taskQueue)
-	case "task": //  "task" is the simple listen-and-mine strategy
-		if !cfg.ListenToTaskSubmitted {
-			logger.Fatal().Msg("strategy 'task' requires 'ListenToTaskSubmitted' to be enabled in config")
-		}
-		// Simple strategy: just process tasks from the event stream directly
-		logger.Warn().Msg("strategy 'task' currently behaves like 'bulkmine' fed by events")
-		strategy = NewBulkMineStrategy(appContext, appServices, miner, gpuPool, taskQueue)
-
+		strategy, strategyErr = NewSolutionSamplerStrategy(appContext, appServices, miner, gpuPool)
+	case "listen":
+		strategy, strategyErr = NewListenStrategy(appContext, appServices, miner, gpuPool)
+	case "automine":
+		strategy, strategyErr = NewAutoMineStrategy(appContext, appServices, miner, gpuPool)
 	default:
-		logger.Fatal().Str("strategy", cfg.Strategies.Strategy).Msg("unknown or unsupported mining strategy specified in config")
+		// Use strategyErr to signal failure, consistent with other cases
+		strategyErr = fmt.Errorf("unknown or unsupported mining strategy specified in config: %s", cfg.Strategies.Strategy)
 	}
 
-	// Start the selected strategy's workers
+	// Check for errors during strategy initialization
+	if strategyErr != nil {
+		logger.Fatal().Err(strategyErr).Msg("failed to initialize mining strategy")
+	}
+
+	// Start the selected strategy
 	err = strategy.Start()
 	if err != nil {
 		logger.Fatal().Err(err).Str("strategy", strategy.Name()).Msg("failed to start mining strategy")
@@ -680,17 +832,12 @@ func main() {
 	dashboard := tui.NewDashboard()
 
 	if !*headless {
-		// this captures the log output and sends it to the logviewer
-		logWriter, cleanup := tui.NewLogRouter()
-		defer cleanup()
 
 		// Update our log router to use the logviewer
 		logWriter.SetView(dashboard.LogViewer.CustomTextView)
 		go func() {
 			dashboard.Run()
-			// disable writing to log viwer on exit
-			// we don't set the view to nil as this is unsafe instead we use an atomic bool
-			logWriter.Headless.Store(true)
+			logWriter.Stop()
 			appCancel()
 		}()
 
@@ -757,50 +904,6 @@ func main() {
 
 	maxHeaderBackoff := 30 * time.Second
 	currentHeaderBackoff := 1 * time.Second
-	maxTaskEventBackoff := 30 * time.Second
-	currentTaskEventBackoff := 1 * time.Second
-
-	if cfg.ListenToTaskSubmitted {
-		appQuitWG.Add(1)
-		go func() {
-			defer appQuitWG.Done()
-
-			for {
-				select {
-				case <-appQuit.Done():
-					logger.Info().Msg("task event subscription closed, exiting")
-					return
-				case event := <-sinkTaskSubmitted:
-					if event == nil {
-						continue
-					} // Skip if channel closed or nil event sent
-
-					currentTaskEventBackoff = 1 * time.Second // Reset backoff
-					taskId := task.TaskId(event.Id)
-					ts := &TaskSubmitted{
-						TaskId: taskId,
-						TxHash: event.Raw.TxHash,
-					}
-					logger.Info().Str("taskid", taskId.String()).Str("txHash", event.Raw.TxHash.Hex()).Uint64("block", event.Raw.BlockNumber).Msg("received TaskSubmitted event")
-
-					// Add to task queue (AddTask handles deduplication)
-					taskQueue.AddTask(ts)
-
-				case err := <-taskEventSub.Err():
-					if err == nil {
-						continue
-					}
-					logger.Warn().Err(err).Msgf("task event subscription error, retrying connection in %s", currentTaskEventBackoff)
-					time.Sleep(currentTaskEventBackoff)
-					currentTaskEventBackoff = (currentTaskEventBackoff * 2) + time.Duration(rand.Intn(500))*time.Millisecond
-					if currentTaskEventBackoff > maxTaskEventBackoff {
-						currentTaskEventBackoff = maxTaskEventBackoff
-					}
-					connectToTaskEvents()
-				}
-			}
-		}()
-	}
 
 	for {
 
@@ -824,20 +927,13 @@ func main() {
 
 			connectToHeaders()
 		case h := <-headers:
-			//blockTime := time.Unix(int64(h.Time), 0)
-
-			// /log.Println("New block: ", h.Number.String(), blockTime) // print the block number
-			//basefeeStr := "not avail"
 			if h.BaseFee != nil {
-				// /basefeeStr = h.BaseFee.String()
-
 				// update basefee
 				rpcClient.SetBaseFee(h.BaseFee)
 			}
-			// TODO: atomic updates pls
-			//currentBlockNumer = h.Number.Uint64()
 		}
 	}
+
 exit_app:
 	logger.Info().Msg("waiting for application workers to finish")
 
@@ -847,13 +943,13 @@ exit_app:
 	}
 
 	// Wait for all workers to finish
-	appQuitWG.Wait()
+	//appQuitWG.Wait()
 
 	logger.Info().Msg("bye! 👋")
 
 	// for debugging purposes
 	// Create a timeout channel to detect if the wait takes too long
-	/* waitDone := make(chan struct{})
+	waitDone := make(chan struct{})
 	go func() {
 		appQuitWG.Wait()
 		close(waitDone)
@@ -877,5 +973,5 @@ exit_app:
 
 		// Continue with the wait
 		logger.Warn().Msg("continuing to wait for goroutines to finish")
-	} */
+	}
 }

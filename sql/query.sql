@@ -1,6 +1,6 @@
 -- name: GetCommitments :many
 SELECT * FROM commitments
-ORDER BY added ASC LIMIT ?;
+ORDER BY added ASC;
 
 -- name: CreateCommitment :exec
 INSERT INTO commitments (
@@ -35,6 +35,13 @@ INSERT INTO tasks(
   taskid, txhash, cumulativeGas
 ) VALUES (
   ?,?, ?
+);
+
+-- name: AddTaskWithStatus :exec
+INSERT INTO tasks(
+  taskid, txhash, cumulativeGas, status
+) VALUES (
+  ?,?, ?, ? 
 );
 
 -- name: AddTasks :exec
@@ -159,3 +166,35 @@ INSERT INTO ipfs_cids (
 
 -- name: DeletedIPFSCid :execrows
 DELETE FROM ipfs_cids WHERE taskid = ?;
+
+-- name: RecoverStaleTasks :exec
+UPDATE tasks
+SET status = 0
+WHERE status = 1
+AND NOT EXISTS (
+    SELECT 1
+    FROM solutions
+    WHERE solutions.taskid = tasks.taskid
+);
+
+-- name: RequeueTaskIfNoCommitmentOrSolution :execrows
+UPDATE tasks
+SET status = 0 -- Set back to pending
+WHERE taskid = ? -- For the specific task that failed
+  AND status = 1 -- Only reset if it was in the 'processing' state (set by PopTask)
+  AND NOT EXISTS (
+      SELECT 1
+      FROM commitments c
+      WHERE c.taskid = tasks.taskid
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM solutions s
+      WHERE s.taskid = tasks.taskid
+  );
+
+-- name: AddOrUpdateTaskWithStatus :exec
+INSERT INTO tasks (taskid, txhash, status)
+VALUES (?, ?, ?) 
+ON CONFLICT(taskid) DO UPDATE SET
+    status = excluded.status

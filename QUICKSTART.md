@@ -188,7 +188,7 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
      },
      "strategies": {
        "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
-       "strategy": "bulkmine",
+       "strategy": "automine",
        "automine": {
          "owner": "0x1234567890123456789012345678901234567890",
          "version": 0,
@@ -275,6 +275,8 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
    -   **Stake Management (Manual - `initial_stake`)**: If you set `initial_stake` to a value greater than 0 (representing an amount of AIUS), Gobius will attempt to top up the validator's stake to this specific amount. **Important:** This disables the automatic percentage-based top-ups, meaning you are responsible for ensuring the stake doesn't fall below the minimum required by the network.
    -   **`min_basetoken_threshold`**: Sets a minimum amount of AIUS tokens to always keep in the validator wallet. This reserve is used for future transaction fees (like stake top-ups or task submission fees) ensuring the validator doesn't run out of funds for essential operations.
    -   **`stake_check_interval`**: Determines how frequently Gobius checks the validator's stake level and performs health checks (default is every 120 seconds).
+
+   **Important Note on Solution Rate Limit**: The Arbius network currently enforces a rate limit on solution submissions: **each validator account can only successfully submit 1 solution per second**. This means that to submit a batch containing *N* solutions, that specific validator must have been inactive (not submitted any solutions) for at least *N* seconds prior to the batch submission. If you attempt to submit a batch too quickly after a previous submission, the transaction may fail due to this rate limit. This is a key consideration when configuring batch sizes and observing miner behavior.
 
 ## Deployed Contract Addresses
 
@@ -472,35 +474,42 @@ Once your GPU instance is running (either on RunPod or Vast.ai), you need to fin
 
 ## Initial Mining Setup: Auto-Mining
 
-The recommended initial setup for Gobius is **auto-mining**. This means your miner will automatically generate its own tasks and then solve them.
+The recommended initial setup and default strategy for Gobius is **auto-mining**. This means your miner will automatically generate its own tasks using the specified model and then solve them. This is the simplest way to get started.
 
-This is configured in the `strategies` section of your `config.json` file. The example configuration (`config.example.json`) is already set up for this:
+This is configured in the `strategies` section of your `config.json` file. The example configuration (`config.example.json`) is already set up for this default behavior:
 
 ```json
 "strategies": {
-  "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc", // Ensure this matches the supported model ID
-  "strategy": "bulkmine", // Use bulkmine for auto-mining
+  "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
+  "strategy": "automine",
   "automine": {
-    "owner": "0x1234567890123456789012345678901234567890", // Your wallet address to receive task rewards
+    "owner": "0x1234567890123456789012345678901234567890",
     "version": 0,
-    "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc", // Ensure this matches the supported model ID
-    "fee": 7000000000000000, // Task submission fee in AIUS (wei)
+    "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
+    "fee": 7000000000000000,
     "input": {
-      "prompt": "What is the capital of the moon?" // You can customize this prompt
+      "prompt": "What is the capital of the moon?"
     }
   }
 },
+"batchtasks": {
+  "enabled": true,
+  "private_keys": []
+}
 ```
 
 **Key Settings for Auto-Mining:**
 
--   `strategy`: Must be set to `"bulkmine"`.
--   `automine.owner`: **Required**. Set this to your Ethereum wallet address (must include the `0x` prefix). As the task creator, you'll receive a portion of the rewards when your submitted tasks are solved (even by other miners).
--   `model` (in both `strategies` and `automine`): Ensure this matches the Model ID of the supported model (`0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc`).
--   `automine.fee`: This is the fee (in AIUS wei, which is AIUS * 10^-18) paid *per task* when submitting tasks generated via automine. **This fee will deplete your validator wallet's AIUS balance over time**, in addition to any gas costs. Ensure your validator has enough AIUS to cover these fees (consider the `min_basetoken_threshold` in `validator_config`).
--   `automine.input.prompt`: This is the main setting you might want to change. It defines the input for the tasks your miner generates. The default prompt is just an example.
+-   `strategies.strategy`: Must be set to `"automine"`.
+-   `strategies.automine.owner`: **Required**. Set this to your Ethereum wallet address (must include the `0x` prefix). You receive rewards for tasks you create.
+-   `model` (in both `strategies` and `automine`): Ensure this matches the supported Model ID.
+-   `automine.fee`: Fee paid per task submission (in AIUS wei). This depletes validator AIUS balance.
+-   `automine.input.prompt`: Customizable prompt for generated tasks.
 
-For starting, you typically only need to ensure the `model` IDs are correct and potentially customize the `prompt`.
+**Interaction with `batchtasks`**: 
+
+-   For `automine` to successfully submit the tasks it generates, the `batchtasks` section must be configured and **enabled** (`"batchtasks": { "enabled": true }`). This allows Gobius to batch and submit the task commitments created by `automine`.
+-   **Disabling Batch Tasks**: You might temporarily set `batchtasks.enabled` to `false` if you want to stop submitting *new* tasks (even if `automine` is configured) and focus on clearing the backlog of existing commitments/solutions and claims. This can be useful if you plan to stop mining and want to ensure all pending work is processed and claimed cleanly before shutting down.
 
 ## Running the Miner
 
@@ -540,6 +549,19 @@ Here are some common problems users might encounter during setup:
 *   **Symptom**: `ipfs init` or `ipfs daemon` fails.
 *   **Cause**: Permission issues (try with `sudo` if appropriate, though generally not recommended long-term), port conflicts (another service using 4001 or 5001), insufficient disk space, corrupted IPFS repository.
 *   **Solution**: Check for running processes using the ports (`sudo lsof -i :4001`, `sudo lsof -i :5001`). Check disk space (`df -h`). Try removing the IPFS repo (`rm -rf ~/.ipfs`) and re-running `ipfs init --profile server`.
+
+*   **Symptom**: Gobius fails to start with a fatal error mentioning `CGO_ENABLED=0` and `go-sqlite3 requires cgo to work`.
+    Example log: `{"level":"fatal","error":"Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo to work..."}`
+*   **Cause**: Gobius was built on a system missing a C compiler (`gcc`), which is required by the `go-sqlite3` library. Go automatically disables CGO when a C compiler is not found during the build.
+*   **Solution**: Install the necessary C compiler and build tools, then rebuild Gobius.
+    ```bash
+    # On Debian/Ubuntu
+    sudo apt update && sudo apt install gcc build-essential
+    
+    # Then navigate back to the gobius directory and rebuild
+    cd path/to/gobius
+    go build
+    ```
 
 **3. Configuration (`config.json`) Errors**
 

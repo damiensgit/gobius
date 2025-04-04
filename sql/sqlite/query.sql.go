@@ -31,6 +31,24 @@ func (q *Queries) AddIPFSCid(ctx context.Context, arg AddIPFSCidParams) error {
 	return err
 }
 
+const addOrUpdateTaskWithStatus = `-- name: AddOrUpdateTaskWithStatus :exec
+INSERT INTO tasks (taskid, txhash, status)
+VALUES (?, ?, ?) 
+ON CONFLICT(taskid) DO UPDATE SET
+    status = excluded.status
+`
+
+type AddOrUpdateTaskWithStatusParams struct {
+	Taskid task.TaskId
+	Txhash common.Hash
+	Status int64
+}
+
+func (q *Queries) AddOrUpdateTaskWithStatus(ctx context.Context, arg AddOrUpdateTaskWithStatusParams) error {
+	_, err := q.db.ExecContext(ctx, addOrUpdateTaskWithStatus, arg.Taskid, arg.Txhash, arg.Status)
+	return err
+}
+
 const addTask = `-- name: AddTask :exec
 INSERT INTO tasks(
   taskid, txhash, cumulativeGas
@@ -47,6 +65,31 @@ type AddTaskParams struct {
 
 func (q *Queries) AddTask(ctx context.Context, arg AddTaskParams) error {
 	_, err := q.db.ExecContext(ctx, addTask, arg.Taskid, arg.Txhash, arg.Cumulativegas)
+	return err
+}
+
+const addTaskWithStatus = `-- name: AddTaskWithStatus :exec
+INSERT INTO tasks(
+  taskid, txhash, cumulativeGas, status
+) VALUES (
+  ?,?, ?, ? 
+)
+`
+
+type AddTaskWithStatusParams struct {
+	Taskid        task.TaskId
+	Txhash        common.Hash
+	Cumulativegas float64
+	Status        int64
+}
+
+func (q *Queries) AddTaskWithStatus(ctx context.Context, arg AddTaskWithStatusParams) error {
+	_, err := q.db.ExecContext(ctx, addTaskWithStatus,
+		arg.Taskid,
+		arg.Txhash,
+		arg.Cumulativegas,
+		arg.Status,
+	)
 	return err
 }
 
@@ -227,11 +270,11 @@ func (q *Queries) GetCommitmentBatch(ctx context.Context, limit int64) ([]GetCom
 
 const getCommitments = `-- name: GetCommitments :many
 SELECT taskid, commitment, validator, added FROM commitments
-ORDER BY added ASC LIMIT ?
+ORDER BY added ASC
 `
 
-func (q *Queries) GetCommitments(ctx context.Context, limit int64) ([]Commitment, error) {
-	rows, err := q.db.QueryContext(ctx, getCommitments, limit)
+func (q *Queries) GetCommitments(ctx context.Context) ([]Commitment, error) {
+	rows, err := q.db.QueryContext(ctx, getCommitments)
 	if err != nil {
 		return nil, err
 	}
@@ -502,6 +545,47 @@ func (q *Queries) PopTask(ctx context.Context) (PopTaskRow, error) {
 	var i PopTaskRow
 	err := row.Scan(&i.Taskid, &i.Txhash)
 	return i, err
+}
+
+const recoverStaleTasks = `-- name: RecoverStaleTasks :exec
+UPDATE tasks
+SET status = 0
+WHERE status = 1
+AND NOT EXISTS (
+    SELECT 1
+    FROM solutions
+    WHERE solutions.taskid = tasks.taskid
+)
+`
+
+func (q *Queries) RecoverStaleTasks(ctx context.Context) error {
+	_, err := q.db.ExecContext(ctx, recoverStaleTasks)
+	return err
+}
+
+const requeueTaskIfNoCommitmentOrSolution = `-- name: RequeueTaskIfNoCommitmentOrSolution :execrows
+UPDATE tasks
+SET status = 0 -- Set back to pending
+WHERE taskid = ? -- For the specific task that failed
+  AND status = 1 -- Only reset if it was in the 'processing' state (set by PopTask)
+  AND NOT EXISTS (
+      SELECT 1
+      FROM commitments c
+      WHERE c.taskid = tasks.taskid
+  )
+  AND NOT EXISTS (
+      SELECT 1
+      FROM solutions s
+      WHERE s.taskid = tasks.taskid
+  )
+`
+
+func (q *Queries) RequeueTaskIfNoCommitmentOrSolution(ctx context.Context, taskid task.TaskId) (int64, error) {
+	result, err := q.db.ExecContext(ctx, requeueTaskIfNoCommitmentOrSolution, taskid)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
 }
 
 const setTaskQueuedStatus = `-- name: SetTaskQueuedStatus :execrows
