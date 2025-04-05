@@ -504,21 +504,23 @@ func (tm *BatchTransactionManager) processBatch(
 			totalFee := new(big.Int).Mul(feePerTask, big.NewInt(int64(taskBatchSize)))
 
 			// Get the account's AIUS balance
-			aiusBalance, err := tm.services.Basetoken.BalanceOf(nil, account.Address)
+			aiusBalanceAsBig, err := tm.services.Basetoken.BalanceOf(nil, account.Address)
 			if err != nil {
 				tm.services.Logger.Error().Err(err).Str("account", account.Address.String()).Msg("failed to get AIUS balance for task submission")
 				return
 			}
 
+			aiusBalanceAsFloat := tm.services.Config.BaseConfig.BaseToken.ToFloat(aiusBalanceAsBig)
+
 			// Check if balance is sufficient
 			// TODO: make level this configurable e.g. some min balance level
-			if aiusBalance.Cmp(totalFee) < 0 {
+			if aiusBalanceAsFloat < tm.services.Config.ValidatorConfig.MinBasetokenThreshold {
 				tm.services.Logger.Warn().
 					Str("account", account.Address.String()).
-					Float64("balance", tm.services.Config.BaseConfig.BaseToken.ToFloat(aiusBalance)).
-					Float64("required", tm.services.Config.BaseConfig.BaseToken.ToFloat(totalFee)).
+					Str("balance", fmt.Sprintf("%.8g", aiusBalanceAsFloat)).
+					Str("required", fmt.Sprintf("%.8g", tm.services.Config.BaseConfig.BaseToken.ToFloat(totalFee))).
 					Int("batch_size", taskBatchSize).
-					Msg("** insufficient AIUS balance to send task batch, skipping **")
+					Msgf("** task fee will exceed min balance threshold of %.8g, skipping task batch **", tm.services.Config.ValidatorConfig.MinBasetokenThreshold)
 				return
 			}
 
@@ -650,27 +652,27 @@ func (tm *BatchTransactionManager) processBatch(
 			// claim on approach overrides everything else
 			if tm.services.Config.Claim.ClaimMinReward > 0 {
 				if rewardInAIUS >= tm.services.Config.Claim.ClaimMinReward {
-					tm.services.Logger.Warn().Msgf("** reward is >= claim min reward, claim **")
+					tm.services.Logger.Warn().Msgf("** %.8g reward is >= claim min of reward %.8g, claim **", rewardInAIUS, tm.services.Config.Claim.ClaimMinReward)
 					canClaim = true
 				} else {
-					tm.services.Logger.Warn().Msgf("** reward is below claim min reward, skipping claim **")
+					tm.services.Logger.Warn().Msgf("** %.8g reward is below claim min reward of %.8g, skipping claim **", rewardInAIUS, tm.services.Config.Claim.ClaimMinReward)
 					canClaim = false
 				}
 			} else if tm.services.Config.Claim.HoardMode {
 				if int(totalClaims) < tm.services.Config.Claim.HoardMaxQueueSize {
 					canClaim = false
-					tm.services.Logger.Warn().Msgf("** claim hoard mode on, and queue length below threshold - skipping claim **")
+					tm.services.Logger.Warn().Msgf("** claim hoard mode on, and queue length of %d is below threshold of %d - skipping claim **", int(totalClaims), tm.services.Config.Claim.HoardMaxQueueSize)
 				} else {
 					canClaim = true
-					tm.services.Logger.Warn().Msgf("** claim hoard mode on, and queue length above threshold - claiming **")
+					tm.services.Logger.Warn().Msgf("** claim hoard mode on, and queue length of %d is above threshold of %d - claiming **", int(totalClaims), tm.services.Config.Claim.HoardMaxQueueSize)
 				}
 			} else if tm.services.Config.Claim.MinBatchProfit > 0 {
 				if actualProfit < tm.services.Config.Claim.MinBatchProfit {
-					tm.services.Logger.Warn().Msgf("** batch profit below claim threshold, skipping claim **")
+					tm.services.Logger.Warn().Msgf("** batch profit of %.8g is below claim threshold of %.8g, skipping claim **", actualProfit, tm.services.Config.Claim.MinBatchProfit)
 					canClaim = false
 				} else {
 					canClaim = true
-					tm.services.Logger.Warn().Msgf("** batch profit above claim threshold, claiming **")
+					tm.services.Logger.Warn().Msgf("** batch profit of %.8g is above claim threshold of %.8g, claiming **", actualProfit, tm.services.Config.Claim.MinBatchProfit)
 				}
 			} else {
 				canClaim = true
