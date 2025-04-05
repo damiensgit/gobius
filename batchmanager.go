@@ -648,17 +648,33 @@ func (tm *BatchTransactionManager) processBatch(
 			canClaim := false
 
 			// claim on approach overrides everything else
-			if tm.services.Config.Claim.ClaimMinReward > 0 && rewardInAIUS >= tm.services.Config.Claim.ClaimMinReward {
-				tm.services.Logger.Warn().Msgf("** reward is >= claim min reward, claim **")
-				canClaim = true
-			} else if tm.services.Config.Claim.HoardMode && int(totalClaims) < tm.services.Config.Claim.HoardMaxQueueSize {
-				canClaim = false
-				tm.services.Logger.Warn().Msgf("** claim hoard mode on, and queue length below threshold - skipping claim **")
-			} else if tm.services.Config.Claim.MinBatchProfit > 0 && actualProfit < tm.services.Config.Claim.MinBatchProfit {
-				tm.services.Logger.Warn().Msgf("** batch profit below claim threshold, skipping claim **")
-				canClaim = false
+			if tm.services.Config.Claim.ClaimMinReward > 0 {
+				if rewardInAIUS >= tm.services.Config.Claim.ClaimMinReward {
+					tm.services.Logger.Warn().Msgf("** reward is >= claim min reward, claim **")
+					canClaim = true
+				} else {
+					tm.services.Logger.Warn().Msgf("** reward is below claim min reward, skipping claim **")
+					canClaim = false
+				}
+			} else if tm.services.Config.Claim.HoardMode {
+				if int(totalClaims) < tm.services.Config.Claim.HoardMaxQueueSize {
+					canClaim = false
+					tm.services.Logger.Warn().Msgf("** claim hoard mode on, and queue length below threshold - skipping claim **")
+				} else {
+					canClaim = true
+					tm.services.Logger.Warn().Msgf("** claim hoard mode on, and queue length above threshold - claiming **")
+				}
+			} else if tm.services.Config.Claim.MinBatchProfit > 0 {
+				if actualProfit < tm.services.Config.Claim.MinBatchProfit {
+					tm.services.Logger.Warn().Msgf("** batch profit below claim threshold, skipping claim **")
+					canClaim = false
+				} else {
+					canClaim = true
+					tm.services.Logger.Warn().Msgf("** batch profit above claim threshold, claiming **")
+				}
 			} else {
 				canClaim = true
+				tm.services.Logger.Warn().Msgf("** default claim conditions met, claiming **")
 			}
 
 			// if tm.services.Config.Claim.ClaimOnApproachMinStake && validatorBuffer < tm.services.Config.Claim.MinStakeBufferLevel {
