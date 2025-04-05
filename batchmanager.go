@@ -643,36 +643,9 @@ func (tm *BatchTransactionManager) processBatch(
 		tm.services.Logger.Warn().Msgf("**                     profit/task : %0.4g$ **", (claimValue-totalCostInUSD)/float64(len(claims)))
 		tm.services.Logger.Warn().Msgf("**********************************************")
 
-		//}
-
-		/*claims, err := tm.services.TaskStorage.GetClaims(claimMaxBatchSize * noOfClaimBatches)
-		if err != nil {
-			tm.services.Logger.Error().Err(err).Msg("could not get keys from redis")
-			return
-		}
-
-		totalCost := 0.0
-		for _, task := range claims {
-			totalCost += task.TotalCost
-		}
-		claimTasks := (47_300.0 / 1_000_000_000.0 * baseFee * float64(claimMaxBatchSize*noOfClaimBatches))
-
-		tm.services.Logger.Warn().Msgf("** debug. total cost: %f  **", totalCost)
-
-		totalCost += claimTasks
-
-		totalCostInUSD := totalCost * ethPrice //fmt.Sprintf("%0.4f$", totalCost*ethPrice)
-
-		claimValue := rewardInAIUS * float64(claimMaxBatchSize*noOfClaimBatches) * basePrice
-		actualProfit := claimValue - totalCostInUSD
-
-		tm.services.Logger.Warn().Msgf("**      total cost of mining batch : %0.4g$ (gas spent: %f)**", totalCostInUSD, totalCost)
-		tm.services.Logger.Warn().Msgf("**                     batch value : %0.4g$ **", claimValue)
-		tm.services.Logger.Warn().Msgf("**                          profit : %0.4g$ **", actualProfit)*/
-
 		claimLen := len(claims)
 		if claimLen > 0 {
-			canClaim := true
+			canClaim := false
 
 			// claim on approach overrides everything else
 			if rewardInAIUS >= tm.services.Config.Claim.ClaimMinReward {
@@ -684,6 +657,8 @@ func (tm *BatchTransactionManager) processBatch(
 			} else if actualProfit < tm.services.Config.Claim.MinBatchProfit {
 				tm.services.Logger.Warn().Msgf("** batch profit below claim threshold, skipping claim **")
 				canClaim = false
+			} else {
+				canClaim = true
 			}
 
 			// if tm.services.Config.Claim.ClaimOnApproachMinStake && validatorBuffer < tm.services.Config.Claim.MinStakeBufferLevel {
