@@ -456,12 +456,7 @@ func (v *Validator) CooldownTime(minClaimSolutionTime, minContestationVotePeriod
 }
 
 // Return the maxmimum theoretical submissions that can be sent since the last submission from this validator
-func (v *Validator) MaxSubmissions(blockTime time.Time) int64 {
-	// ratelimit, err := v.services.Engine.Engine.SolutionRateLimit(nil)
-	// if err == nil && ratelimit != nil {
-	// 	v.services.Logger.Info().Str("ratelimit", ratelimit.String()).Msg("solution ratelimit")
-	// }
-
+func (v *Validator) MaxSubmissions(blockTime time.Time) (lastSubmission time.Time, maxSubmissions int64) {
 	lastSubmissionBig, err := v.services.Engine.Engine.LastSolutionSubmission(nil, v.ValidatorAddress())
 	if err != nil {
 		v.services.Logger.Error().Err(err).Msg("LastSolutionSubmission error")
@@ -469,17 +464,12 @@ func (v *Validator) MaxSubmissions(blockTime time.Time) int64 {
 		v.services.Logger.Info().Str("lastSubmission", lastSubmissionBig.String()).Msg("solution lastSubmission")
 	}
 
-	// blockInfo, err := v.Account.Client.Client.BlockByNumber(context.Background(), nil)
-	// if err != nil {
-	// 	v.services.Logger.Error().Err(err).Msg("Failed to get latest block")
-	// 	return err
-	// }
-
-	lastSubmission := time.Unix(lastSubmissionBig.Int64(), 0)
-	//blockTime := time.Unix(int64(blockInfo.Time()), 0)
+	lastSubmission = time.Unix(lastSubmissionBig.Int64(), 0)
 
 	diff := blockTime.Sub(lastSubmission)
+
 	// 10 seconds since last submission, rate limit is 2 seconds between so max sols: 10/2=5
 	// 10 seconds since last submission, rate limit is 0.5 seconds between so max sols: 10/0.5=20
-	return int64(math.Floor(diff.Seconds() / v.ratelimit))
+	maxSubmissions = int64(math.Floor(diff.Seconds() / v.ratelimit))
+	return
 }

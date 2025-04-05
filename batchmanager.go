@@ -201,11 +201,12 @@ func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float6
 		tm.services.Logger.Error().Err(err).Msg("could not get model reward!")
 		return 0, 0, 0, 0, 0, err
 	}
-	rewardInAIUS := tm.services.Config.BaseConfig.BaseToken.ToFloat(modelReward)
+	// for now we are taking 10% of the reward as a fee (this factors in the task owner reward and the treasury reward)
+	rewardInAIUS := tm.services.Config.BaseConfig.BaseToken.ToFloat(modelReward) * 0.9
 
-	rewardTotal := new(big.Int).Sub(modelReward, taskFee)
+	//rewardTotal := new(big.Int).Sub(modelReward, taskFee)
 
-	rewardInAIUSMinusFee := tm.services.Config.BaseConfig.BaseToken.ToFloat(rewardTotal)
+	rewardInAIUSMinusFee := rewardInAIUS - tm.services.Config.BaseConfig.BaseToken.ToFloat(taskFee)
 
 	tm.cache.Set("reward", rewardInAIUS)
 
@@ -839,14 +840,14 @@ func (tm *BatchTransactionManager) processBatch(
 		validatorHighestMin := int64(-1)
 		for _, v := range tm.validators {
 
-			maxSols := v.MaxSubmissions(blockTime)
+			lastSubmission, maxSols := v.MaxSubmissions(blockTime)
 
 			solsPending, found := solsPerVal[v.ValidatorAddress()]
 
 			if found {
 				minWeCanSend := min(maxSols, solsPending)
 
-				tm.services.Logger.Info().Msgf("validator %s: max submissions: %d, sols pending: %d", v.ValidatorAddress().String(), maxSols, solsPending)
+				tm.services.Logger.Info().Str("last_submission", lastSubmission.String()).Int64("max_submissions", maxSols).Int64("sols_pending", solsPending).Str("validator", v.ValidatorAddress().String()).Msg("validator info")
 
 				if minWeCanSend > validatorHighestMin {
 

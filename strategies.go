@@ -854,6 +854,8 @@ func NewAutoMineStrategy(appContext context.Context, services *Services, miner *
 		services.Logger.Warn().Msg("automine strategy uses batch tasks, but batch tasks are not enabled (batchtasks.enabled=false)")
 	}
 
+	// TODO: validate that the automine model fee is set correctly - it needs to be the same as model.fee as per onchain ontract
+
 	// Create the embedded BulkMineStrategy
 	bulkStrategy, err := NewBulkMineStrategy(appContext, services, miner, gpuPool)
 	if err != nil {
