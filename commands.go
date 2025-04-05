@@ -430,52 +430,50 @@ func getBatchPricingInfo(ctx context.Context) error {
 	return nil
 }
 
-func cleanTaskData(ctx context.Context) error {
+func verifyQueuedTasks(ctx context.Context) error {
 
 	// Get the services from the context
-	/*
-		services, ok := ctx.Value(servicesKey{}).(*Services)
-		if !ok {
-			log.Fatal("Could not get services from context")
+
+	services, ok := ctx.Value(servicesKey{}).(*Services)
+	if !ok {
+		log.Fatal("Could not get services from context")
+	}
+
+	queuedTasks, err := services.TaskStorage.GetQueuedTasks()
+	if err != nil {
+		services.Logger.Fatal().Err(err).Msg("could not get claims in storage")
+	}
+
+	services.Logger.Info().Int("total", len(queuedTasks)).Msg("verifying queued tasks")
+
+	s := spinner.New(spinner.CharSets[11], 500*time.Millisecond)
+	s.Suffix = " processing tasks..."
+	s.FinalMSG = "completed!\n"
+	s.Start()
+	totalItemstoProcess := len(queuedTasks)
+	deleted := 0
+	for index, v := range queuedTasks {
+		res, err := services.Engine.Engine.Solutions(nil, v.TaskId)
+
+		if err != nil {
+			services.Logger.Fatal().Err(err).Msg("error getting solution information")
 		}
 
-
-			taskData, err := services.TaskStorage.GetAllTaskData()
+		if res.Blocktime > 0 {
+			err := services.TaskStorage.DeleteTask(v.TaskId)
 			if err != nil {
-				services.Logger.Fatal().Err(err).Msg("could not get claims in storage")
+				services.Logger.Fatal().Err(err).Msg("could delete task data key")
 			}
+			deleted++
+		}
 
-			services.Logger.Info().Int("total", len(taskData)).Msg("cleaning task data")
+		s.Suffix = fmt.Sprintf(" processing tasks [%d/%d] [deleted: %d]\n", index, totalItemstoProcess, deleted)
 
-			s := spinner.New(spinner.CharSets[11], 500*time.Millisecond)
-			s.Suffix = " processing tasks..."
-			s.FinalMSG = "completed!\n"
-			s.Start()
-			totalItemstoProcess := len(taskData)
-			deleted := 0
-			for index, v := range taskData {
-				res, err := services.Engine.Engine.Solutions(nil, v)
+	}
 
-				if err != nil {
-					services.Logger.Fatal().Err(err).Msg("error getting solution information")
-				}
+	s.Stop()
 
-				if res.Blocktime > 0 {
-					err := services.TaskStorage.DeleteTaskaData(v.String())
-					if err != nil {
-						services.Logger.Fatal().Err(err).Msg("could delete task data key")
-					}
-					deleted++
-				}
-
-				s.Suffix = fmt.Sprintf(" processing tasks [%d/%d] [deleted: %d]\n", index, totalItemstoProcess, deleted)
-
-			}
-
-			s.Stop()
-
-
-			services.Logger.Info().Int("deleted", deleted).Msg("completed")*/
+	services.Logger.Info().Int("deleted", deleted).Msg("completed verifying queued tasks 	")
 
 	return nil
 }

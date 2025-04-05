@@ -2,6 +2,7 @@ package common
 
 import (
 	crypto "crypto/rand"
+	"errors"
 	"math/rand"
 	"sync"
 	"time"
@@ -81,8 +82,19 @@ func (g *GPU) GetMockCid(taskid string, input interface{}) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	// random sleep between 4.8 seconds and 5.5
 	time.Sleep(time.Duration(rand.Intn(700)+4800) * time.Millisecond)
+
+	// fake error every so often and once we error, error every time till reset
+	if g.ErrorCount > 0 {
+		return nil, errors.New("fake error")
+	}
+
+	if rand.Intn(100) < 10 {
+		g.IncrementErrorCount()
+		return nil, errors.New("fake error")
+	}
 
 	return b, nil
 }

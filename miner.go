@@ -317,13 +317,10 @@ func (m *Miner) SolveTask(ctx context.Context, taskId task.TaskId, params *Submi
 	} else {
 		//start := time.Now()
 		if gpu.Mock {
-			data, err := gpu.GetMockCid(taskIdStr, hydrated)
-			if err != nil {
-				return nil, err
-			}
-			cid, err = ipfs.GetIPFSHashFast(data)
-			if err != nil {
-				return nil, err
+			var data []byte
+			data, err = gpu.GetMockCid(taskIdStr, hydrated)
+			if err == nil {
+				cid, err = ipfs.GetIPFSHashFast(data)
 			}
 		} else {
 			cid, err = model.GetCID(gpu, taskIdStr, hydrated)
@@ -551,8 +548,8 @@ func main() {
 			verifyCommitment(appContext)
 		case "blockmonitor":
 			blockMonitor(appContext, rpcClient)
-		case "cleantaskdata":
-			cleanTaskData(appContext)
+		case "verifyqueuedtasks":
+			verifyQueuedTasks(appContext)
 		case "recoverstale":
 			recoverStaleTasks(appContext)
 		case "claimbatchinfo":
@@ -937,20 +934,17 @@ func main() {
 exit_app:
 	logger.Info().Msg("waiting for application workers to finish")
 
-	// Stop the mining strategy (signals workers, waits for them)
-	if strategy != nil {
-		strategy.Stop() // This should handle context cancellation and worker WaitGroup
-	}
-
 	// Wait for all workers to finish
 	//appQuitWG.Wait()
-
-	logger.Info().Msg("bye! 👋")
-
 	// for debugging purposes
 	// Create a timeout channel to detect if the wait takes too long
 	waitDone := make(chan struct{})
 	go func() {
+		// Stop the mining strategy (signals workers, waits for them)
+		if strategy != nil {
+			strategy.Stop() // This should handle context cancellation and worker WaitGroup
+		}
+
 		appQuitWG.Wait()
 		close(waitDone)
 	}()
@@ -974,4 +968,6 @@ exit_app:
 		// Continue with the wait
 		logger.Warn().Msg("continuing to wait for goroutines to finish")
 	}
+
+	logger.Info().Msg("bye! 👋")
 }

@@ -341,8 +341,6 @@ func beginImmediate(db *sql.DB) (*sql.Tx, error) {
 }
 
 func (ts *TaskStorageDB) PopTask() (task.TaskId, common.Hash, error) {
-	start := time.Now()
-
 	tx, err := beginImmediate(ts.sqlite)
 	if err != nil {
 		return task.TaskId{}, common.Hash{}, err
@@ -358,7 +356,6 @@ func (ts *TaskStorageDB) PopTask() (task.TaskId, common.Hash, error) {
 	if err := tx.Commit(); err != nil {
 		return task.TaskId{}, common.Hash{}, err
 	}
-	ts.logger.Println("popTaskFromQueue time:", time.Since(start))
 
 	return row.Taskid, row.Txhash, nil
 }
