@@ -220,7 +220,7 @@ func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float6
 		Str("model_reward_minus_fee", fmt.Sprintf("%.8g$", rewardInAIUSMinusFee)).
 		Str("eth_in_usd", fmt.Sprintf("%.4g$", ethPrice)).
 		Str("aius_in_usd", fmt.Sprintf("%.4g$", basePrice)).
-		Msg("💰 eth/aius price")
+		Msg("💰 model reward and eth/aius price")
 
 	tm.services.Logger.Info().
 		Str("costs_in_usd", fmt.Sprintf("%.4g$", totalCostPerBatchUSD)).
