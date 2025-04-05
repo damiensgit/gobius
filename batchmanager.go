@@ -150,6 +150,7 @@ func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float6
 	var basePrice, ethPrice float64
 
 	modelId := tm.services.AutoMineParams.Model
+	taskFee := tm.services.AutoMineParams.Fee
 
 	if basefee == nil {
 		basefee, err = tm.services.OwnerAccount.Client.GetBaseFee()
@@ -195,24 +196,28 @@ func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float6
 
 	totalCostPerBatchUSD := (submitTasksBatchUSD + signalCommitmentBatchUSD + submitSolutionBatchUSD + claimTasksUSD)
 
-	totalReward, err := tm.services.Engine.GetModelReward(modelId)
+	modelReward, err := tm.services.Engine.GetModelReward(modelId)
 	if err != nil {
 		tm.services.Logger.Error().Err(err).Msg("could not get model reward!")
 		return 0, 0, 0, 0, 0, err
 	}
+	rewardInAIUS := tm.services.Config.BaseConfig.BaseToken.ToFloat(modelReward)
 
-	rewardInAIUS := tm.services.Config.BaseConfig.BaseToken.ToFloat(totalReward)
+	rewardTotal := new(big.Int).Sub(modelReward, taskFee)
+
+	rewardInAIUSMinusFee := tm.services.Config.BaseConfig.BaseToken.ToFloat(rewardTotal)
 
 	tm.cache.Set("reward", rewardInAIUS)
 
-	rewardInAIUSUSD := rewardInAIUS * basePrice
-	rewardsPerBatchUSD := rewardInAIUSUSD * profitEstimateBatchSize
+	rewardsPerBatchUSD := rewardInAIUSMinusFee * basePrice * profitEstimateBatchSize
 
 	profit := rewardsPerBatchUSD - totalCostPerBatchUSD
 
 	tm.cumulativeGasUsed.profitEMA.Add(profit)
 
 	tm.services.Logger.Info().
+		Str("base_model_reward", fmt.Sprintf("%.8g$", rewardInAIUS)).
+		Str("model_reward_minus_fee", fmt.Sprintf("%.8g$", rewardInAIUSMinusFee)).
 		Str("eth_in_usd", fmt.Sprintf("%.4g$", ethPrice)).
 		Str("aius_in_usd", fmt.Sprintf("%.4g$", basePrice)).
 		Msg("💰 eth/aius price")
@@ -671,7 +676,7 @@ func (tm *BatchTransactionManager) processBatch(
 
 			// claim on approach overrides everything else
 			if rewardInAIUS >= tm.services.Config.Claim.ClaimMinReward {
-				tm.services.Logger.Warn().Msgf("** reward is >= claim min reward, will claim **")
+				tm.services.Logger.Warn().Msgf("** reward is >= claim min reward, claim **")
 				canClaim = true
 			} else if tm.services.Config.Claim.HoardMode && int(totalClaims) < tm.services.Config.Claim.HoardMaxQueueSize {
 				canClaim = false
@@ -700,7 +705,7 @@ func (tm *BatchTransactionManager) processBatch(
 				accountIndex := rand.Intn(len(tm.taskAccounts))
 				sendBulkClaim := func(chunk storage.ClaimTaskSlice, account *account.Account, wg *sync.WaitGroup, batchno int) {
 					defer wg.Done()
-					tm.services.Logger.Warn().Int("max_batch_size", claimMaxBatchSize).Int("batch_no", batchno+1).Str("address", account.Address.String()).Msgf("sending claim batch")
+					tm.services.Logger.Info().Int("max_batch_size", claimMaxBatchSize).Int("batch_no", batchno+1).Str("address", account.Address.String()).Msgf("preparing claim batch")
 					tm.processBulkClaim(account, chunk, claimMinBatchSize, claimMaxBatchSize)
 				}
 
