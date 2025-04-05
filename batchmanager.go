@@ -220,7 +220,7 @@ func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float6
 		Str("model_reward_minus_fee", fmt.Sprintf("%.8g$", rewardInAIUSMinusFee)).
 		Str("eth_in_usd", fmt.Sprintf("%.4g$", ethPrice)).
 		Str("aius_in_usd", fmt.Sprintf("%.4g$", basePrice)).
-		Msg("💰 model reward and eth/aius price")
+		Msg("💰 model reward eth/aius price")
 
 	tm.services.Logger.Info().
 		Str("costs_in_usd", fmt.Sprintf("%.4g$", totalCostPerBatchUSD)).
@@ -230,7 +230,7 @@ func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float6
 		Str("profit_metrics", tm.cumulativeGasUsed.profitEMA.String()).
 		Msg("💰 batch profits")
 
-	return profit, basefeeinGwei, rewardInAIUS, ethPrice, basePrice, nil
+	return profit, basefeeinGwei, rewardInAIUSMinusFee, ethPrice, basePrice, nil
 }
 
 // This should only be run when not performing other batched operations and just does batch claims
@@ -641,7 +641,7 @@ func (tm *BatchTransactionManager) processBatch(
 		tm.services.Logger.Warn().Msgf("**                     batch value : %0.4g$ **", claimValue)
 		tm.services.Logger.Warn().Msgf("**                          profit : %0.4g$ **", claimValue-totalCostInUSD)
 		tm.services.Logger.Warn().Msgf("**                     profit/task : %0.4g$ **", (claimValue-totalCostInUSD)/float64(len(claims)))
-		tm.services.Logger.Warn().Msgf("** **************************************** **")
+		tm.services.Logger.Warn().Msgf("**********************************************")
 
 		//}
 
