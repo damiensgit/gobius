@@ -1215,10 +1215,19 @@ func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *cl
 						targetStatus = 0
 					}
 
+					// If task is being reset to queue (status 0), ensure no orphaned solution exists
+					if targetStatus == 0 {
+						err = services.TaskStorage.DeleteProcessedSolutions([]task.TaskId{taskId})
+						if err != nil {
+							// Log the error but proceed with setting status to 0
+							log.Printf("WARN: Failed to delete potential orphaned solution for task %s: %v", taskId.String(), err)
+						}
+					}
+
 					// Update the task status once based on the determined state
 					addOrUpdateTask(targetStatus)
 
-					// No need to the check for local solution status here as it's irrelevant
+					// Removed the check for local solution status here as it's irrelevant
 					// when there's no on-chain solution.
 				}
 			}
