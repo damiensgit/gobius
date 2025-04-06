@@ -1140,7 +1140,8 @@ func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *cl
 						_ = services.TaskStorage.DeleteProcessedCommitments([]task.TaskId{taskId})
 						_ = services.TaskStorage.DeleteProcessedSolutions([]task.TaskId{taskId})
 						// Add/Update task to claimable state (status 3)
-						err = services.TaskStorage.UpsertTaskToClaimable(taskId, currentlog.TxHash, time.Now().Unix())
+						claimTime := time.Unix(int64(sol.Blocktime), 0)
+						err = services.TaskStorage.UpsertTaskToClaimable(taskId, currentlog.TxHash, claimTime)
 						if err != nil {
 							log.Printf("WARN: Failed to upsert task %s to claimable: %v", taskId.String(), err)
 						} else {

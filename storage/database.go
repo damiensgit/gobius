@@ -491,11 +491,13 @@ func (ts *TaskStorageDB) DeleteTask(taskid task.TaskId) error {
 	return err
 }
 
-func (ts *TaskStorageDB) UpsertTaskToClaimable(taskid task.TaskId, txhash common.Hash, claimtime int64) error {
+func (ts *TaskStorageDB) UpsertTaskToClaimable(taskid task.TaskId, txhash common.Hash, claimTime time.Time) error {
+	claimTime = claimTime.Add(ts.minclaimtime)
+
 	params := db.UpsertTaskToClaimableParams{
 		Taskid:    taskid,
 		Txhash:    txhash,
-		Claimtime: claimtime,
+		Claimtime: claimTime.Unix(),
 	}
 	return ts.queries.UpsertTaskToClaimable(ts.ctx, params)
 }

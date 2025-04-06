@@ -460,8 +460,6 @@ func (v *Validator) MaxSubmissions(blockTime time.Time) (lastSubmission time.Tim
 	lastSubmissionBig, err := v.services.Engine.Engine.LastSolutionSubmission(nil, v.ValidatorAddress())
 	if err != nil {
 		v.services.Logger.Error().Err(err).Msg("LastSolutionSubmission error")
-	} else {
-		v.services.Logger.Info().Str("lastSubmission", lastSubmissionBig.String()).Msg("solution lastSubmission")
 	}
 
 	lastSubmission = time.Unix(lastSubmissionBig.Int64(), 0)
