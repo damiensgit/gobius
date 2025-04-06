@@ -209,3 +209,11 @@ ON CONFLICT(taskid) DO UPDATE SET
     status = 3,
     claimtime = excluded.claimtime,
     txhash = excluded.txhash; -- Keep txhash updated too
+
+-- name: CheckCommitmentExists :one
+SELECT EXISTS(SELECT 1 FROM commitments WHERE taskid = ?); 
+
+-- name: GetAllTasks :many
+SELECT * FROM tasks;
+
+

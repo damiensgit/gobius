@@ -58,14 +58,25 @@ func (ts *TaskStorageDB) GetPendingSolutionsCountPerValidator() (map[common.Addr
 	return mapValToCounts, err
 }
 
-func (ts *TaskStorageDB) AddCommitment(validator common.Address, taskId task.TaskId, commitment [32]byte) error {
-	err := ts.queries.CreateCommitment(ts.ctx, db.CreateCommitmentParams{
+// TryAddCommitment attempts to add a commitment to the database
+// Returns true if the commitment was added, false if it already exists
+// Returns an error if there is an error adding the commitment
+func (ts *TaskStorageDB) TryAddCommitment(validator common.Address, taskId task.TaskId, commitment [32]byte) (bool, error) {
+	exists, err := ts.queries.CheckCommitmentExists(ts.ctx, taskId)
+	if err != nil {
+		return false, err
+	}
+	if exists > 0 {
+		return false, nil // Commitment already exists, skip adding
+	}
+
+	err = ts.queries.CreateCommitment(ts.ctx, db.CreateCommitmentParams{
 		Taskid:     taskId,
 		Commitment: commitment,
 		Validator:  validator,
 	})
 
-	return err
+	return true, err
 }
 
 func (ts *TaskStorageDB) AddSolution(validator common.Address, taskId task.TaskId, cid []byte) error {
@@ -500,4 +511,10 @@ func (ts *TaskStorageDB) UpsertTaskToClaimable(taskid task.TaskId, txhash common
 		Claimtime: claimTime.Unix(),
 	}
 	return ts.queries.UpsertTaskToClaimable(ts.ctx, params)
+}
+
+func (ts *TaskStorageDB) GetAllTasks() ([]db.Task, error) {
+	tasks, err := ts.queries.GetAllTasks(ts.ctx)
+
+	return tasks, err
 }

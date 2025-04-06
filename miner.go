@@ -342,50 +342,31 @@ func (m *Miner) SolveTask(ctx context.Context, taskId task.TaskId, params *Submi
 
 	validator := m.validator.GetNextValidatorAddress()
 
-	commitmentFunc := func() error {
-
-		commitment, err := utils.GenerateCommitment(validator, taskId, cid)
-		if err != nil {
-			m.services.Logger.Error().Err(err).Msg("error generating commitment hash")
-			return err
-		}
-
-		if m.services.Config.CheckCommitment {
-			m.services.Logger.Debug().Str("taskid", taskIdStr).Str("commitment", "0x"+hex.EncodeToString(commitment[:])).Msg("checking for existing task commitment")
-
-			block, err := m.services.Engine.Engine.Commitments(nil, commitment)
-			if err != nil {
-				m.services.Logger.Error().Err(err).Msg("error getting commitment")
-				return err
-			}
-
-			blockNo := block.Uint64()
-			if blockNo > 0 {
-				m.services.Logger.Warn().Str("taskid", taskIdStr).Uint64("block", blockNo).Str("commitment", "0x"+hex.EncodeToString(commitment[:])).Msg("commitment already exists for task")
-				return nil
-			}
-		}
-
-		m.validator.SignalCommitment(validator, taskId, commitment)
-
-		return nil
-	}
-
-	err = commitmentFunc()
+	commitment, err := utils.GenerateCommitment(validator, taskId, cid)
 	if err != nil {
-		m.services.Logger.Warn().Msg("commitment failed so not sending solution")
+		m.services.Logger.Error().Err(err).Msg("error generating commitment hash")
 		return nil, err
 	}
 
+	err = m.validator.SignalCommitment(validator, taskId, commitment)
+	if err != nil {
+		m.services.Logger.Error().Err(err).Msg("error signalling commitment to validator, skipping submitsolution")
+		return nil, err
+	}
+
+	// we wont consider this a failure
 	err = m.validator.SubmitIpfsCid(validator, taskId, cid)
 	if err != nil {
 		m.services.Logger.Warn().Err(err).Msg("ipfs cid submission failed")
 	}
 
 	// Use a separate goroutine without WaitGroup tracking for solution submission
-	go m.validator.SubmitSolution(validator, taskId, cid)
+	err = m.validator.SubmitSolution(validator, taskId, cid)
+	if err != nil {
+		m.services.Logger.Error().Err(err).Msg("solution submission failed")
+	}
 
-	return cid, nil
+	return cid, err
 }
 
 func main() {

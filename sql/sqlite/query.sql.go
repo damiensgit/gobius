@@ -122,6 +122,19 @@ func (q *Queries) AddTasks(ctx context.Context, arg AddTasksParams) error {
 	return err
 }
 
+const checkCommitmentExists = `-- name: CheckCommitmentExists :one
+
+SELECT EXISTS(SELECT 1 FROM commitments WHERE taskid = ?)
+`
+
+// Keep txhash updated too
+func (q *Queries) CheckCommitmentExists(ctx context.Context, taskid task.TaskId) (int64, error) {
+	row := q.db.QueryRowContext(ctx, checkCommitmentExists, taskid)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const createCommitment = `-- name: CreateCommitment :exec
 INSERT INTO commitments (
   taskid, commitment, validator
@@ -238,6 +251,39 @@ func (q *Queries) DeletedTask(ctx context.Context, taskid task.TaskId) (int64, e
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const getAllTasks = `-- name: GetAllTasks :many
+SELECT taskid, txhash, cumulativegas, status, claimtime FROM tasks
+`
+
+func (q *Queries) GetAllTasks(ctx context.Context) ([]Task, error) {
+	rows, err := q.db.QueryContext(ctx, getAllTasks)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Task
+	for rows.Next() {
+		var i Task
+		if err := rows.Scan(
+			&i.Taskid,
+			&i.Txhash,
+			&i.Cumulativegas,
+			&i.Status,
+			&i.Claimtime,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getCommitmentBatch = `-- name: GetCommitmentBatch :many

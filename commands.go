@@ -9,6 +9,7 @@ import (
 	"gobius/client"
 	task "gobius/common"
 	"gobius/metrics"
+	"gobius/storage"
 	"log"
 	"math/big"
 	"math/rand"
@@ -1018,6 +1019,18 @@ func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *cl
 		return
 	}
 
+	// first get all commitments from the db
+	commitments, err := services.TaskStorage.GetAllCommitments()
+	if err != nil {
+		log.Printf("WARN: Failed to get all commitments from storage: %v", err)
+		return
+	}
+	// loop throught all commitments and add them to a map
+	commitmentMap := make(map[task.TaskId]storage.TaskData)
+	for _, commitment := range commitments {
+		commitmentMap[commitment.TaskId] = commitment
+	}
+
 	log.Printf("Scanning for unsolved tasks from block %d to %d", fromBlock, endBlock)
 
 	currentBlockSize := initialBlockSize
@@ -1150,20 +1163,63 @@ func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *cl
 						continue
 					}
 				} else {
-					// No solution exists on-chain (task is unsolved or maybe committed but not solved)
-					log.Printf("DEBUG: Task %s has no solution on-chain. Adding/Updating to pending (status 0) locally.", taskId.String())
-					// Ensure local commitment/solution records are removed just in case they are stale
-					_ = services.TaskStorage.DeleteProcessedCommitments([]task.TaskId{taskId})
-					_ = services.TaskStorage.DeleteProcessedSolutions([]task.TaskId{taskId})
-					// Add/Update task status to 0 (pending)
-					err = services.TaskStorage.AddOrUpdateTaskWithStatus(taskId, currentlog.TxHash, 0)
-					if err != nil {
-						log.Printf("WARN: Failed to add/update unsolved task %s to storage: %v", taskId.String(), err)
-					} else {
-						log.Printf("Added/Updated unsolved task to queue: %s (Tx: %s)", taskId.String(), currentlog.TxHash.Hex())
-						totalAdded++
+					// No solution on-chain: Determine state based on commitment
+					log.Printf("DEBUG: Task %s has no solution on-chain. Checking local/on-chain commitment...", taskId.String())
+
+					addOrUpdateTask := func(status int64) {
+						err = services.TaskStorage.AddOrUpdateTaskWithStatus(taskId, currentlog.TxHash, status)
+						if err != nil {
+							log.Printf("WARN: Failed to add/update task %s to status %d: %v", taskId.String(), status, err)
+						} else {
+							log.Printf("Set task %s status to %d (Tx: %s)", taskId.String(), status, currentlog.TxHash.Hex())
+							totalAdded++
+						}
 					}
-					continue
+
+					targetStatus := int64(0) // Default to queued
+
+					// 1. Check local commitment
+					commitmentLocal, hasLocalCommitment := commitmentMap[taskId]
+					if hasLocalCommitment {
+						if commitmentLocal.Commitment != [32]byte{} {
+							// Check if this local commitment exists on-chain
+							block, err := services.Engine.Engine.Commitments(nil, commitmentLocal.Commitment)
+							if err != nil {
+								services.Logger.Error().Err(err).Str("task", taskId.String()).Msg("error getting on-chain commitment status, skipping task update")
+								continue // Skip this task if we can't check chain state
+							}
+
+							if block.Uint64() > 0 {
+								// On-chain commitment exists for our local commitment hash
+								log.Printf("DEBUG: Task %s has local commitment matching on-chain commitment. Setting status=2.", taskId.String())
+								targetStatus = 2 // Ready for solution submission
+								// Delete the now-redundant local commitment record
+								err = services.TaskStorage.DeleteProcessedCommitments([]task.TaskId{taskId})
+								if err != nil {
+									log.Printf("WARN: Failed to delete local commitment for task %s after confirming on-chain: %v", taskId.String(), err)
+								}
+							} else {
+								// Local commitment exists, but NOT found on-chain (stale/invalid?)
+								log.Printf("DEBUG: Task %s has local commitment, but it's not found on-chain. Setting status=0.", taskId.String())
+								targetStatus = 0 // Needs re-queuing
+								// Do not delete local commitment here, might be useful later
+							}
+						} else {
+							// Local commitment record exists but hash is zero? Data inconsistency.
+							log.Printf("WARN: Task %s has local commitment record with zero hash. Setting status=0.", taskId.String())
+							targetStatus = 0
+						}
+					} else {
+						// No local commitment found
+						log.Printf("DEBUG: Task %s has no local commitment. Setting status=0.", taskId.String())
+						targetStatus = 0
+					}
+
+					// Update the task status once based on the determined state
+					addOrUpdateTask(targetStatus)
+
+					// No need to the check for local solution status here as it's irrelevant
+					// when there's no on-chain solution.
 				}
 			}
 

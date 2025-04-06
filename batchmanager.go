@@ -1711,13 +1711,18 @@ func (tm *BatchTransactionManager) SignalCommitment(validator common.Address, ta
 		tm.Lock()
 		tm.commitments = append(tm.commitments, commitment)
 		tm.Unlock()
+		return nil
 	case 1:
 		tm.services.Logger.Debug().Str("taskid", taskId.String()).Msg("adding task commitment to storage")
-		err := tm.services.TaskStorage.AddCommitment(validator, taskId, commitment)
+		added, err := tm.services.TaskStorage.TryAddCommitment(validator, taskId, commitment)
 		if err != nil {
-			tm.services.Logger.Error().Err(err).Msg("error adding commitment to storage")
+			return err
 		}
-		return err
+		if !added {
+			tm.services.Logger.Warn().Str("taskid", taskId.String()).Msg("commitment already exists, skipping add")
+			return nil
+		}
+		return nil
 	case 0:
 		return tm.singleSignalCommitment(taskId, commitment)
 	default:
@@ -1754,15 +1759,30 @@ func (tm *BatchTransactionManager) SubmitSolution(validator common.Address, task
 	return nil
 }
 
-func (m *BatchTransactionManager) singleSignalCommitment(taskId task.TaskId, commitment [32]byte) error {
+func (tm *BatchTransactionManager) singleSignalCommitment(taskId task.TaskId, commitment [32]byte) error {
 
+	if tm.services.Config.CheckCommitment {
+		tm.services.Logger.Debug().Str("taskid", taskId.String()).Str("commitment", "0x"+hex.EncodeToString(commitment[:])).Msg("checking for existing task commitment")
+
+		block, err := tm.services.Engine.Engine.Commitments(nil, commitment)
+		if err != nil {
+			tm.services.Logger.Error().Err(err).Msg("error getting commitment")
+			return err
+		}
+
+		blockNo := block.Uint64()
+		if blockNo > 0 {
+			tm.services.Logger.Warn().Str("taskid", taskId.String()).Uint64("block", blockNo).Str("commitment", "0x"+hex.EncodeToString(commitment[:])).Msg("commitment already exists for task onchain")
+			return nil
+		}
+	}
 	taskIdStr := taskId.String()
 
-	m.services.Logger.Info().Str("taskid", taskIdStr).Str("commitment", "0x"+hex.EncodeToString(commitment[:])).Msg("sending commitment")
+	tm.services.Logger.Info().Str("taskid", taskIdStr).Str("commitment", "0x"+hex.EncodeToString(commitment[:])).Msg("sending commitment")
 
 	start := time.Now()
 
-	tx, err := m.services.SenderOwnerAccount.NonceManagerWrapper(5, 425, 1.5, false, func(opts *bind.TransactOpts) (interface{}, error) {
+	tx, err := tm.services.SenderOwnerAccount.NonceManagerWrapper(5, 425, 1.5, false, func(opts *bind.TransactOpts) (interface{}, error) {
 		// nonce := 0
 		// if opts.Nonce != nil {
 		// 	nonce = int(opts.Nonce.Int64())
@@ -1770,40 +1790,40 @@ func (m *BatchTransactionManager) singleSignalCommitment(taskId task.TaskId, com
 		// m.services.Logger.Info().Int("nonce", nonce).Str("commitment", "0x"+hex.EncodeToString(commitment[:])).Msg("NonceManagerWrapper [sending commitment]")
 		opts.GasLimit = 200_000
 
-		return m.services.Engine.Engine.SignalCommitment(opts, commitment)
+		return tm.services.Engine.Engine.SignalCommitment(opts, commitment)
 	})
 
 	if err != nil {
-		m.services.Logger.Error().Err(err).Msg("error signaling commitment")
+		tm.services.Logger.Error().Err(err).Msg("error signaling commitment")
 		return err
 	}
 
 	elapsed := time.Since(start)
-	m.services.Logger.Info().Str("taskid", taskIdStr).Uint64("nonce", tx.Nonce()).Str("txhash", tx.Hash().String()).Str("elapsed", elapsed.String()).Msg("signal commitment tx sent")
+	tm.services.Logger.Info().Str("taskid", taskIdStr).Uint64("nonce", tx.Nonce()).Str("txhash", tx.Hash().String()).Str("elapsed", elapsed.String()).Msg("signal commitment tx sent")
 
 	go func() {
-		receipt, success, _, err := m.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+		receipt, success, _, err := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 		if err != nil {
-			m.services.Logger.Error().Err(err).Msg("error waiting for commitment confirmation")
+			tm.services.Logger.Error().Err(err).Msg("error waiting for commitment confirmation")
 			return
 		}
 		if !success {
-			m.services.Logger.Error().Msg("commitment tx reverted")
+			tm.services.Logger.Error().Msg("commitment tx reverted")
 			return
 		}
 		if receipt != nil {
 			txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
-			m.services.Logger.Info().Uint64("gas", receipt.GasUsed).Uint64("gas_per_commit", receipt.GasUsed).Msg("single commitment gas used")
-			m.cumulativeGasUsed.AddCommitment(txCost)
+			tm.services.Logger.Info().Uint64("gas", receipt.GasUsed).Uint64("gas_per_commit", receipt.GasUsed).Msg("single commitment gas used")
+			tm.cumulativeGasUsed.AddCommitment(txCost)
 		}
 
 		var signalledCommitments [][32]byte
 		for _, log := range receipt.Logs {
 
-			if len(log.Topics) > 0 && log.Topics[0] == m.signalCommitmentEvent {
-				parsed, err := m.services.Engine.Engine.ParseSignalCommitment(*log)
+			if len(log.Topics) > 0 && log.Topics[0] == tm.signalCommitmentEvent {
+				parsed, err := tm.services.Engine.Engine.ParseSignalCommitment(*log)
 				if err != nil {
-					m.services.Logger.Error().Err(err).Msg("could not parse signal commitment event")
+					tm.services.Logger.Error().Err(err).Msg("could not parse signal commitment event")
 					continue
 				}
 				signalledCommitments = append(signalledCommitments, parsed.Commitment)
@@ -1811,100 +1831,100 @@ func (m *BatchTransactionManager) singleSignalCommitment(taskId task.TaskId, com
 		}
 
 		if len(signalledCommitments) != 1 {
-			m.services.Logger.Error().Msg("ASSERT: NO COMMITMENTS SIGNALLLED!")
+			tm.services.Logger.Error().Msg("ASSERT: NO COMMITMENTS SIGNALLLED!")
 		}
 	}()
 
 	// wait a bit to hope commitment is mined before submitting solution
-	duration := 2010 + rand.Intn(150)
+	duration := 2000 + rand.Intn(350)
 	time.Sleep(time.Duration(duration) * time.Millisecond)
 
 	return nil
 }
 
-func (m *BatchTransactionManager) singleSubmitSolution(validator common.Address, taskId task.TaskId, cid []byte) error {
+func (tm *BatchTransactionManager) singleSubmitSolution(validator common.Address, taskId task.TaskId, cid []byte) error {
 
-	val := m.validators.GetValidatorByAddress(validator)
+	val := tm.validators.GetValidatorByAddress(validator)
 	if val == nil {
 		return errors.New("validator not found")
 	}
 
 	taskIdStr := taskId.String()
-	m.services.Logger.Info().Str("taskid", taskIdStr).Msg("sending single solution")
+	tm.services.Logger.Info().Str("taskid", taskIdStr).Msg("sending single solution")
 
 	start := time.Now()
-	retries := m.services.Config.Miner.ErrorMaxRetries
-	backoff := m.services.Config.Miner.ErrorBackoffTime
-	backoffMultiplier := m.services.Config.Miner.ErrorBackofMultiplier
+	retries := tm.services.Config.Miner.ErrorMaxRetries
+	backoff := tm.services.Config.Miner.ErrorBackoffTime
+	backoffMultiplier := tm.services.Config.Miner.ErrorBackofMultiplier
 	tx, err := val.Account.NonceManagerWrapper(retries, backoff, backoffMultiplier, false, func(opts *bind.TransactOpts) (interface{}, error) {
 		// avoid gas estimate
 		opts.GasLimit = 400_000
 
-		return m.services.Engine.Engine.SubmitSolution(opts, taskId, cid)
+		return tm.services.Engine.Engine.SubmitSolution(opts, taskId, cid)
 	})
 	elapsed := time.Since(start)
 
 	if err != nil {
-		m.services.Logger.Error().Err(err).Str("taskid", taskIdStr).Str("elapsed", elapsed.String()).Msg("❌ error submitting solution")
+		tm.services.Logger.Error().Err(err).Str("taskid", taskIdStr).Str("elapsed", elapsed.String()).Msg("❌ error submitting solution")
 		return err
 	}
 
-	m.services.Logger.Info().Str("taskid", taskIdStr).Uint64("nonce", tx.Nonce()).Str("txhash", tx.Hash().String()).Str("elapsed", elapsed.String()).Msg("solution tx sent")
+	tm.services.Logger.Info().Str("taskid", taskIdStr).Uint64("nonce", tx.Nonce()).Str("txhash", tx.Hash().String()).Str("elapsed", elapsed.String()).Msg("solution tx sent")
 
 	go func() {
 		// find out who mined the soluition and log it
 		defer func() {
-			res, err := m.services.Engine.GetSolution(taskId)
+			res, err := tm.services.Engine.GetSolution(taskId)
 			if err != nil {
-				m.services.Logger.Err(err).Msg("error getting solution information")
+				tm.services.Logger.Err(err).Msg("error getting solution information")
 				return
 			}
 
 			if res.Blocktime > 0 {
 
-				if m.IsAddressValidator(res.Validator) {
-					m.services.TaskTracker.TaskSucceeded()
+				if tm.IsAddressValidator(res.Validator) {
+					tm.services.TaskTracker.TaskSucceeded()
 				} else {
-					m.services.TaskTracker.TaskFailed()
+					tm.services.TaskTracker.TaskFailed()
 				}
 				solversCid := common.Bytes2Hex(res.Cid[:])
 				ourCid := common.Bytes2Hex(cid)
 				if ourCid != solversCid {
-					m.services.Logger.Warn().Msg("=======================================================================")
-					m.services.Logger.Warn().Msg("  WARNING: our solution cid does not match the solvers cid!")
-					m.services.Logger.Warn().Msg("  our cid: " + ourCid)
-					m.services.Logger.Warn().Msg("  ther cid: " + solversCid)
-					m.services.Logger.Warn().Str("validator", res.Validator.String()).Msg("  solvers address")
-					m.services.Logger.Warn().Msg("========================================================================")
+					tm.services.Logger.Warn().Msg("=======================================================================")
+					tm.services.Logger.Warn().Msg("  WARNING: our solution cid does not match the solvers cid!")
+					tm.services.Logger.Warn().Msg("  our cid: " + ourCid)
+					tm.services.Logger.Warn().Msg("  ther cid: " + solversCid)
+					tm.services.Logger.Warn().Str("validator", res.Validator.String()).Msg("  solvers address")
+					tm.services.Logger.Warn().Msg("========================================================================")
 				}
-				m.services.Logger.Info().Str("taskid", taskIdStr).Str("validator", res.Validator.String()).Str("Cid", solversCid).Msg("solution information")
+				tm.services.Logger.Info().Str("taskid", taskIdStr).Str("validator", res.Validator.String()).Str("Cid", solversCid).Msg("solution information")
 			} else {
-				m.services.Logger.Info().Str("taskid", taskIdStr).Msg("solution not solved")
+				tm.services.Logger.Info().Str("taskid", taskIdStr).Msg("solution not solved")
 			}
 
 		}()
 
-		receipt, success, _, _ := m.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+		receipt, success, _, _ := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
 
 		if receipt != nil {
 			txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
-			m.services.Logger.Info().Uint64("gas", receipt.GasUsed).Uint64("gas_per_solution", receipt.GasUsed).Msg("**** single solution gas used *****")
-			m.cumulativeGasUsed.AddSolution(txCost)
+			tm.services.Logger.Info().Uint64("gas", receipt.GasUsed).Uint64("gas_per_solution", receipt.GasUsed).Msg("**** single solution gas used *****")
+			tm.cumulativeGasUsed.AddSolution(txCost)
 		}
 
 		if !success {
 			return //errors.New("error waiting for solution confirmation")
 		}
 
-		m.services.Logger.Info().Str("taskid", taskIdStr).Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("✅ solution accepted!")
+		tm.services.Logger.Info().Str("taskid", taskIdStr).Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("✅ solution accepted!")
 
 		claims := []task.TaskId{taskId}
-		claimTime, err := m.services.TaskStorage.AddTasksToClaim(claims, 0)
+		claimTime, err := tm.services.TaskStorage.AddTasksToClaim(claims, 0)
 		if err != nil {
-			m.services.Logger.Error().Err(err).Msg("error adding claim in redis")
+			tm.services.Logger.Error().Err(err).Msg("error adding claim in redis")
 			return
 		}
-		m.services.Logger.Info().Str("taskid", taskIdStr).Str("when", claimTime.String()).Msg("added taskid claim to storage")
+		tm.services.Logger.Info().Str("taskid", taskIdStr).Str("when", claimTime.String()).Msg("added taskid claim to storage")
 	}()
 
 	return nil
