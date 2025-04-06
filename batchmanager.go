@@ -217,11 +217,11 @@ func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float6
 	tm.cumulativeGasUsed.profitEMA.Add(profit)
 
 	tm.services.Logger.Info().
-		Str("base_model_reward", fmt.Sprintf("%.8g$", rewardInAIUS)).
-		Str("model_reward_minus_fee", fmt.Sprintf("%.8g$", rewardInAIUSMinusFee)).
+		Str("base_model_reward", fmt.Sprintf("%.8g", rewardInAIUS)).
+		Str("model_reward_minus_fee", fmt.Sprintf("%.8g", rewardInAIUSMinusFee)).
 		Str("eth_in_usd", fmt.Sprintf("%.4g$", ethPrice)).
 		Str("aius_in_usd", fmt.Sprintf("%.4g$", basePrice)).
-		Msg("💰 model reward eth/aius price")
+		Msg("💰 model reward and eth/aius price")
 
 	tm.services.Logger.Info().
 		Str("costs_in_usd", fmt.Sprintf("%.4g$", totalCostPerBatchUSD)).
@@ -578,12 +578,6 @@ func (tm *BatchTransactionManager) processBatch(
 			return
 		}
 	}
-
-	if !isProfitable {
-		tm.services.Logger.Info().Str("profit_mode", profitMode).Str("min_profit", minProfitFmt).Str("max_profit", fmt.Sprintf("%.4g", maxProfit)).Msg("not profitable to process batch")
-		return
-	}
-
 	totalCommitments, err := tm.services.TaskStorage.TotalCommitments()
 	if err != nil {
 		tm.services.Logger.Error().Err(err).Msg("failed to get total commitments")
@@ -597,6 +591,11 @@ func (tm *BatchTransactionManager) processBatch(
 	}
 
 	tm.services.Logger.Info().Int64("tasks", totalTasks).Int64("solutions", totalSolutions).Int64("commitments", totalCommitments).Int64("claims", totalClaims).Msg("pending totals")
+
+	if !isProfitable {
+		tm.services.Logger.Info().Str("profit_mode", profitMode).Str("min_profit", minProfitFmt).Str("max_profit", fmt.Sprintf("%.4g", maxProfit)).Msg("not profitable to process batch")
+		return
+	}
 
 	tm.services.Logger.Info().Str("profit_mode", profitMode).Str("min_profit", minProfitFmt).Msg("profit criteria met - processing batch")
 
@@ -997,6 +996,7 @@ func (tm *BatchTransactionManager) processBatch(
 					// if we have a non zero block no, there is already a commitment for this task, so delete it
 					if blockNo.Cmp(utils.Zero) != 0 {
 						if taskId, found := commitmentsToTaskMap[commitment]; found {
+							// Found on chain, but not in *this* batch's logs. Still needs cleanup/status update.
 							commitmentsToUpdateAndDelete = append(commitmentsToUpdateAndDelete, taskId)
 						}
 						tm.services.Logger.Warn().Str("commitment", commitmentStr).Msg("commitment was already accepted")
@@ -1006,33 +1006,28 @@ func (tm *BatchTransactionManager) processBatch(
 				}
 			}
 
+			// Delete local commitments now that they are confirmed on-chain (or found to be already confirmed)
 			if len(commitmentsToUpdateAndDelete) > 0 {
 				if err := deleteCommitments(commitmentsToUpdateAndDelete); err != nil {
 					return err
 				}
 			}
-			// if len(commitmentsToDelete) > 0 {
-			// 	err := tm.services.TaskStorage.DeleteProcessedCommitments(commitmentsToDelete)
-			// 	if err != nil {
-			// 		tm.services.Logger.Error().Err(err).Msg("error deleting processed commitments from storage")
-			// 	}
-			// }
 
 			unacceptedCommitment := len(batchCommitments) - len(signalledCommitments)
 			if unacceptedCommitment > 0 {
 				tm.services.Logger.Warn().Int("unaccepted", unacceptedCommitment).Msg("⚠️ commitments not accepted ⚠️")
 			}
 
-			if len(signalledCommitments) > 0 {
+			if len(commitmentsToUpdateAndDelete) > 0 { // Check if there are tasks to update status for
 
-				costPerCommitment := tm.services.Config.BaseConfig.BaseToken.ToFloat(txCost) / float64(len(signalledCommitments))
+				costPerCommitment := tm.services.Config.BaseConfig.BaseToken.ToFloat(txCost) / float64(len(commitmentsToUpdateAndDelete))
 
 				err = tm.services.TaskStorage.UpdateTaskStatusAndCost(commitmentsToUpdateAndDelete, 2, costPerCommitment)
 				if err != nil {
 					tm.services.Logger.Error().Err(err).Msg("error updating task data in storage")
 					return err
 				}
-				tm.services.Logger.Info().Int("accepted", len(signalledCommitments)).Float64("cost_per_commit", costPerCommitment).Msg("✅ submitted commitments")
+				tm.services.Logger.Info().Int("accepted", len(commitmentsToUpdateAndDelete)).Float64("cost_per_commit", costPerCommitment).Msg("✅ submitted commitments")
 
 			}
 
