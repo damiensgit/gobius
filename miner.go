@@ -523,14 +523,14 @@ func main() {
 			verifyClaims(&logger, appContext)
 		case "taskcheck":
 			taskCheck(&logger, appContext)
+		case "verifyalltasks":
+			verifyAllTasks(appContext)
 		case "verifysolutions":
 			verifySolutions(appContext)
 		case "verifycommitments":
 			verifyCommitment(appContext)
 		case "blockmonitor":
 			blockMonitor(appContext, rpcClient)
-		case "verifyqueuedtasks":
-			verifyQueuedTasks(appContext)
 		case "recoverstale":
 			recoverStaleTasks(appContext)
 		case "claimbatchinfo":

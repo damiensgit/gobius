@@ -431,7 +431,7 @@ func getBatchPricingInfo(ctx context.Context) error {
 	return nil
 }
 
-func verifyQueuedTasks(ctx context.Context) error {
+func verifyAllTasks(ctx context.Context) error {
 
 	// Get the services from the context
 
@@ -440,42 +440,186 @@ func verifyQueuedTasks(ctx context.Context) error {
 		log.Fatal("Could not get services from context")
 	}
 
-	queuedTasks, err := services.TaskStorage.GetQueuedTasks()
+	allTasks, err := services.TaskStorage.GetAllTasks()
 	if err != nil {
 		services.Logger.Fatal().Err(err).Msg("could not get claims in storage")
 	}
 
-	services.Logger.Info().Int("total", len(queuedTasks)).Msg("verifying queued tasks")
+	// get all solutions from storage
+	solutions, err := services.TaskStorage.GetAllSolutions()
+	if err != nil {
+		services.Logger.Fatal().Err(err).Msg("could not get solutions from storage")
+	}
 
-	s := spinner.New(spinner.CharSets[11], 500*time.Millisecond)
+	// make a map of solutions by taskid
+	solutionsMap := make(map[task.TaskId]storage.TaskData)
+	for _, solution := range solutions {
+		solutionsMap[solution.TaskId] = solution
+	}
+
+	// get all commitments from storage
+	commitments, err := services.TaskStorage.GetAllCommitments()
+	if err != nil {
+		services.Logger.Fatal().Err(err).Msg("could not get commitments from storage")
+	}
+
+	// make a map of commitments by taskid
+	commitmentsMap := make(map[task.TaskId]storage.TaskData)
+	for _, commitment := range commitments {
+		commitmentsMap[commitment.TaskId] = commitment
+	}
+
+	services.Logger.Info().Int("total", len(allTasks)).Msg("verifying all tasks")
+
+	var commitmentsToDelete []task.TaskId
+	var solutionsToDelete []task.TaskId
+
+	s := spinner.New(spinner.CharSets[11], 500*time.Millisecond, spinner.WithWriter(os.Stderr))
 	s.Suffix = " processing tasks..."
 	s.FinalMSG = "completed!\n"
 	s.Start()
-	totalItemstoProcess := len(queuedTasks)
+	totalItemstoProcess := len(allTasks)
 	deleted := 0
-	for index, v := range queuedTasks {
-		res, err := services.Engine.Engine.Solutions(nil, v.TaskId)
+	claimable := 0
+	tasksUpdated := 0
+	for index, v := range allTasks {
+		res, err := services.Engine.Engine.Solutions(nil, v.Taskid)
 
 		if err != nil {
 			services.Logger.Fatal().Err(err).Msg("error getting solution information")
 		}
 
 		if res.Blocktime > 0 {
-			err := services.TaskStorage.DeleteTask(v.TaskId)
-			if err != nil {
-				services.Logger.Fatal().Err(err).Msg("could delete task data key")
+			// if the task is claimed, delete the task from storage and flag any commitments and solutions to delete
+			if res.Claimed {
+				// delete the task from storage
+				err := services.TaskStorage.DeleteTask(v.Taskid)
+				if err != nil {
+					services.Logger.Fatal().Err(err).Msg("could delete task data key")
+				}
+				deleted++
+			} else {
+				// if the task is not claimed, make sure the task is updated for claims
+				claimTime := time.Unix(int64(res.Blocktime), 0)
+
+				err = services.TaskStorage.UpsertTaskToClaimable(v.Taskid, common.Hash{}, claimTime)
+				if err != nil {
+					services.Logger.Error().Err(err).Msg("error updating task in storage")
+				}
+				claimable++
 			}
-			deleted++
+			// flag any commitments and solutions to delete
+			commitmentsToDelete = append(commitmentsToDelete, v.Taskid)
+			solutionsToDelete = append(solutionsToDelete, v.Taskid)
+		} else {
+			taskStatusToSet := int64(0)
+			shouldDeleteCommitment := false
+			shouldDeleteSolution := false
+
+			commitmentData, hasLocalCommitment := commitmentsMap[v.Taskid]
+			_, hasLocalSolution := solutionsMap[v.Taskid]
+
+			if !hasLocalCommitment {
+				// Case 1: No local commitment. Task needs to start over.
+				taskStatusToSet = 0
+				if hasLocalSolution {
+					// If there's an orphaned local solution without a commitment, delete it.
+					shouldDeleteSolution = true
+					services.Logger.Debug().Str("taskid", v.Taskid.String()).Msg("No local commitment, deleting orphaned local solution.")
+				} else {
+					services.Logger.Debug().Str("taskid", v.Taskid.String()).Msg("No local commitment, setting status to 0.")
+				}
+			} else {
+				// Case 2: Local commitment exists. Check its on-chain status and local solution presence.
+				isOnChainCommitment := false
+				if commitmentData.Commitment != [32]byte{} {
+					block, err := services.Engine.Engine.Commitments(nil, commitmentData.Commitment)
+					if err != nil {
+						services.Logger.Error().Err(err).Str("taskid", v.Taskid.String()).Msg("Error checking on-chain commitment status, skipping task update.")
+						continue // Skip update for this task if chain check fails
+					}
+					isOnChainCommitment = block.Uint64() > 0
+				} else {
+					// Commitment record exists locally but hash is zero - invalid state.
+					services.Logger.Warn().Str("taskid", v.Taskid.String()).Msg("Local commitment record found with zero hash, treating as invalid.")
+					// Treat as needing to start over.
+					taskStatusToSet = 0
+					shouldDeleteCommitment = true // Delete the invalid record
+					if hasLocalSolution {
+						shouldDeleteSolution = true // Delete potentially related solution
+					}
+				}
+
+				if !hasLocalSolution {
+					// Case 2a: Local commitment, but no local solution. Need to regenerate both.
+					taskStatusToSet = 0
+					shouldDeleteCommitment = true // Delete stale commitment
+					services.Logger.Debug().Str("taskid", v.Taskid.String()).Bool("has_onchain_commitment", isOnChainCommitment).Msg("Local commitment found, but no local solution. Setting status to 0, deleting commitment.")
+				} else {
+					// Case 2b: Local commitment AND local solution exist.
+					if isOnChainCommitment {
+						// Subcase: Commitment is confirmed on-chain. Ready for solution submission.
+						taskStatusToSet = 2
+						shouldDeleteCommitment = true // Commitment is on-chain, remove local record
+						services.Logger.Debug().Str("taskid", v.Taskid.String()).Msg("Local commitment confirmed on-chain, local solution exists. Setting status to 2, deleting commitment record.")
+					} else {
+						// Subcase: Commitment is NOT yet on-chain. Need to retry commitment.
+						taskStatusToSet = 0           // Reset to ensure commitment is handled first.
+						shouldDeleteCommitment = true // Delete local commitment as it's not valid/confirmed
+						shouldDeleteSolution = true   // Delete corresponding solution as commitment needs redo
+						services.Logger.Debug().Str("taskid", v.Taskid.String()).Msg("Local commitment NOT confirmed on-chain, local solution exists. Setting status to 0, deleting commitment and solution.")
+					}
+				}
+			}
+
+			// Add to delete lists if flagged
+			if shouldDeleteCommitment {
+				commitmentsToDelete = append(commitmentsToDelete, v.Taskid)
+			}
+			if shouldDeleteSolution {
+				solutionsToDelete = append(solutionsToDelete, v.Taskid)
+			}
+
+			// Update task status in storage only if it has changed
+			if taskStatusToSet != v.Status {
+				// Note: Using v.Taskid here, assuming AddOrUpdateTaskWithStatus doesn't need solution details for status update
+				err = services.TaskStorage.AddOrUpdateTaskWithStatus(v.Taskid, common.Hash{}, taskStatusToSet)
+				if err != nil {
+					services.Logger.Error().Err(err).Str("taskid", v.Taskid.String()).Int64("targetStatus", taskStatusToSet).Msg("Error updating task status in storage")
+				} else {
+					tasksUpdated++
+					services.Logger.Info().Str("taskid", v.Taskid.String()).Int64("oldStatus", v.Status).Int64("newStatus", taskStatusToSet).Msg("Task status updated.")
+				}
+			} else {
+				services.Logger.Debug().Str("taskid", v.Taskid.String()).Int64("status", v.Status).Msg("Task is already in the correct state.")
+			}
 		}
 
-		s.Suffix = fmt.Sprintf(" processing tasks [%d/%d] [deleted: %d]\n", index, totalItemstoProcess, deleted)
+		s.Suffix = fmt.Sprintf(" processing tasks [%d/%d] [deleted: %d] [claimable: %d] [updated: %d]\n", index+1, totalItemstoProcess, deleted, claimable, tasksUpdated) // Updated suffix
+	}
 
+	if len(commitmentsToDelete) > 0 {
+		services.Logger.Info().Int("commitments", len(commitmentsToDelete)).Msg("deleting commitments")
+		err := services.TaskStorage.DeleteProcessedCommitments(commitmentsToDelete)
+		if err != nil {
+			services.Logger.Error().Err(err).Msg("error deleting commitments from storage")
+		}
+	}
+
+	if len(solutionsToDelete) > 0 {
+		services.Logger.Info().Int("solutions", len(solutionsToDelete)).Msg("deleting solutions")
+		err := services.TaskStorage.DeleteProcessedSolutions(solutionsToDelete)
+		if err != nil {
+			services.Logger.Error().Err(err).Msg("error deleting solutions from storage")
+		}
 	}
 
 	s.Stop()
 
-	services.Logger.Info().Int("deleted", deleted).Msg("completed verifying queued tasks 	")
-
+	services.Logger.Info().Msg("completed verifying queued tasks 	")
+	services.Logger.Info().Int("deleted", deleted).Msg("deleted tasks")
+	services.Logger.Info().Int("claimable", claimable).Msg("claimable tasks")
+	services.Logger.Info().Int("updated", tasksUpdated).Msg("updated tasks (status)")
 	return nil
 }
 
@@ -586,7 +730,6 @@ func verifySolutions(ctx context.Context) error {
 			blockNo := block.Uint64()
 			if blockNo > 0 {
 				commitmentsToDelete = append(commitmentsToDelete, t.TaskId)
-				t.Commitment = [32]byte{}
 			}
 		}
 
@@ -1019,6 +1162,8 @@ func recoverStaleTasks(ctx context.Context) error {
 		services.Logger.Error().Err(err).Msg("error recovering stale tasks")
 		return err
 	}
+
+	services.Logger.Info().Msg("completed recovering stale tasks")
 
 	return nil
 }
