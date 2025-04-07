@@ -565,6 +565,9 @@ func verifySolutions(ctx context.Context) error {
 	s.FinalMSG = "completed!\n"
 	s.Start()
 	totalItemstoProcess := len(tasks)
+	claimedAlready := 0
+	toClaim := 0
+	tasksUpdated := 0
 	for index, t := range tasks {
 		s.Suffix = fmt.Sprintf(" processing tasks [%d/%d]", index, totalItemstoProcess)
 
@@ -597,6 +600,7 @@ func verifySolutions(ctx context.Context) error {
 		if res.Blocktime > 0 {
 
 			if res.Claimed {
+				claimedAlready++
 				services.Logger.Warn().Msgf("task %s was claimed by %s", t.TaskId.String(), res.Validator.String())
 				// delete the task from storage
 				err := services.TaskStorage.DeleteTask(t.TaskId)
@@ -604,19 +608,28 @@ func verifySolutions(ctx context.Context) error {
 					services.Logger.Error().Err(err).Msg("error deleting task from storage")
 				}
 			} else {
+				toClaim++
 				// update the task in storage with claim information
 				// set empty txhash as we know the task exists in and will be updated
-				err = services.TaskStorage.UpsertTaskToClaimable(t.TaskId, common.Hash{}, time.Now())
+				claimTime := time.Unix(int64(res.Blocktime), 0)
+				err = services.TaskStorage.UpsertTaskToClaimable(t.TaskId, common.Hash{}, claimTime)
 				if err != nil {
 					services.Logger.Error().Err(err).Msg("error updating task in storage")
 				}
 			}
 			solvedByMap[res.Validator] = solvedByMap[res.Validator] + 1
 			// Flag we need to delete both the commitment and the solution
-			t.Commitment = [32]byte{}
-			t.Solution = nil
 			solutionsToDelete = append(solutionsToDelete, t.TaskId)
-			commitmentsToDelete = append(commitmentsToDelete, t.TaskId)
+			//commitmentsToDelete = append(commitmentsToDelete, t.TaskId)
+		} else {
+			// ok so nothing onchain for this solution
+			// it now needs to be submitted so set corect task state
+			err = services.TaskStorage.AddOrUpdateTaskWithStatus(t.TaskId, common.Hash{}, 2)
+			if err != nil {
+				services.Logger.Error().Err(err).Msg("error updating task in storage")
+			} else {
+				tasksUpdated++
+			}
 		}
 	}
 
@@ -635,6 +648,9 @@ func verifySolutions(ctx context.Context) error {
 	for owner, v := range solvedByMap {
 		services.Logger.Info().Int("tasks", v).Str("val", owner.String()).Msg("solved tasks per validator")
 	}
+	services.Logger.Info().Int("tasks_updated", tasksUpdated).Msg("tasks updated to push solutions")
+	services.Logger.Info().Int("tasks_to_claim", toClaim).Msg("tasks to claim")
+	services.Logger.Info().Int("tasks_claimed_already", claimedAlready).Msg("tasks claimed already")
 	return nil
 
 }
