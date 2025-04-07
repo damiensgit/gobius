@@ -207,8 +207,7 @@ INSERT INTO tasks (taskid, txhash, status, claimtime)
 VALUES (?, ?, 3, ?)
 ON CONFLICT(taskid) DO UPDATE SET
     status = 3,
-    claimtime = excluded.claimtime,
-    txhash = excluded.txhash; -- Keep txhash updated too
+    claimtime = excluded.claimtime;
 
 -- name: CheckCommitmentExists :one
 SELECT EXISTS(SELECT 1 FROM commitments WHERE taskid = ?); 

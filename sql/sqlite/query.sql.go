@@ -123,11 +123,9 @@ func (q *Queries) AddTasks(ctx context.Context, arg AddTasksParams) error {
 }
 
 const checkCommitmentExists = `-- name: CheckCommitmentExists :one
-
 SELECT EXISTS(SELECT 1 FROM commitments WHERE taskid = ?)
 `
 
-// Keep txhash updated too
 func (q *Queries) CheckCommitmentExists(ctx context.Context, taskid task.TaskId) (int64, error) {
 	row := q.db.QueryRowContext(ctx, checkCommitmentExists, taskid)
 	var column_1 int64
@@ -783,8 +781,7 @@ INSERT INTO tasks (taskid, txhash, status, claimtime)
 VALUES (?, ?, 3, ?)
 ON CONFLICT(taskid) DO UPDATE SET
     status = 3,
-    claimtime = excluded.claimtime,
-    txhash = excluded.txhash
+    claimtime = excluded.claimtime
 `
 
 type UpsertTaskToClaimableParams struct {

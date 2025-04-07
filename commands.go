@@ -595,12 +595,28 @@ func verifySolutions(ctx context.Context) error {
 		}
 
 		if res.Blocktime > 0 {
+
+			if res.Claimed {
+				services.Logger.Warn().Msgf("task %s was claimed by %s", t.TaskId.String(), res.Validator.String())
+				// delete the task from storage
+				err := services.TaskStorage.DeleteTask(t.TaskId)
+				if err != nil {
+					services.Logger.Error().Err(err).Msg("error deleting task from storage")
+				}
+			} else {
+				// update the task in storage with claim information
+				// set empty txhash as we know the task exists in and will be updated
+				err = services.TaskStorage.UpsertTaskToClaimable(t.TaskId, common.Hash{}, time.Now())
+				if err != nil {
+					services.Logger.Error().Err(err).Msg("error updating task in storage")
+				}
+			}
 			solvedByMap[res.Validator] = solvedByMap[res.Validator] + 1
-			solutionsToDelete = append(solutionsToDelete, t.TaskId)
-			commitmentsToDelete = append(commitmentsToDelete, t.TaskId)
 			// Flag we need to delete both the commitment and the solution
 			t.Commitment = [32]byte{}
 			t.Solution = nil
+			solutionsToDelete = append(solutionsToDelete, t.TaskId)
+			commitmentsToDelete = append(commitmentsToDelete, t.TaskId)
 		}
 	}
 
