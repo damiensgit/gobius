@@ -698,6 +698,16 @@ func verifySolutions(ctx context.Context) error {
 		services.Logger.Err(err).Msg("failed to get tasks from storage")
 	}
 
+	commitments, err := services.TaskStorage.GetAllCommitments()
+	if err != nil {
+		services.Logger.Err(err).Msg("failed to get tasks from storage")
+	}
+
+	commitmentsMap := make(map[task.TaskId]storage.TaskData)
+	for _, commitment := range commitments {
+		commitmentsMap[commitment.TaskId] = commitment
+	}
+
 	services.Logger.Info().Int("solutions", len(tasks)).Msg("verifying solutions")
 
 	var commitmentsToDelete []task.TaskId
@@ -765,13 +775,76 @@ func verifySolutions(ctx context.Context) error {
 			solutionsToDelete = append(solutionsToDelete, t.TaskId)
 			//commitmentsToDelete = append(commitmentsToDelete, t.TaskId)
 		} else {
-			// ok so nothing onchain for this solution
-			// it now needs to be submitted so set corect task state
-			err = services.TaskStorage.AddOrUpdateTaskWithStatus(t.TaskId, common.Hash{}, 2)
-			if err != nil {
-				services.Logger.Error().Err(err).Msg("error updating task in storage")
+			// No solution on-chain: Determine state based on local commitment and on-chain commitment
+			// We know we have a local solution because we are iterating through GetAllSolutions()
+			log.Printf("DEBUG: Task %s has no solution on-chain. Checking local/on-chain commitment...", t.TaskId.String())
+
+			taskStatusToSet := int64(0) // Default: Requeue/Generate Commitment (Status 0)
+			shouldDeleteCommitment := false
+			shouldDeleteSolution := false // Will be true if we reset to status 0
+
+			commitmentData, hasLocalCommitment := commitmentsMap[t.TaskId]
+
+			if !hasLocalCommitment {
+				// Case 1: Orphaned local solution (no local commitment). Task needs to start over.
+				taskStatusToSet = 0
+				shouldDeleteSolution = true
+				services.Logger.Debug().Str("taskid", t.TaskId.String()).Msg("Local solution found, but no local commitment. Setting status to 0, deleting solution.")
 			} else {
-				tasksUpdated++
+				// Case 2: Local commitment AND local solution exist. Check commitment's on-chain status.
+				isOnChainCommitment := false
+				if commitmentData.Commitment != [32]byte{} {
+					block, err := services.Engine.Engine.Commitments(nil, commitmentData.Commitment)
+					if err != nil {
+						services.Logger.Error().Err(err).Str("taskid", t.TaskId.String()).Msg("Error checking on-chain commitment status, skipping task update.")
+						continue // Skip update for this task if chain check fails
+					}
+					isOnChainCommitment = block.Uint64() > 0
+				} else {
+					// Commitment record exists locally but hash is zero - invalid state.
+					services.Logger.Warn().Str("taskid", t.TaskId.String()).Msg("Local commitment record found with zero hash, treating as invalid.")
+					// Treat as needing to start over.
+					taskStatusToSet = 0
+					shouldDeleteCommitment = true // Delete the invalid record
+					shouldDeleteSolution = true   // Delete the solution as well
+				}
+
+				// Determine status based on on-chain commitment presence
+				if isOnChainCommitment {
+					// Subcase: Commitment is confirmed on-chain. Ready for solution submission.
+					taskStatusToSet = 2
+					shouldDeleteCommitment = true // Commitment is on-chain, remove local record
+					services.Logger.Debug().Str("taskid", t.TaskId.String()).Msg("Local commitment confirmed on-chain, local solution exists. Setting status to 2, deleting commitment record.")
+				} else {
+					// Subcase: Commitment is NOT yet on-chain. Need to retry commitment.
+					taskStatusToSet = 0           // Reset to ensure commitment is handled first.
+					shouldDeleteCommitment = true // Delete local commitment as it's not valid/confirmed
+					shouldDeleteSolution = true   // Delete corresponding solution as commitment needs redo
+					services.Logger.Debug().Str("taskid", t.TaskId.String()).Msg("Local commitment NOT confirmed on-chain, local solution exists. Setting status to 0, deleting commitment and solution.")
+				}
+			}
+
+			// Perform deletions if flagged
+			if shouldDeleteCommitment {
+				err = services.TaskStorage.DeleteProcessedCommitments([]task.TaskId{t.TaskId})
+				if err != nil {
+					log.Printf("WARN: Failed to delete local commitment for task %s: %v", t.TaskId.String(), err)
+				}
+			}
+			if shouldDeleteSolution {
+				err = services.TaskStorage.DeleteProcessedSolutions([]task.TaskId{t.TaskId})
+				if err != nil {
+					log.Printf("WARN: Failed to delete local solution for task %s: %v", t.TaskId.String(), err)
+				}
+			}
+
+			// Update task status in storage
+			err = services.TaskStorage.AddOrUpdateTaskWithStatus(t.TaskId, common.Hash{}, taskStatusToSet)
+			if err != nil {
+				log.Printf("WARN: Failed to add/update task %s to status %d: %v", t.TaskId.String(), taskStatusToSet, err)
+			} else {
+				log.Printf("Set task %s status to %d", t.TaskId.String(), taskStatusToSet)
+				tasksUpdated++ // Count as added/updated
 			}
 		}
 	}
@@ -1196,16 +1269,32 @@ func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *cl
 		return
 	}
 
+	// Initialize maps in the outer scope
+	commitmentMap := make(map[task.TaskId]storage.TaskData)
+	solutionsMap := make(map[task.TaskId]storage.TaskData)
+
 	// first get all commitments from the db
 	commitments, err := services.TaskStorage.GetAllCommitments()
 	if err != nil {
-		log.Printf("WARN: Failed to get all commitments from storage: %v", err)
+		log.Printf("ERROR: Failed to get all commitments from storage: %v", err)
 		return
 	}
-	// loop throught all commitments and add them to a map
-	commitmentMap := make(map[task.TaskId]storage.TaskData)
+
+	// loop through all commitments and add them to a map
 	for _, commitment := range commitments {
 		commitmentMap[commitment.TaskId] = commitment
+	}
+
+	// Fetch all local solutions as well
+	solutions, err := services.TaskStorage.GetAllSolutions()
+	if err != nil {
+		log.Printf("ERROR: Failed to get all solutions from storage: %v", err)
+		return
+	}
+
+	// loop through all solutions and add them to a map
+	for _, solution := range solutions {
+		solutionsMap[solution.TaskId] = solution
 	}
 
 	log.Printf("Scanning for unsolved tasks from block %d to %d", fromBlock, endBlock)
@@ -1340,72 +1429,77 @@ func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *cl
 						continue
 					}
 				} else {
-					// No solution on-chain: Determine state based on commitment
+					// No solution on-chain: Determine state based on local commitment and on-chain commitment
+					// We know we have a local solution because we are iterating through GetAllSolutions()
 					log.Printf("DEBUG: Task %s has no solution on-chain. Checking local/on-chain commitment...", taskId.String())
 
-					addOrUpdateTask := func(status int64) {
-						err = services.TaskStorage.AddOrUpdateTaskWithStatus(taskId, currentlog.TxHash, status)
-						if err != nil {
-							log.Printf("WARN: Failed to add/update task %s to status %d: %v", taskId.String(), status, err)
-						} else {
-							log.Printf("Set task %s status to %d (Tx: %s)", taskId.String(), status, currentlog.TxHash.Hex())
-							totalAdded++
-						}
-					}
+					taskStatusToSet := int64(0) // Default: Requeue/Generate Commitment (Status 0)
+					shouldDeleteCommitment := false
+					shouldDeleteSolution := false // Will be true if we reset to status 0
 
-					targetStatus := int64(0) // Default to queued
+					commitmentData, hasLocalCommitment := commitmentMap[taskId]
 
-					// 1. Check local commitment
-					commitmentLocal, hasLocalCommitment := commitmentMap[taskId]
-					if hasLocalCommitment {
-						if commitmentLocal.Commitment != [32]byte{} {
-							// Check if this local commitment exists on-chain
-							block, err := services.Engine.Engine.Commitments(nil, commitmentLocal.Commitment)
-							if err != nil {
-								services.Logger.Error().Err(err).Str("task", taskId.String()).Msg("error getting on-chain commitment status, skipping task update")
-								continue // Skip this task if we can't check chain state
-							}
-
-							if block.Uint64() > 0 {
-								// On-chain commitment exists for our local commitment hash
-								log.Printf("DEBUG: Task %s has local commitment matching on-chain commitment. Setting status=2.", taskId.String())
-								targetStatus = 2 // Ready for solution submission
-								// Delete the now-redundant local commitment record
-								err = services.TaskStorage.DeleteProcessedCommitments([]task.TaskId{taskId})
-								if err != nil {
-									log.Printf("WARN: Failed to delete local commitment for task %s after confirming on-chain: %v", taskId.String(), err)
-								}
-							} else {
-								// Local commitment exists, but NOT found on-chain (stale/invalid?)
-								log.Printf("DEBUG: Task %s has local commitment, but it's not found on-chain. Setting status=0.", taskId.String())
-								targetStatus = 0 // Needs re-queuing
-								// Do not delete local commitment here, might be useful later
-							}
-						} else {
-							// Local commitment record exists but hash is zero? Data inconsistency.
-							log.Printf("WARN: Task %s has local commitment record with zero hash. Setting status=0.", taskId.String())
-							targetStatus = 0
-						}
+					if !hasLocalCommitment {
+						// Case 1: Orphaned local solution (no local commitment). Task needs to start over.
+						taskStatusToSet = 0
+						shouldDeleteSolution = true
+						services.Logger.Debug().Str("taskid", taskId.String()).Msg("Local solution found, but no local commitment. Setting status to 0, deleting solution.")
 					} else {
-						// No local commitment found
-						log.Printf("DEBUG: Task %s has no local commitment. Setting status=0.", taskId.String())
-						targetStatus = 0
+						// Case 2: Local commitment AND local solution exist. Check commitment's on-chain status.
+						isOnChainCommitment := false
+						if commitmentData.Commitment != [32]byte{} {
+							block, err := services.Engine.Engine.Commitments(nil, commitmentData.Commitment)
+							if err != nil {
+								services.Logger.Error().Err(err).Str("taskid", taskId.String()).Msg("Error checking on-chain commitment status, skipping task update.")
+								continue // Skip update for this task if chain check fails
+							}
+							isOnChainCommitment = block.Uint64() > 0
+						} else {
+							// Commitment record exists locally but hash is zero - invalid state.
+							services.Logger.Warn().Str("taskid", taskId.String()).Msg("Local commitment record found with zero hash, treating as invalid.")
+							// Treat as needing to start over.
+							taskStatusToSet = 0
+							shouldDeleteCommitment = true // Delete the invalid record
+							shouldDeleteSolution = true   // Delete the solution as well
+						}
+
+						// Determine status based on on-chain commitment presence
+						if isOnChainCommitment {
+							// Subcase: Commitment is confirmed on-chain. Ready for solution submission.
+							taskStatusToSet = 2
+							shouldDeleteCommitment = true // Commitment is on-chain, remove local record
+							services.Logger.Debug().Str("taskid", taskId.String()).Msg("Local commitment confirmed on-chain, local solution exists. Setting status to 2, deleting commitment record.")
+						} else {
+							// Subcase: Commitment is NOT yet on-chain. Need to retry commitment.
+							taskStatusToSet = 0           // Reset to ensure commitment is handled first.
+							shouldDeleteCommitment = true // Delete local commitment as it's not valid/confirmed
+							shouldDeleteSolution = true   // Delete corresponding solution as commitment needs redo
+							services.Logger.Debug().Str("taskid", taskId.String()).Msg("Local commitment NOT confirmed on-chain, local solution exists. Setting status to 0, deleting commitment and solution.")
+						}
 					}
 
-					// If task is being reset to queue (status 0), ensure no orphaned solution exists
-					if targetStatus == 0 {
+					// Perform deletions if flagged
+					if shouldDeleteCommitment {
+						err = services.TaskStorage.DeleteProcessedCommitments([]task.TaskId{taskId})
+						if err != nil {
+							log.Printf("WARN: Failed to delete local commitment for task %s: %v", taskId.String(), err)
+						}
+					}
+					if shouldDeleteSolution {
 						err = services.TaskStorage.DeleteProcessedSolutions([]task.TaskId{taskId})
 						if err != nil {
-							// Log the error but proceed with setting status to 0
-							log.Printf("WARN: Failed to delete potential orphaned solution for task %s: %v", taskId.String(), err)
+							log.Printf("WARN: Failed to delete local solution for task %s: %v", taskId.String(), err)
 						}
 					}
 
-					// Update the task status once based on the determined state
-					addOrUpdateTask(targetStatus)
-
-					// Removed the check for local solution status here as it's irrelevant
-					// when there's no on-chain solution.
+					// Update task status in storage, using the TxHash from the log event
+					err = services.TaskStorage.AddOrUpdateTaskWithStatus(taskId, common.Hash{}, taskStatusToSet)
+					if err != nil {
+						log.Printf("WARN: Failed to add/update task %s to status %d: %v", taskId.String(), taskStatusToSet, err)
+					} else {
+						log.Printf("Set task %s status to %d (Tx: %s)", taskId.String(), taskStatusToSet, currentlog.TxHash.Hex())
+						totalAdded++ // Count as added/updated
+					}
 				}
 			}
 

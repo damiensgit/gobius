@@ -235,17 +235,12 @@ func (ts *TaskStorageDB) AddTasksToClaim(taskIds []task.TaskId, value float64) (
 	return claimTime, nil
 }
 
-func (ts *TaskStorageDB) DeleteClaim(taskkey string) error {
-	return nil
-}
-
 func (ts *TaskStorageDB) DeleteClaims(tasks []task.TaskId) error {
 	tx, err := ts.sqlite.Begin()
 	if err != nil {
 		return err
 	}
 	qtx := ts.queries.WithTx(tx)
-	start := time.Now()
 
 	defer tx.Rollback()
 
@@ -258,7 +253,6 @@ func (ts *TaskStorageDB) DeleteClaims(tasks []task.TaskId) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	ts.logger.Println("DeleteClaims time:", time.Since(start))
 
 	return nil
 
@@ -416,6 +410,33 @@ func (ts *TaskStorageDB) UpdateTaskStatusAndCost(tasks []task.TaskId, status int
 			Taskid:        taskId,
 			Cumulativegas: value,
 			Status:        status,
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (ts *TaskStorageDB) UpdateTaskStatusOnly(tasks []task.TaskId, status int64) error {
+	// start a transaction
+	tx, err := ts.sqlite.Begin()
+	if err != nil {
+		return err
+	}
+	qtx := ts.queries.WithTx(tx)
+
+	defer tx.Rollback()
+
+	for _, taskId := range tasks {
+		_, err := qtx.UpdateTaskStatus(ts.ctx, db.UpdateTaskStatusParams{
+			Taskid: taskId,
+			Status: status,
 		})
 		if err != nil {
 			return err
