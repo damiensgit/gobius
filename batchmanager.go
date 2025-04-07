@@ -729,20 +729,19 @@ func (tm *BatchTransactionManager) processBatch(
 				tm.services.Logger.Error().Err(err).Msg("error deleting commitment(s) from storage")
 				return err
 			}
-			tm.services.Logger.Warn().Msgf("deleted %d commitments from storage", len(_commitmentsToDelete))
+			tm.services.Logger.Warn().Msgf("deleted %d task commitments from storage that are already committed on-chain", len(_commitmentsToDelete))
 		}
 		return nil
 	}
 
 	deleteSolutions := func(_solutionsToDelete []task.TaskId) error {
 		if len(_solutionsToDelete) > 0 {
-			tm.services.Logger.Warn().Msgf("deleting %d solutions from storage", len(_solutionsToDelete))
-
 			err := tm.services.TaskStorage.DeleteProcessedSolutions(_solutionsToDelete)
 			if err != nil {
 				tm.services.Logger.Error().Err(err).Msg("error deleting solution(s) from storage")
 				return err
 			}
+			tm.services.Logger.Warn().Msgf("deleted %d task solutions from storage that are already submitted on-chain", len(_solutionsToDelete))
 		}
 		return nil
 	}
@@ -785,7 +784,6 @@ func (tm *BatchTransactionManager) processBatch(
 			blockNo := block.Uint64()
 			if blockNo > 0 {
 				// Commitment already exists on-chain
-				tm.services.Logger.Info().Str("taskid", t.TaskId.String()).Uint64("block", blockNo).Msg("Commitment already found on-chain. Marking for cleanup and status update to 2.")
 				commitmentsToDelete = append(commitmentsToDelete, t.TaskId)
 				tasksToUpdateToStatus2 = append(tasksToUpdateToStatus2, t.TaskId) // Mark for status update
 			} else {
@@ -809,7 +807,7 @@ func (tm *BatchTransactionManager) processBatch(
 				tm.services.Logger.Error().Err(err).Msg("error updating task status to 2 for on-chain commitments")
 				return nil, err
 			} else {
-				tm.services.Logger.Info().Int("count", len(tasksToUpdateToStatus2)).Msg("updated tasks status to committed, matching on-chain commitments")
+				tm.services.Logger.Info().Msgf("updated %s tasks to committed status, matching on-chain commitment status", len(tasksToUpdateToStatus2))
 			}
 		}
 
