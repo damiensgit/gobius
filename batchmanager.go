@@ -807,7 +807,7 @@ func (tm *BatchTransactionManager) processBatch(
 				tm.services.Logger.Error().Err(err).Msg("error updating task status to 2 for on-chain commitments")
 				return nil, err
 			} else {
-				tm.services.Logger.Info().Msgf("updated %s tasks to committed status, matching on-chain commitment status", len(tasksToUpdateToStatus2))
+				tm.services.Logger.Info().Msgf("updated %d tasks to committed status, matching on-chain commitment status", len(tasksToUpdateToStatus2))
 			}
 		}
 
