@@ -512,7 +512,12 @@ func verifyAllTasks(ctx context.Context) error {
 			commitmentsToDelete = append(commitmentsToDelete, v.Taskid)
 			solutionsToDelete = append(solutionsToDelete, v.Taskid)
 		} else {
-			taskStatusToSet := int64(0)
+			// No solution on-chain: Determine state based on local commitment and on-chain commitment
+			// We know we have a local solution because we are iterating through GetAllSolutions()
+			log.Printf("DEBUG: Task %s has no solution on-chain. Checking local/on-chain commitment...", v.Taskid.String())
+
+			// Initialize taskStatusToSet with the current status to only update if needed
+			taskStatusToSet := v.Status
 			shouldDeleteCommitment := false
 			shouldDeleteSolution := false
 
@@ -545,9 +550,7 @@ func verifyAllTasks(ctx context.Context) error {
 					// Treat as needing to start over.
 					taskStatusToSet = 0
 					shouldDeleteCommitment = true // Delete the invalid record
-					if hasLocalSolution {
-						shouldDeleteSolution = true // Delete potentially related solution
-					}
+					shouldDeleteSolution = true   // Delete potentially related solution
 				}
 
 				if !hasLocalSolution {
@@ -563,11 +566,13 @@ func verifyAllTasks(ctx context.Context) error {
 						shouldDeleteCommitment = true // Commitment is on-chain, remove local record
 						services.Logger.Debug().Str("taskid", v.Taskid.String()).Msg("Local commitment confirmed on-chain, local solution exists. Setting status to 2, deleting commitment record.")
 					} else {
-						// Subcase: Commitment is NOT yet on-chain. Need to retry commitment.
-						taskStatusToSet = 0           // Reset to ensure commitment is handled first.
-						shouldDeleteCommitment = true // Delete local commitment as it's not valid/confirmed
-						shouldDeleteSolution = true   // Delete corresponding solution as commitment needs redo
-						services.Logger.Debug().Str("taskid", v.Taskid.String()).Msg("Local commitment NOT confirmed on-chain, local solution exists. Setting status to 0, deleting commitment and solution.")
+						// Subcase: Commitment is NOT yet on-chain. Local solution exists.
+						// This is a valid state (e.g., status 1, ready for commitment submission).
+						// DO NOT change status or delete local records.
+						services.Logger.Debug().Str("taskid", v.Taskid.String()).Msg("Local commitment NOT confirmed on-chain, local solution exists. State is valid, no changes needed.")
+						// Ensure flags are false and taskStatusToSet remains v.Status
+						shouldDeleteCommitment = false
+						shouldDeleteSolution = false
 					}
 				}
 			}
@@ -781,7 +786,7 @@ func verifySolutions(ctx context.Context) error {
 
 			taskStatusToSet := int64(0) // Default: Requeue/Generate Commitment (Status 0)
 			shouldDeleteCommitment := false
-			shouldDeleteSolution := false // Will be true if we reset to status 0
+			shouldDeleteSolution := false
 
 			commitmentData, hasLocalCommitment := commitmentsMap[t.TaskId]
 
@@ -816,11 +821,11 @@ func verifySolutions(ctx context.Context) error {
 					shouldDeleteCommitment = true // Commitment is on-chain, remove local record
 					services.Logger.Debug().Str("taskid", t.TaskId.String()).Msg("Local commitment confirmed on-chain, local solution exists. Setting status to 2, deleting commitment record.")
 				} else {
-					// Subcase: Commitment is NOT yet on-chain. Need to retry commitment.
-					taskStatusToSet = 0           // Reset to ensure commitment is handled first.
-					shouldDeleteCommitment = true // Delete local commitment as it's not valid/confirmed
-					shouldDeleteSolution = true   // Delete corresponding solution as commitment needs redo
-					services.Logger.Debug().Str("taskid", t.TaskId.String()).Msg("Local commitment NOT confirmed on-chain, local solution exists. Setting status to 0, deleting commitment and solution.")
+					// Subcase: Commitment is NOT yet on-chain. Local solution exists.
+					// This is a valid state (e.g., status 1, ready for commitment submission).
+					// DO NOT change status or delete local records.
+					services.Logger.Debug().Str("taskid", t.TaskId.String()).Msg("Local commitment NOT confirmed on-chain, local solution exists. State is valid, no changes needed.")
+					continue
 				}
 			}
 
@@ -1470,11 +1475,12 @@ func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *cl
 							shouldDeleteCommitment = true // Commitment is on-chain, remove local record
 							services.Logger.Debug().Str("taskid", taskId.String()).Msg("Local commitment confirmed on-chain, local solution exists. Setting status to 2, deleting commitment record.")
 						} else {
-							// Subcase: Commitment is NOT yet on-chain. Need to retry commitment.
-							taskStatusToSet = 0           // Reset to ensure commitment is handled first.
-							shouldDeleteCommitment = true // Delete local commitment as it's not valid/confirmed
-							shouldDeleteSolution = true   // Delete corresponding solution as commitment needs redo
-							services.Logger.Debug().Str("taskid", taskId.String()).Msg("Local commitment NOT confirmed on-chain, local solution exists. Setting status to 0, deleting commitment and solution.")
+							// Subcase: Commitment is NOT yet on-chain. Local solution exists.
+							// This is a valid state (e.g., status 1, ready for commitment submission).
+							// DO NOT change status or delete local records.
+							services.Logger.Debug().Str("taskid", taskId.String()).Msg("Local commitment NOT confirmed on-chain, local solution exists. State is valid, no changes needed.")
+							// Skip to next log entry
+							continue
 						}
 					}
 
