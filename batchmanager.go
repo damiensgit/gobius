@@ -590,26 +590,37 @@ func (tm *BatchTransactionManager) processBatch(
 		return
 	}
 
+	totalTasksCount, totalTasksGasFloat, err := tm.services.TaskStorage.GetTotalTasksGas()
+	if err != nil {
+		tm.services.Logger.Error().Err(err).Msg("failed to get total tasks gas")
+		return
+	}
+
 	// auto mine fee per task
 	feePerTaskAsBig := tm.services.AutoMineParams.Fee
 	feePerTaskAsFloat := tm.services.Config.BaseConfig.BaseToken.ToFloat(feePerTaskAsBig)
 	totalQueued := float64(totalTasks + totalSolutions + totalCommitments + totalClaims)
 	totalAiusOnFee := totalQueued * feePerTaskAsFloat
-	totalAiusEarnings := totalQueued * rewardInAIUS
+	totalAiusEarnings := totalQueued * rewardInAIUS // reward in aius factors in the task fee already duh
+	totalSpentonGasInUSD := totalTasksGasFloat * ethPrice
+	totalProfitOfQueueInUsd := totalAiusEarnings*basePrice - totalSpentonGasInUSD
 
+	// total queue stats
 	tm.services.Logger.Info().
-		Int64("tasks", totalTasks).
-		Int64("solutions", totalSolutions).
-		Int64("commitments", totalCommitments).
-		Int64("claims", totalClaims).
+		Int64("tasks", totalTasks).             // total tasks in queue
+		Int64("tasks_count", totalTasksCount).  // total tasks in DB which might be higher due to stale tasks
+		Int64("solutions", totalSolutions).     // total solutions in queue
+		Int64("commitments", totalCommitments). // total commitments in queue
+		Int64("claims", totalClaims).           // total claims in queue
 		Msg("pending totals for batch queue")
 	tm.services.Logger.Info().
-		Str("total", fmt.Sprintf("%.8g", totalAiusOnFee)).
-		Msg("total aius spent on tasks in queue")
+		Str("total_aius", fmt.Sprintf("%.8g", totalAiusOnFee)).
+		Str("total_gas_usd", fmt.Sprintf("%.4g$", totalSpentonGasInUSD)).
+		Msg("total gas and aius spent on tasks in queue")
 	tm.services.Logger.Info().
-		Str("total", fmt.Sprintf("%.8g", totalAiusEarnings)).
-		Str("profit", fmt.Sprintf("%.8g", totalAiusEarnings-totalAiusOnFee)).
-		Msg("approx total aius reward & profit from pending queue")
+		Str("profit_aius", fmt.Sprintf("%.8g", totalAiusEarnings)).
+		Str("profit_usd", fmt.Sprintf("%.4g$", totalProfitOfQueueInUsd)).
+		Msg("approx total aius and usd profit from pending queue")
 
 	if !isProfitable {
 		tm.services.Logger.Info().Str("profit_mode", profitMode).Str("min_profit", minProfitFmt).Str("max_profit", fmt.Sprintf("%.4g", maxProfit)).Msg("not profitable to process batch")
@@ -637,6 +648,10 @@ func (tm *BatchTransactionManager) processBatch(
 		for _, task := range claims {
 			totalCost += task.TotalCost
 		}
+
+		// calculate the cost of the claims in aius using magic numbers
+		// 47_300 is the average gas per task
+		// 1_000_000_000.0 is to adjust for gas price in gwei
 		claimTasks := (47_300.0 / 1_000_000_000.0 * baseFee * float64(len(claims)))
 
 		tm.services.Logger.Warn().Msgf("** CHEAPEST BATCH WE CAN SEND OUT**")

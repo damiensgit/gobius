@@ -539,3 +539,17 @@ func (ts *TaskStorageDB) GetAllTasks() ([]db.Task, error) {
 
 	return tasks, err
 }
+
+func (ts *TaskStorageDB) GetTotalTasksGas() (int64, float64, error) {
+	data, err := ts.queries.GetTotalTasksGas(ts.ctx)
+
+	if err != nil {
+		return 0, 0.0, err
+	}
+
+	if data.Sum.Valid {
+		return data.Count, data.Sum.Float64, err
+	}
+
+	return data.Count, 0.0, err
+}

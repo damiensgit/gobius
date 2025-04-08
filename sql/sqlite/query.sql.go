@@ -7,6 +7,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 
 	common "github.com/ethereum/go-ethereum/common"
@@ -579,6 +580,22 @@ func (q *Queries) GetTasksByLowestCost(ctx context.Context, arg GetTasksByLowest
 		return nil, err
 	}
 	return items, nil
+}
+
+const getTotalTasksGas = `-- name: GetTotalTasksGas :one
+SELECT count(*), sum(cumulativeGas) FROM tasks
+`
+
+type GetTotalTasksGasRow struct {
+	Count int64
+	Sum   sql.NullFloat64
+}
+
+func (q *Queries) GetTotalTasksGas(ctx context.Context) (GetTotalTasksGasRow, error) {
+	row := q.db.QueryRowContext(ctx, getTotalTasksGas)
+	var i GetTotalTasksGasRow
+	err := row.Scan(&i.Count, &i.Sum)
+	return i, err
 }
 
 const popTask = `-- name: PopTask :one

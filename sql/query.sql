@@ -215,4 +215,5 @@ SELECT EXISTS(SELECT 1 FROM commitments WHERE taskid = ?);
 -- name: GetAllTasks :many
 SELECT * FROM tasks;
 
-
+-- name: GetTotalTasksGas :one
+SELECT count(*), sum(cumulativeGas) FROM tasks;
