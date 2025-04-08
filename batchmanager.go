@@ -482,7 +482,7 @@ func (tm *BatchTransactionManager) processBatch(
 	makeTasks := tm.services.Config.BatchTasks.Enabled && isProfitable && totalTasks < int64(tm.services.Config.BatchTasks.MinTasksInQueue) && tm.services.Config.BatchTasks.BatchSize > 0
 
 	// log above for debugging
-	tm.services.Logger.Info().Bool("makeTasks", makeTasks).Int64("totalTasks", totalTasks).Int("minTasksInQueue", tm.services.Config.BatchTasks.MinTasksInQueue).Int("batchSize", tm.services.Config.BatchTasks.BatchSize).Msg("batch conditions")
+	tm.services.Logger.Info().Bool("make_tasks", makeTasks).Int64("total_tasks", totalTasks).Int("min_tasks_in_queue", tm.services.Config.BatchTasks.MinTasksInQueue).Int("batch_size", tm.services.Config.BatchTasks.BatchSize).Msg("batch conditions")
 
 	taskBatchCount := tm.services.Config.BatchTasks.NumberOfBatches
 	taskBatchSize := tm.services.Config.BatchTasks.BatchSize
@@ -590,7 +590,26 @@ func (tm *BatchTransactionManager) processBatch(
 		return
 	}
 
-	tm.services.Logger.Info().Int64("tasks", totalTasks).Int64("solutions", totalSolutions).Int64("commitments", totalCommitments).Int64("claims", totalClaims).Msg("pending totals")
+	// auto mine fee per task
+	feePerTaskAsBig := tm.services.AutoMineParams.Fee
+	feePerTaskAsFloat := tm.services.Config.BaseConfig.BaseToken.ToFloat(feePerTaskAsBig)
+	totalQueued := float64(totalTasks + totalSolutions + totalCommitments + totalClaims)
+	totalAius := totalQueued * feePerTaskAsFloat
+	totalAiusEarnings := totalAius * rewardInAIUS
+
+	tm.services.Logger.Info().
+		Int64("tasks", totalTasks).
+		Int64("solutions", totalSolutions).
+		Int64("commitments", totalCommitments).
+		Int64("claims", totalClaims).
+		Msg("pending totals for batch queue")
+	tm.services.Logger.Info().
+		Str("total", fmt.Sprintf("%.8g", totalAius)).
+		Msg("total aius spent on tasks in queue")
+	tm.services.Logger.Info().
+		Str("total", fmt.Sprintf("%.8g", totalAiusEarnings)).
+		Str("profit", fmt.Sprintf("%.8g", totalAiusEarnings-totalAius)).
+		Msg("approx total aius reward & profit from pending queue")
 
 	if !isProfitable {
 		tm.services.Logger.Info().Str("profit_mode", profitMode).Str("min_profit", minProfitFmt).Str("max_profit", fmt.Sprintf("%.4g", maxProfit)).Msg("not profitable to process batch")
@@ -598,14 +617,6 @@ func (tm *BatchTransactionManager) processBatch(
 	}
 
 	tm.services.Logger.Info().Str("profit_mode", profitMode).Str("min_profit", minProfitFmt).Msg("profit criteria met - processing batch")
-
-	//validatorToSendSubmits := tm.validators[0]
-
-	// validatorBuffer, err := validatorToSendSubmits.GetValidatorStakeBuffer()
-	// if err != nil {
-	// 	tm.services.Logger.Error().Err(err).Msg("could not get validator stake buffer")
-	// 	return
-	// }
 
 	if claimMinBatchSize <= 0 || !tm.services.Config.Claim.Enabled {
 		tm.services.Logger.Warn().Msgf("** claim batch disabled or min batch size set to 0 so no claims will be made **")

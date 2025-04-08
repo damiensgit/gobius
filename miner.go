@@ -524,7 +524,15 @@ func main() {
 		case "taskcheck":
 			taskCheck(&logger, appContext)
 		case "verifyalltasks":
-			verifyAllTasks(appContext)
+			// extract if user wants to run in dry mode
+			dryRun := false
+			if len(args) > 1 {
+				dryRun, err = strconv.ParseBool(args[1])
+				if err != nil {
+					log.Fatalf("invalid dry run value: %v", err)
+				}
+			}
+			verifyAllTasks(appContext, dryRun)
 		case "verifysolutions":
 			verifySolutions(appContext)
 		case "verifycommitments":

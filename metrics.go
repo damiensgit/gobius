@@ -312,8 +312,8 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration, appQuit context.C
 				}
 
 				gm.services.Logger.Info().
-					Str("aiusbalance", fmt.Sprintf("%0.4f", aiusBalance)).
-					Str("aiusbalanceUSD", fmt.Sprintf("%0.4f$", aiusBalanceUSD)).
+					Str("aius_balance", fmt.Sprintf("%0.4f", aiusBalance)).
+					Str("aius_balance_usd", fmt.Sprintf("%0.4f$", aiusBalanceUSD)).
 					Str("amount_to_sell", fmt.Sprintf("%0.4f", aiusToSell)).
 					Str("min_sell_threshold", fmt.Sprintf("%0.4f", gm.services.Config.ValidatorConfig.MinBasetokenThreshold)).
 					Str("sell_method", aiusSellMethod).Msg("autosell checks")
