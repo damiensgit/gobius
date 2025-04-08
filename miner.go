@@ -931,9 +931,8 @@ exit_app:
 	go func() {
 		// Stop the mining strategy (signals workers, waits for them)
 		if strategy != nil {
-			strategy.Stop() // This should handle context cancellation and worker WaitGroup
+			strategy.Stop()
 		}
-
 		appQuitWG.Wait()
 		close(waitDone)
 	}()
@@ -942,20 +941,15 @@ exit_app:
 	select {
 	case <-waitDone:
 		logger.Info().Msg("all workers finished successfully")
-	case <-time.After(10 * time.Second):
+	case <-time.After(60 * time.Second):
 		logger.Warn().Msg("workers taking longer than expected to finish, dumping goroutine stacks for debugging")
-
 		numGoroutines := runtime.NumGoroutine()
 		logger.Warn().Int("count", numGoroutines).Msg("number of active goroutines")
 
 		var buf bytes.Buffer
-
 		pprof.Lookup("goroutine").WriteTo(&buf, 1)
 
 		logger.Warn().Msgf("goroutine stacks:\n%s", buf.String())
-
-		// Continue with the wait
-		logger.Warn().Msg("continuing to wait for goroutines to finish")
 	}
 
 	logger.Info().Msg("bye! 👋")
