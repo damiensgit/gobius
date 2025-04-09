@@ -493,6 +493,8 @@ func main() {
 	if len(args) > 0 {
 		command := args[0]
 
+		logWriter.RestoreOutputs()
+
 		switch command {
 		case "exportconfig":
 			if len(args) > 1 {
@@ -506,9 +508,17 @@ func main() {
 				log.Fatalf("exportconfig requires filename to export to parameter")
 			}
 		case "unsolvedimport":
+			// get remove mode from args
+			removeMode := false
 			if len(args) > 1 {
 				filename := args[1]
-				importUnsolvedTasks(filename, &logger, appContext)
+				if len(args) > 2 {
+					removeMode, err = strconv.ParseBool(args[2])
+					if err != nil {
+						log.Fatalf("invalid remove mode value: %v", err)
+					}
+				}
+				importUnsolvedTasks(appQuit, filename, removeMode, &logger, appContext)
 			} else {
 				log.Fatalf("unsolvedimport requires filename to import parameter")
 			}
@@ -519,6 +529,43 @@ func main() {
 			} else {
 				log.Fatalf("unsolvedimport requires filename to import parameter")
 			}
+		case "exportunsolved":
+			var startBlock, endBlock int64
+			var err error
+			var senderFilter common.Address
+
+			if len(args) < 2 {
+				log.Fatal("unsolvedtasks requires at least a startblock argument")
+			}
+
+			startBlock, err = strconv.ParseInt(args[1], 10, 64)
+			if err != nil {
+				log.Fatalf("Invalid startblock value: %v", err)
+			}
+
+			if len(args) >= 3 {
+				endBlock, err = strconv.ParseInt(args[2], 10, 64)
+				if err != nil {
+					log.Fatalf("Invalid endblock value: %v", err)
+				}
+			} else {
+				endBlock = 0 // Signal to getUnsolvedTasks to use the latest block
+			}
+
+			// Check for optional sender filter address
+			if len(args) >= 4 {
+				if !common.IsHexAddress(args[3]) {
+					log.Fatalf("Invalid sender filter address: %s", args[3])
+				}
+				senderFilter = common.HexToAddress(args[3])
+			} else {
+				senderFilter = common.Address{} // Use zero address if not provided
+			}
+			// Define a reasonable initial block size for the scan
+			initialBlockSize := int64(10000) // Example initial size
+			// make unique filename
+			filename := fmt.Sprintf("unsolvedtasks_%s.json", time.Now().Format("20060102150405"))
+			exportUnsolvedTasks(appQuit, appServices, rpcClient, startBlock, endBlock, initialBlockSize, senderFilter, filename)
 		case "verifyclaims":
 			verifyClaims(&logger, appContext)
 		case "taskcheck":
@@ -823,7 +870,7 @@ func main() {
 		logWriter.SetView(dashboard.LogViewer.CustomTextView)
 		go func() {
 			dashboard.Run()
-			logWriter.Stop()
+			logWriter.StopTUIOutput()
 			appCancel()
 		}()
 
