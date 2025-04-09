@@ -317,13 +317,10 @@ func (m *Miner) SolveTask(ctx context.Context, taskId task.TaskId, params *Submi
 	} else {
 		//start := time.Now()
 		if gpu.Mock {
-			data, err := gpu.GetMockCid(taskIdStr, hydrated)
-			if err != nil {
-				return nil, err
-			}
-			cid, err = ipfs.GetIPFSHashFast(data)
-			if err != nil {
-				return nil, err
+			var data []byte
+			data, err = gpu.GetMockCid(taskIdStr, hydrated)
+			if err == nil {
+				cid, err = ipfs.GetIPFSHashFast(data)
 			}
 		} else {
 			cid, err = model.GetCID(gpu, taskIdStr, hydrated)
@@ -345,50 +342,31 @@ func (m *Miner) SolveTask(ctx context.Context, taskId task.TaskId, params *Submi
 
 	validator := m.validator.GetNextValidatorAddress()
 
-	commitmentFunc := func() error {
-
-		commitment, err := utils.GenerateCommitment(validator, taskId, cid)
-		if err != nil {
-			m.services.Logger.Error().Err(err).Msg("error generating commitment hash")
-			return err
-		}
-
-		if m.services.Config.CheckCommitment {
-			m.services.Logger.Debug().Str("taskid", taskIdStr).Str("commitment", "0x"+hex.EncodeToString(commitment[:])).Msg("checking for existing task commitment")
-
-			block, err := m.services.Engine.Engine.Commitments(nil, commitment)
-			if err != nil {
-				m.services.Logger.Error().Err(err).Msg("error getting commitment")
-				return err
-			}
-
-			blockNo := block.Uint64()
-			if blockNo > 0 {
-				m.services.Logger.Warn().Str("taskid", taskIdStr).Uint64("block", blockNo).Str("commitment", "0x"+hex.EncodeToString(commitment[:])).Msg("commitment already exists for task")
-				return nil
-			}
-		}
-
-		m.validator.SignalCommitment(validator, taskId, commitment)
-
-		return nil
-	}
-
-	err = commitmentFunc()
+	commitment, err := utils.GenerateCommitment(validator, taskId, cid)
 	if err != nil {
-		m.services.Logger.Warn().Msg("commitment failed so not sending solution")
+		m.services.Logger.Error().Err(err).Msg("error generating commitment hash")
 		return nil, err
 	}
 
+	err = m.validator.SignalCommitment(validator, taskId, commitment)
+	if err != nil {
+		m.services.Logger.Error().Err(err).Msg("error signalling commitment to validator, skipping submitsolution")
+		return nil, err
+	}
+
+	// we wont consider this a failure
 	err = m.validator.SubmitIpfsCid(validator, taskId, cid)
 	if err != nil {
 		m.services.Logger.Warn().Err(err).Msg("ipfs cid submission failed")
 	}
 
 	// Use a separate goroutine without WaitGroup tracking for solution submission
-	go m.validator.SubmitSolution(validator, taskId, cid)
+	err = m.validator.SubmitSolution(validator, taskId, cid)
+	if err != nil {
+		m.services.Logger.Error().Err(err).Msg("solution submission failed")
+	}
 
-	return cid, nil
+	return cid, err
 }
 
 func main() {
@@ -545,14 +523,22 @@ func main() {
 			verifyClaims(&logger, appContext)
 		case "taskcheck":
 			taskCheck(&logger, appContext)
+		case "verifyalltasks":
+			// extract if user wants to run in dry mode
+			dryRun := false
+			if len(args) > 1 {
+				dryRun, err = strconv.ParseBool(args[1])
+				if err != nil {
+					log.Fatalf("invalid dry run value: %v", err)
+				}
+			}
+			verifyAllTasks(appContext, dryRun)
 		case "verifysolutions":
 			verifySolutions(appContext)
 		case "verifycommitments":
 			verifyCommitment(appContext)
 		case "blockmonitor":
 			blockMonitor(appContext, rpcClient)
-		case "cleantaskdata":
-			cleanTaskData(appContext)
 		case "recoverstale":
 			recoverStaleTasks(appContext)
 		case "claimbatchinfo":
@@ -937,20 +923,16 @@ func main() {
 exit_app:
 	logger.Info().Msg("waiting for application workers to finish")
 
-	// Stop the mining strategy (signals workers, waits for them)
-	if strategy != nil {
-		strategy.Stop() // This should handle context cancellation and worker WaitGroup
-	}
-
 	// Wait for all workers to finish
 	//appQuitWG.Wait()
-
-	logger.Info().Msg("bye! 👋")
-
 	// for debugging purposes
 	// Create a timeout channel to detect if the wait takes too long
 	waitDone := make(chan struct{})
 	go func() {
+		// Stop the mining strategy (signals workers, waits for them)
+		if strategy != nil {
+			strategy.Stop()
+		}
 		appQuitWG.Wait()
 		close(waitDone)
 	}()
@@ -959,19 +941,16 @@ exit_app:
 	select {
 	case <-waitDone:
 		logger.Info().Msg("all workers finished successfully")
-	case <-time.After(10 * time.Second):
+	case <-time.After(60 * time.Second):
 		logger.Warn().Msg("workers taking longer than expected to finish, dumping goroutine stacks for debugging")
-
 		numGoroutines := runtime.NumGoroutine()
 		logger.Warn().Int("count", numGoroutines).Msg("number of active goroutines")
 
 		var buf bytes.Buffer
-
 		pprof.Lookup("goroutine").WriteTo(&buf, 1)
 
 		logger.Warn().Msgf("goroutine stacks:\n%s", buf.String())
-
-		// Continue with the wait
-		logger.Warn().Msg("continuing to wait for goroutines to finish")
 	}
+
+	logger.Info().Msg("bye! 👋")
 }

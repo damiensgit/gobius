@@ -165,7 +165,7 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration, appQuit context.C
 				continue
 			}
 
-			gm.lastReward = gm.services.Config.BaseConfig.BaseToken.ToFloat(totalReward)
+			gm.lastReward = gm.services.Config.BaseConfig.BaseToken.ToFloat(totalReward) * 0.9
 			gm.AddReward(gm.lastReward)
 
 			totalCostInUSD := gm.services.Config.BaseConfig.BaseToken.ToFloat(gm.TotalGasUsed) * gm.lastEthPrice
@@ -312,8 +312,8 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration, appQuit context.C
 				}
 
 				gm.services.Logger.Info().
-					Str("aiusbalance", fmt.Sprintf("%0.4f", aiusBalance)).
-					Str("aiusbalanceUSD", fmt.Sprintf("%0.4f$", aiusBalanceUSD)).
+					Str("aius_balance", fmt.Sprintf("%0.4f", aiusBalance)).
+					Str("aius_balance_usd", fmt.Sprintf("%0.4f$", aiusBalanceUSD)).
 					Str("amount_to_sell", fmt.Sprintf("%0.4f", aiusToSell)).
 					Str("min_sell_threshold", fmt.Sprintf("%0.4f", gm.services.Config.ValidatorConfig.MinBasetokenThreshold)).
 					Str("sell_method", aiusSellMethod).Msg("autosell checks")
@@ -474,6 +474,7 @@ func (gm *GasMetrics) AddTasks(gas *big.Int) {
 	gm.Tasks.Add(gm.Tasks, gas)
 }
 
+// TODO: this is not 100% correct as we are not taking into account the task owner reward and the treasury reward etc
 func (gm *GasMetrics) ClaimValue(claimCount int) {
 	value := gm.lastReward * float64(claimCount) * gm.lastBasePrice
 	claimValueFmt := fmt.Sprintf("%0.4f$", value)

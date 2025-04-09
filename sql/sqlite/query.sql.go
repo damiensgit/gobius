@@ -7,6 +7,7 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 
 	common "github.com/ethereum/go-ethereum/common"
@@ -122,6 +123,17 @@ func (q *Queries) AddTasks(ctx context.Context, arg AddTasksParams) error {
 	return err
 }
 
+const checkCommitmentExists = `-- name: CheckCommitmentExists :one
+SELECT EXISTS(SELECT 1 FROM commitments WHERE taskid = ?)
+`
+
+func (q *Queries) CheckCommitmentExists(ctx context.Context, taskid task.TaskId) (int64, error) {
+	row := q.db.QueryRowContext(ctx, checkCommitmentExists, taskid)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
 const createCommitment = `-- name: CreateCommitment :exec
 INSERT INTO commitments (
   taskid, commitment, validator
@@ -226,6 +238,51 @@ func (q *Queries) DeletedSolution(ctx context.Context, taskid task.TaskId) (int6
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const deletedTask = `-- name: DeletedTask :execrows
+DELETE FROM tasks WHERE taskid = ?
+`
+
+func (q *Queries) DeletedTask(ctx context.Context, taskid task.TaskId) (int64, error) {
+	result, err := q.db.ExecContext(ctx, deletedTask, taskid)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected()
+}
+
+const getAllTasks = `-- name: GetAllTasks :many
+SELECT taskid, txhash, cumulativegas, status, claimtime FROM tasks
+`
+
+func (q *Queries) GetAllTasks(ctx context.Context) ([]Task, error) {
+	rows, err := q.db.QueryContext(ctx, getAllTasks)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Task
+	for rows.Next() {
+		var i Task
+		if err := rows.Scan(
+			&i.Taskid,
+			&i.Txhash,
+			&i.Cumulativegas,
+			&i.Status,
+			&i.Claimtime,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const getCommitmentBatch = `-- name: GetCommitmentBatch :many
@@ -525,6 +582,22 @@ func (q *Queries) GetTasksByLowestCost(ctx context.Context, arg GetTasksByLowest
 	return items, nil
 }
 
+const getTotalTasksGas = `-- name: GetTotalTasksGas :one
+SELECT count(*), sum(cumulativeGas) FROM tasks
+`
+
+type GetTotalTasksGasRow struct {
+	Count int64
+	Sum   sql.NullFloat64
+}
+
+func (q *Queries) GetTotalTasksGas(ctx context.Context) (GetTotalTasksGasRow, error) {
+	row := q.db.QueryRowContext(ctx, getTotalTasksGas)
+	var i GetTotalTasksGasRow
+	err := row.Scan(&i.Count, &i.Sum)
+	return i, err
+}
+
 const popTask = `-- name: PopTask :one
 UPDATE tasks
 SET status = 1
@@ -718,4 +791,23 @@ func (q *Queries) UpdateTaskStatusAndGas(ctx context.Context, arg UpdateTaskStat
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+const upsertTaskToClaimable = `-- name: UpsertTaskToClaimable :exec
+INSERT INTO tasks (taskid, txhash, status, claimtime)
+VALUES (?, ?, 3, ?)
+ON CONFLICT(taskid) DO UPDATE SET
+    status = 3,
+    claimtime = excluded.claimtime
+`
+
+type UpsertTaskToClaimableParams struct {
+	Taskid    task.TaskId
+	Txhash    common.Hash
+	Claimtime int64
+}
+
+func (q *Queries) UpsertTaskToClaimable(ctx context.Context, arg UpsertTaskToClaimableParams) error {
+	_, err := q.db.ExecContext(ctx, upsertTaskToClaimable, arg.Taskid, arg.Txhash, arg.Claimtime)
+	return err
 }

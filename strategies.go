@@ -6,11 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"gobius/bindings/engine"
-	task "gobius/common"
+	task_common "gobius/common" // Renamed import to avoid conflict
 	"math/rand"
 	"sync"
 	"time"
 
+	"github.com/ethereum/go-ethereum" // Import for ethereum.NotFound
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/event"
@@ -18,247 +19,388 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// MiningStrategy defines the interface for different mining approaches.
-type MiningStrategy interface {
-	Start() error
-	Stop()
-	// Name returns the strategy name (e.g., "bulkmine", "solutionsampler")
-	Name() string
-	// HandleTaskSubmitted allows strategies to react to new tasks submitted on-chain.
-	// Not all strategies need to implement this.
-	HandleTaskSubmitted(event *engine.EngineTaskSubmitted)
+// TODO: split this into multiple files
+
+// TaskSubmitted represents a task identified by its ID and the transaction that submitted it.
+// This struct is used across different producers and strategies.
+type TaskSubmitted struct {
+	TaskId [32]byte
+	TxHash common.Hash
 }
 
-type taskHandlerFunc func(workerId int, gpu *task.GPU, ts *TaskSubmitted)
-
-// --- Base Strategy (Common worker logic) ---
-type baseStrategy struct {
-	ctx               context.Context // Strategy's operational context
-	cancelFunc        context.CancelFunc
-	services          *Services
-	miner             *Miner
-	gpuPool           *GPUPool
-	taskQueue         *TaskQueue
-	logger            zerolog.Logger
-	numWorkers        int
-	wg                sync.WaitGroup
-	stopOnce          sync.Once
-	strategyName      string
-	txParamCache      *lru.Cache                       // Cache for TxHash -> *SubmitTaskParams (Using LRU)
-	needsTaskEvents   bool                             // Flag indicating if the strategy needs TaskSubmitted events
-	taskEventSub      event.Subscription               // Subscription object if listening
-	sinkTaskSubmitted chan *engine.EngineTaskSubmitted // Channel for receiving events if listening
+// goroutineRunner manages a WaitGroup for launching and waiting on goroutines.
+type goroutineRunner struct {
+	sync.WaitGroup
 }
 
-func (b *baseStrategy) Go(f func()) {
-	b.wg.Add(1)
+// Go starts a function in a new goroutine and handles WaitGroup accounting.
+func (gr *goroutineRunner) Go(f func()) {
+	gr.Add(1)
 	go func() {
-		defer b.wg.Done()
+		defer gr.Done()
 		f()
 	}()
 }
 
-// Generic implementation, can be overridden by specific strategies.
-func (bs *baseStrategy) HandleTaskSubmitted(event *engine.EngineTaskSubmitted) {
-	// Default: Do nothing or log a warning if unexpected
-	// bs.logger.Debug().Str("task", task.TaskId(event.Id).String()).Msg("received TaskSubmitted event but strategy does not handle it")
+// MiningStrategy defines the common interface for different mining approaches.
+type MiningStrategy interface {
+	Start() error
+	Stop()
+	Name() string
+}
+
+// ErrTxDecodePermanent indicates a non-recoverable error during transaction decoding.
+var ErrTxDecodePermanent = errors.New("permanent transaction decoding error")
+
+const (
+	defaultMaxSubscriptionBackoff     = 30 * time.Second
+	defaultInitialSubscriptionBackoff = 1 * time.Second
+)
+
+// ConnectFunc is a function type responsible for establishing an event subscription.
+// It should perform the actual contract `Watch...` call.
+// The context passed to it has a timeout for the connection attempt.
+type ConnectFunc func(ctx context.Context) (event.Subscription, error)
+
+type subscriptionManager struct {
+	logger      zerolog.Logger
+	parentCtx   context.Context    // The context from the owner (e.g., producer)
+	ctx         context.Context    // Internal context for the manager's loop
+	cancel      context.CancelFunc // Cancels the internal context
+	wg          *sync.WaitGroup    // Pointer to the owner's WaitGroup
+	connectFunc ConnectFunc        // The function to establish the subscription
+	eventName   string             // Name for logging (e.g., "TaskSubmitted")
+
+	maxBackoff     time.Duration
+	initialBackoff time.Duration
+
+	mu           sync.Mutex
+	subscription event.Subscription // Current active subscription
+
+	stopOnce sync.Once
+	goroutineRunner
+}
+
+// NewSubscriptionManager creates a new subscription manager.
+func NewSubscriptionManager(parentCtx context.Context, wg *sync.WaitGroup, log zerolog.Logger, eventName string, connectFunc ConnectFunc) *subscriptionManager {
+	ctx, cancel := context.WithCancel(parentCtx)
+	return &subscriptionManager{
+		logger:          log.With().Str("component", "subscriptionmanager").Str("event", eventName).Logger(),
+		parentCtx:       parentCtx,
+		ctx:             ctx,
+		cancel:          cancel,
+		wg:              wg,
+		connectFunc:     connectFunc,
+		eventName:       eventName,
+		maxBackoff:      defaultMaxSubscriptionBackoff,
+		initialBackoff:  defaultInitialSubscriptionBackoff,
+		goroutineRunner: goroutineRunner{},
+	}
+}
+
+// Start launches the background goroutine to manage the subscription.
+func (sm *subscriptionManager) Start() {
+	sm.logger.Info().Msg("starting")
+	sm.Go(sm.manageLoop)
+}
+
+// Stop signals the manager loop to terminate and unsubscribes if needed.
+func (sm *subscriptionManager) Stop() {
+	sm.stopOnce.Do(func() {
+		sm.logger.Info().Msg("stopping")
+		// Cancel the internal context to signal the loop
+		if sm.cancel != nil {
+			sm.cancel()
+		}
+		sm.mu.Lock()
+		if sm.subscription != nil {
+			sm.subscription.Unsubscribe()
+			sm.subscription = nil
+		}
+		sm.mu.Unlock()
+
+		// wait for the goroutine(s) to finish
+		sm.Wait()
+
+		sm.logger.Info().Msg("stopped")
+	})
+}
+
+// manageLoop is the core goroutine managing the subscription lifecycle.
+func (sm *subscriptionManager) manageLoop() {
+	sm.logger.Info().Msg("management loop started")
+
+	currentBackoff := sm.initialBackoff
+	var errChan <-chan error
+
+	// Initial connection attempt
+	if !sm.connectWithTimeout() {
+		sm.logger.Warn().Msg("initial connection failed, will retry in loop")
+		// Allow loop to handle backoff before first real wait
+	}
+
+	for {
+		sm.mu.Lock()
+		actSub := sm.subscription // Get current subscription under lock
+		sm.mu.Unlock()
+
+		if actSub == nil {
+			// Subscription is down, attempt reconnect after backoff
+			sm.logger.Warn().Dur("wait", currentBackoff).Msg("subscription down, attempting reconnect")
+			select {
+			case <-time.After(currentBackoff):
+				currentBackoff = (currentBackoff * 2) + time.Duration(rand.Intn(500))*time.Millisecond
+				if currentBackoff > sm.maxBackoff {
+					currentBackoff = sm.maxBackoff
+				}
+				if !sm.connectWithTimeout() {
+					continue // Connection failed, retry after next backoff interval
+				}
+				// Connection succeeded, reset backoff and get error channel
+				currentBackoff = sm.initialBackoff
+				sm.mu.Lock()
+				if sm.subscription != nil { // Check again in case Stop was called during connect
+					errChan = sm.subscription.Err() // Assignment is now valid
+				} else {
+					errChan = nil // Should not happen if connect succeeded, but be safe
+				}
+				sm.mu.Unlock()
+
+			case <-sm.ctx.Done():
+				sm.logger.Info().Msg("shutting down during reconnect backoff")
+				return
+			}
+		} else {
+			// Subscription is presumed active, use its error channel
+			errChan = actSub.Err() // Assignment is now valid
+		}
+
+		select {
+		case <-sm.ctx.Done():
+			sm.logger.Info().Msg("context cancelled, shutting down loop")
+			sm.mu.Lock()
+			if sm.subscription != nil {
+				sm.subscription.Unsubscribe()
+				sm.subscription = nil
+			}
+			sm.mu.Unlock()
+			return
+
+		case err, ok := <-errChan:
+			if !ok {
+				// Channel closed unexpectedly? Treat as an error.
+				err = errors.New("subscription error channel closed unexpectedly")
+			}
+			if err != nil { // Could be nil if channel just closed, but check anyway
+				sm.logger.Warn().Err(err).Msg("subscription error detected")
+			}
+			// Regardless of error content, the subscription is broken
+			sm.mu.Lock()
+			if sm.subscription != nil {
+				sm.subscription.Unsubscribe()
+				sm.subscription = nil
+			}
+			sm.mu.Unlock()
+			// Loop will now enter the reconnect logic in the next iteration
+		}
+	}
+}
+
+// connectWithTimeout attempts to establish the subscription using the connectFunc.
+func (sm *subscriptionManager) connectWithTimeout() bool {
+	// Use the manager's internal context for the attempt
+	// TODO: make this configurable
+	connectCtx, cancel := context.WithTimeout(sm.ctx, 20*time.Second) // e.g., 20 sec timeout
+	defer cancel()
+
+	sm.logger.Info().Msg("attempting to connect subscription...")
+	newSub, err := sm.connectFunc(connectCtx)
+
+	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			sm.logger.Warn().Err(err).Msg("connection attempt timed out or was cancelled")
+		} else {
+			sm.logger.Error().Err(err).Msg("connection function failed")
+		}
+		return false
+	}
+
+	if newSub == nil {
+		sm.logger.Error().Msg("connection function returned nil subscription without error")
+		return false
+	}
+
+	sm.logger.Info().Msg("connection successful")
+	sm.mu.Lock()
+	// Check if Stop was called while we were connecting
+	if sm.ctx.Err() != nil {
+		sm.logger.Warn().Msg("context cancelled during successful connection, unsubscribing immediately")
+		sm.mu.Unlock()
+		newSub.Unsubscribe()
+		return false
+	}
+	sm.subscription = newSub
+	sm.mu.Unlock()
+	return true
+}
+
+// TaskProducer defines the interface for components that provide tasks to workers.
+type TaskProducer interface {
+	// GetTask attempts to retrieve the next available task.
+	// It BLOCKS if no task is immediately available, returning only when:
+	//   - A task is ready (returns (*TaskSubmitted, nil)).
+	//   - The passed context is cancelled (returns (nil, context.Canceled or specific error)).
+	//   - The producer is stopped permanently (returns (nil, specific error)).
+	GetTask(ctx context.Context) (*TaskSubmitted, error)
+
+	// Start initializes the producer (e.g., starts listening, prepares DB).
+	Start(ctx context.Context) error
+
+	// Stop cleanly shuts down the producer.
+	Stop()
+
+	// Name returns a descriptive name for the producer (for logging).
+	Name() string
+}
+
+type taskHandlerFunc func(workerId int, gpu *task_common.GPU, ts *TaskSubmitted)
+
+// Base Strategy (has common worker logic)
+type baseStrategy struct {
+	ctx          context.Context // Strategy's operational context
+	cancelFunc   context.CancelFunc
+	services     *Services
+	miner        *Miner
+	gpuPool      *GPUPool
+	logger       zerolog.Logger
+	numWorkers   int
+	stopOnce     sync.Once
+	strategyName string
+	// TODO: refactor this, a bit ugly to have it here and then pass it to the producer
+	txParamCache *lru.Cache // Keep cache for decodeTransaction in base
+
+	// Embed goroutineRunner for managing worker goroutines
+	goroutineRunner
+}
+
+func (b *baseStrategy) Go(f func()) {
+	b.goroutineRunner.Go(f)
 }
 
 // newBaseStrategy initializes the common components for any mining strategy.
-// enableQueueEviction controls if the task queue drops old tasks when full.
-func newBaseStrategy(appCtx context.Context, services *Services, miner *Miner, gpuPool *GPUPool, strategyName string, needsTaskEvents bool, enableQueueEviction bool) (baseStrategy, error) {
+func newBaseStrategy(appCtx context.Context, services *Services, miner *Miner, gpuPool *GPUPool, strategyName string) (baseStrategy, error) {
 	ctx, cancel := context.WithCancel(appCtx) // Create a derived context for the strategy
 	numWorkers := gpuPool.NumGPUs() * services.Config.NumWorkersPerGPU
 
-	var sink chan *engine.EngineTaskSubmitted
-	if needsTaskEvents {
-		sink = make(chan *engine.EngineTaskSubmitted, 1024)
-	}
-
-	// Initialize LRU cache for transaction parameters
-	paramCacheSize := defaultTaskCacheSize
-	paramCache, err := lru.New(paramCacheSize)
+	// Initialize LRU cache for transaction parameters (kept in base)
+	// Use a reasonable default size
+	// TODO: make this configurable / incease based on numWorkers?
+	const defaultCacheSize = 100_000 // track up to 100k tasks
+	paramCache, err := lru.New(defaultCacheSize)
 	if err != nil {
 		return baseStrategy{}, fmt.Errorf("failed to initialize transaction parameter LRU cache: %w", err)
 	}
 
 	logger := services.Logger.With().Str("strategy", strategyName).Logger()
 
-	// Initialize TaskQueue internally
-	// Use a queue size based on worker capacity for strategies that don't evict.
-	// Strategies that evict can use a larger, fixed size.
-	queueSize := defaultMaxTasks // Default for evicting strategies
-	if !enableQueueEviction {    // Use the passed parameter
-		queueSize = numWorkers * 2 // Smaller queue for non-evicting
-		if queueSize < 1 {         // Ensure queue size is at least 1, even with 0 GPUs/workers
-			queueSize = 1
-		}
-	}
-
-	// Pass the context and enableQueueEviction parameter directly to NewTaskQueue
-	taskQueue, err := NewTaskQueue(appCtx, logger, queueSize, defaultTaskCacheSize, enableQueueEviction)
-	if err != nil {
-		return baseStrategy{}, fmt.Errorf("failed to initialize task queue: %w", err)
-	}
-	logger.Info().Str("strategy", strategyName).Int("queue_size", queueSize).Bool("eviction_enabled", enableQueueEviction).Msg("task queue configured for strategy")
-
 	return baseStrategy{
-		ctx:               ctx,
-		cancelFunc:        cancel,
-		services:          services,
-		miner:             miner,
-		gpuPool:           gpuPool,
-		taskQueue:         taskQueue,
-		logger:            logger,
-		numWorkers:        numWorkers,
-		strategyName:      strategyName,
-		txParamCache:      paramCache,
-		needsTaskEvents:   needsTaskEvents,
-		sinkTaskSubmitted: sink,
+		ctx:             ctx,
+		cancelFunc:      cancel,
+		services:        services,
+		miner:           miner,
+		gpuPool:         gpuPool,
+		logger:          logger,
+		numWorkers:      numWorkers,
+		strategyName:    strategyName,
+		txParamCache:    paramCache,
+		goroutineRunner: goroutineRunner{},
 	}, nil
 }
 
-func (bs *baseStrategy) gpuWorker(workerId int, gpu *task.GPU, taskHandler taskHandlerFunc) {
-	workerLogger := bs.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Logger()
+// gpuWorker is simplified to pull directly from the producer.
+func (bs *baseStrategy) gpuWorker(workerId int, gpu *task_common.GPU, producer TaskProducer, taskHandler taskHandlerFunc) {
+	workerLogger := bs.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("producer", producer.Name()).Logger()
 	workerLogger.Info().Msg("started worker")
 
-	newTaskSignal := bs.taskQueue.GetTaskSignal()
+	// Ticker to periodically check the status of the GPU and re-enable it
+	ticker := time.NewTicker(time.Minute * 5) // TODO: make this configurable
+	defer ticker.Stop()
 
 	for {
-		select {
-		case <-bs.ctx.Done(): // Listen to the strategy's context
-			workerLogger.Info().Msg("shutting down worker")
-			return
-		case <-newTaskSignal:
-			// Check shutdown condition again after signal
-			if bs.ctx.Err() != nil {
-				continue
-			}
-
-			if !gpu.IsEnabled() {
-				workerLogger.Debug().Msg("gpus disabled, skipping task retrieval")
-				continue
-			}
-
-			ts := bs.taskQueue.GetTask()
-			if ts == nil {
-				// No task available, maybe another worker got it. Wait for next signal.
-				continue
-			}
-
-			workerLogger.Debug().Str("task", ts.TaskId.String()).Int("queue_len", bs.taskQueue.Len()).Msg("starting job")
-			gpu.SetStatus("Mining")
-			taskHandler(workerId, gpu, ts)
-			// Task processing finished (success or fail handled within taskHandlerFunc)
-			// Status is updated by taskHandlerFunc or remains Mining until next cycle
-			workerLogger.Debug().Str("task", ts.TaskId.String()).Msg("finished job processing")
-		}
-	}
-
-}
-
-// connectToTaskEvents attempts to subscribe to TaskSubmitted events.
-// It should only be called by strategies where needsTaskEvents is true.
-func (bs *baseStrategy) connectToTaskEvents() {
-	if bs.taskEventSub != nil {
-		bs.taskEventSub.Unsubscribe()
-	}
-	bs.logger.Info().Msg("subscribing to TaskSubmitted events...")
-	subCtx, cancel := context.WithTimeout(bs.ctx, 15*time.Second)
-	defer cancel()
-	blockNo, err := bs.services.OwnerAccount.Client.Client.BlockNumber(subCtx)
-	if err != nil {
-		bs.logger.Error().Err(err).Msg("failed to get current block number for task event subscription")
-		// Consider implementing retry logic here or rely on the event loop to retry
-		return
-	}
-
-	engineContract, err := engine.NewEngine(bs.services.Config.BaseConfig.EngineAddress, bs.services.OwnerAccount.Client.Client)
-	if err != nil {
-		bs.logger.Error().Err(err).Msg("failed to create engine contract instance for event watching")
-		return
-	}
-
-	bs.taskEventSub, err = engineContract.WatchTaskSubmitted(&bind.WatchOpts{
-		Start:   &blockNo,
-		Context: bs.ctx,
-	}, bs.sinkTaskSubmitted, nil, nil, nil)
-	if err != nil {
-		bs.logger.Error().Err(err).Msg("failed to subscribe to TaskSubmitted events")
-	} else {
-		bs.logger.Info().Msg("subscribed to TaskSubmitted events")
-	}
-}
-
-// listenForTaskEvents runs in a goroutine for strategies that need TaskSubmitted events.
-func (bs *baseStrategy) listenForTaskEvents(handler func(event *engine.EngineTaskSubmitted)) {
-
-	bs.logger.Info().Msg("started task event listener")
-
-	maxBackoff := 30 * time.Second
-	currentBackoff := 1 * time.Second
-
-	for {
+		// Check context before potentially blocking/sleeping
 		select {
 		case <-bs.ctx.Done():
-			bs.logger.Info().Msg("stopping task event listener")
+			workerLogger.Info().Msg("shutting down worker (context cancelled)")
 			return
-		case event := <-bs.sinkTaskSubmitted:
-			if event == nil {
-				continue // Channel closed or nil event
+		case <-ticker.C:
+			if !gpu.IsEnabled() {
+				workerLogger.Info().Msg("gpu disabled, re-enabling")
+				gpu.ResetErrorState()
 			}
-			currentBackoff = 1 * time.Second // Reset backoff on success
-			bs.logger.Info().Str("taskid", task.TaskId(event.Id).String()).Str("txHash", event.Raw.TxHash.Hex()).Uint64("block", event.Raw.BlockNumber).Msg("received TaskSubmitted event")
-			handler(event) // Call the strategy-specific handler
-
-		case err := <-bs.taskEventSub.Err():
-			if err == nil {
-				continue
-			}
-			bs.logger.Warn().Err(err).Msgf("task event subscription error, retrying connection in %s", currentBackoff)
-			time.Sleep(currentBackoff)
-			currentBackoff = (currentBackoff * 2) + time.Duration(rand.Intn(500))*time.Millisecond
-			if currentBackoff > maxBackoff {
-				currentBackoff = maxBackoff
-			}
-			bs.connectToTaskEvents() // Attempt to reconnect
+		default: // Continue if context is active
 		}
+
+		if !gpu.IsEnabled() {
+			workerLogger.Debug().Msg("gpu disabled, pausing worker")
+			select {
+			case <-time.After(5 * time.Second): // Check status periodically
+				continue
+			case <-bs.ctx.Done():
+				workerLogger.Info().Msg("shutting down worker while paused (gpu disabled)")
+				return
+			}
+		}
+
+		workerLogger.Debug().Msg("requesting task from producer...")
+		ts, err := producer.GetTask(bs.ctx) // Pass baseStrategy context
+
+		if err != nil {
+			// Handles context cancellation or permanent producer errors
+			workerLogger.Warn().Err(err).Msg("failed to get task from producer or context cancelled, worker exiting")
+			return
+		}
+
+		// If GetTask returns without error, we have a valid task
+		workerLogger.Debug().Str("task", task_common.TaskId(ts.TaskId).String()).Msg("starting job")
+		gpu.SetStatus("Mining")
+		taskHandler(workerId, gpu, ts)
+		workerLogger.Debug().Str("task", task_common.TaskId(ts.TaskId).String()).Msg("finished job processing")
+
+		// Loop immediately to get the next task
 	}
 }
 
-// start initializes common strategy components like workers and optionally the event listener.
-func (bs *baseStrategy) start(taskHandler taskHandlerFunc, eventHandler func(event *engine.EngineTaskSubmitted)) error {
+// start initializes workers and starts the producer.
+func (bs *baseStrategy) start(producer TaskProducer, taskHandler taskHandlerFunc) error {
 	bs.logger.Info().Int("workerspergpu", bs.services.Config.NumWorkersPerGPU).Int("gpus", bs.gpuPool.NumGPUs()).Msgf("starting %d workers for %s strategy", bs.numWorkers, bs.strategyName)
 
-	gpus := bs.gpuPool.GetGPUs() // Get a snapshot of GPUs at worker start time
+	// Start the producer itself
+	err := producer.Start(bs.ctx) // Pass the strategy's context
+	if err != nil {
+		bs.logger.Error().Err(err).Msgf("failed to start producer %s", producer.Name())
+		return err
+	}
+	bs.logger.Info().Msgf("producer %s started", producer.Name())
+
+	gpus := bs.gpuPool.GetGPUs()
 	for i := 0; i < bs.numWorkers; i++ {
 		workerId := i
-		// Assign GPU in round-robin fashion based on NumWorkersPerGPU
 		gpuIndex := workerId / bs.services.Config.NumWorkersPerGPU
 		if gpuIndex >= len(gpus) {
 			bs.logger.Error().Int("workerId", workerId).Int("gpuIndex", gpuIndex).Int("numGpus", len(gpus)).Msg("logic error: worker assigned to non-existent GPU index")
-			continue // Skip starting this worker
+			continue
 		}
 		gpu := gpus[gpuIndex]
+		// Pass the producer to the worker
 		bs.Go(func() {
-			bs.gpuWorker(workerId, gpu, taskHandler)
+			bs.gpuWorker(workerId, gpu, producer, taskHandler)
 		})
-	}
-
-	// Start event listener if needed
-	if bs.needsTaskEvents {
-		if eventHandler == nil {
-			return fmt.Errorf("strategy %s needs task events but no handler provided", bs.strategyName)
-		}
-		bs.connectToTaskEvents()
-		bs.Go(func() { bs.listenForTaskEvents(eventHandler) })
 	}
 
 	return nil
 }
 
-// decodeTransaction retrieves transaction details and decodes parameters using the miner's decoder.
-// It utilizes the txParamCache for efficiency.
+// decodeTransaction remains in baseStrategy as workers might need it via handleTask.
 func (bs *baseStrategy) decodeTransaction(txHash common.Hash) (*SubmitTaskParams, error) {
 	// 1. Check cache
 	if cachedParams, found := bs.txParamCache.Get(txHash.String()); found {
@@ -267,20 +409,33 @@ func (bs *baseStrategy) decodeTransaction(txHash common.Hash) (*SubmitTaskParams
 			return params, nil
 		}
 		bs.logger.Warn().Str("txHash", txHash.String()).Msg("invalid type found in txParamCache")
-		// Continue to fetch and decode if type assertion failed
 	}
 
 	// 2. Fetch transaction if not cached
 	txFetchStart := time.Now()
+	// Use baseStrategy's context for the fetch
 	tx, _, err := bs.services.OwnerAccount.Client.Client.TransactionByHash(bs.ctx, txHash)
 	txFetchElapsed := time.Since(txFetchStart)
 	if err != nil {
-		bs.logger.Error().Err(err).Str("txHash", txHash.String()).Msg("could not get transaction from hash")
-		return nil, err
+		// Check for specific, potentially permanent errors first
+		if errors.Is(err, ethereum.NotFound) {
+			bs.logger.Warn().Err(err).Str("txHash", txHash.String()).Msg("transaction not found")
+			return nil, fmt.Errorf("transaction %s not found: %w", txHash.String(), err) // Wrap ethereum.NotFound
+		}
+		// Check for context errors (transient)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			bs.logger.Warn().Err(err).Str("txHash", txHash.String()).Msg("context cancelled or deadline exceeded while fetching transaction")
+			return nil, fmt.Errorf("context error fetching transaction %s: %w", txHash.String(), err) // Wrap context errors
+		}
+		// Assume other errors are potentially transient network issues
+		bs.logger.Error().Err(err).Str("txHash", txHash.String()).Msg("transient error fetching transaction")
+		return nil, fmt.Errorf("transient error fetching transaction %s: %w", txHash.String(), err)
 	}
+	// Check if tx is nil even if err is nil (shouldn't happen with TransactionByHash, but defensive check)
 	if tx == nil {
-		bs.logger.Error().Str("txHash", txHash.String()).Msg("transaction not found for hash")
-		return nil, fmt.Errorf("transaction %s not found", txHash.String())
+		bs.logger.Error().Str("txHash", txHash.String()).Msg("transaction not found (nil transaction returned)")
+		// Treat as effectively not found, likely permanent issue with this hash on this node
+		return nil, fmt.Errorf("transaction %s not found (nil tx): %w", txHash.String(), ethereum.NotFound)
 	}
 
 	bs.logger.Debug().Str("elapsed", txFetchElapsed.String()).Str("hash", txHash.String()).Msg("fetched transaction details")
@@ -288,55 +443,334 @@ func (bs *baseStrategy) decodeTransaction(txHash common.Hash) (*SubmitTaskParams
 	// 3. Decode transaction
 	params, err := bs.miner.DecodeTaskTransaction(tx)
 	if err != nil {
-		bs.logger.Error().Err(err).Str("txHash", txHash.String()).Msg("could not decode task transaction")
-		return nil, err
+		bs.logger.Error().Err(err).Str("txHash", txHash.String()).Msg("permanent decode error for task transaction")
+		// Wrap with ErrTxDecodePermanent
+		return nil, fmt.Errorf("%w: %w", ErrTxDecodePermanent, err)
 	}
 
 	// 4. Store in cache
-	bs.txParamCache.Add(txHash.String(), params) // Use Add method of LRU cache
+	bs.txParamCache.Add(txHash.String(), params)
 	bs.logger.Debug().Str("txHash", txHash.String()).Msg("cached decoded task parameters")
 
 	return params, nil
 }
 
+// Stop stops the base strategy (cancels context, waits for workers).
+// The Producer's Stop must be called separately by the strategy implementation.
 func (bs *baseStrategy) Stop() {
 	bs.stopOnce.Do(func() {
 		bs.logger.Info().Msgf("stopping %s strategy workers", bs.strategyName)
 		if bs.cancelFunc != nil {
 			bs.cancelFunc()
 		}
-		// Unsubscribe from events if subscribed
-		if bs.taskEventSub != nil {
-			bs.taskEventSub.Unsubscribe()
-			bs.logger.Info().Msg("unsubscribed from task events")
-		}
-		bs.wg.Wait()
+		bs.Wait() // Wait for worker goroutines using embedded WaitGroup
 		bs.logger.Info().Msgf("all %s strategy workers stopped", bs.strategyName)
-
-		// Explicitly stop the task queue after workers are done
-		if bs.taskQueue != nil {
-			bs.taskQueue.Stop()
-		}
 	})
 }
 
-// --- BulkMine Strategy ---
-// This strategy mines tasks from the storage queue.
-// It does NOT listen for TaskSubmitted events.
-// It assumes tasks in storage could be from single or bulk submits.
+// StorageProducer polls storage and provides tasks via a buffered channel.
+type StorageProducer struct {
+	services *Services
+	logger   zerolog.Logger
+	ctx      context.Context    // Context managed by the strategy that creates it
+	cancel   context.CancelFunc // Cancel function for the poller loop
+	stopOnce sync.Once
 
-type BulkMineStrategy struct {
-	*baseStrategy // Embed pointer
+	taskChan chan *TaskSubmitted // Buffered channel for workers
+	poolSize int                 // Max size of the channel buffer
+
+	// Embed goroutineRunner for managing the poller loop
+	goroutineRunner
 }
 
+// NewStorageProducer creates a producer that polls the storage.
+func NewStorageProducer(appCtx context.Context, services *Services, poolSize int) *StorageProducer {
+	ctx, cancel := context.WithCancel(appCtx) // Create derived context for internal loop
+	if poolSize <= 0 {
+		poolSize = 10 // Default buffer size, matches worker count?
+	}
+	p := &StorageProducer{
+		services:        services,
+		logger:          services.Logger.With().Str("producer", "storage").Logger(),
+		ctx:             ctx,
+		cancel:          cancel,
+		taskChan:        make(chan *TaskSubmitted, poolSize),
+		poolSize:        poolSize,
+		goroutineRunner: goroutineRunner{},
+	}
+	return p
+}
+
+func (p *StorageProducer) Name() string { return "storage" }
+
+// Start begins the background storage polling loop.
+func (p *StorageProducer) Start(ctx context.Context) error {
+	p.logger.Info().Msg("starting")
+	p.Go(p.storageQueuePollerLoop) // Use the Go wrapper
+	return nil
+}
+
+// Stop signals the poller loop to stop and closes the task channel.
+func (p *StorageProducer) Stop() {
+	p.stopOnce.Do(func() {
+		p.logger.Info().Msg("stopping")
+		if p.cancel != nil {
+			p.cancel() // Signal background loop to stop
+		}
+		p.Wait()          // Wait for poller loop using embedded WaitGroup
+		close(p.taskChan) // Close channel after poller stops writing
+		p.logger.Info().Msg("stopped")
+	})
+}
+
+// storageQueuePollerLoop continuously polls the storage and fills the task channel.
+func (p *StorageProducer) storageQueuePollerLoop() {
+	p.logger.Info().Msg("storage queue poller loop started")
+
+	emptyPollInterval := 1 * time.Second
+	errorPollInterval := 5 * time.Second
+	backpressurePollInterval := 100 * time.Millisecond // How often to check when channel is full
+
+	for {
+		select {
+		case <-p.ctx.Done(): // Check for stop signal first
+			p.logger.Info().Msg("storage queue poller loop stopping")
+			return
+		default:
+			// Only poll the storages if the output channel has space.
+			if len(p.taskChan) >= p.poolSize {
+				p.logger.Debug().Int("chan_len", len(p.taskChan)).Int("chan_cap", p.poolSize).Dur("wait", backpressurePollInterval).Msg("task queue full, pausing queue poll")
+				// Wait a short interval before checking again, respecting context
+				select {
+				case <-time.After(backpressurePollInterval):
+					continue // Loop back to check context and channel length again
+				case <-p.ctx.Done():
+					p.logger.Info().Msg("storage queue poller loop stopping during backpressure wait")
+					return
+				}
+			}
+
+			// Channel has space, okay to try popping a task
+			p.logger.Debug().Msg("Polling storage queue for task...")
+			taskId, txHash, err := p.services.TaskStorage.PopTask()
+
+			if err != nil {
+				var sleepDuration time.Duration
+				if errors.Is(err, sql.ErrNoRows) {
+					sleepDuration = emptyPollInterval
+					p.logger.Debug().Dur("wait", sleepDuration).Msg("DB empty, pausing poll")
+				} else {
+					sleepDuration = errorPollInterval
+					p.logger.Error().Err(err).Dur("wait", sleepDuration).Msg("DB poll error, pausing poll")
+				}
+
+				// Wait before retrying, but check context during wait
+				select {
+				case <-time.After(sleepDuration):
+					continue // Retry polling
+				case <-p.ctx.Done():
+					p.logger.Info().Msg("storage queue poller loop stopping during sleep")
+					return
+				}
+			}
+
+			// Successfully popped a task
+			ts := &TaskSubmitted{TaskId: taskId, TxHash: txHash}
+			p.logger.Debug().Str("task", taskId.String()).Msg("popped task from storage, attempting to buffer")
+
+			// Send to channel (blocks if full), but handle context cancellation
+			select {
+			case p.taskChan <- ts:
+				p.logger.Debug().Str("task", taskId.String()).Int("chan_len", len(p.taskChan)).Msg("task buffered")
+				// Immediately try to poll again if channel wasn't full
+			case <-p.ctx.Done():
+				p.logger.Warn().Str("task", taskId.String()).Msg("storage queue poller stopping, discarding popped task")
+				return // Exit loop
+			}
+		}
+	}
+}
+
+// GetTask waits for a task from the internal channel or context cancellation.
+func (p *StorageProducer) GetTask(ctx context.Context) (*TaskSubmitted, error) {
+	p.logger.Debug().Int("chan_len", len(p.taskChan)).Msg("worker requesting task")
+	select {
+	case <-p.ctx.Done(): // Producer context stopping
+		return nil, errors.New("storage producer stopped")
+	case <-ctx.Done(): // Worker context stopping
+		return nil, ctx.Err()
+	case task, ok := <-p.taskChan:
+		if !ok {
+			// Channel closed means producer is stopped
+			return nil, errors.New("storage producer channel closed")
+		}
+		p.logger.Info().Str("task", task_common.TaskId(task.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing task from buffer")
+		return task, nil
+	}
+}
+
+// EventProducer listens for on-chain TaskSubmitted events and provides them via a channel.
+type EventProducer struct {
+	services      *Services
+	logger        zerolog.Logger
+	ctx           context.Context    // Context managed by the strategy
+	cancel        context.CancelFunc // Cancel function for the listener loop
+	stopOnce      sync.Once
+	taskChan      chan *TaskSubmitted // Buffered channel for workers
+	sinkEvents    chan *engine.EngineTaskSubmitted
+	maxBufferSize int
+
+	// Subscription management
+	subManager *subscriptionManager
+
+	// Embed goroutineRunner for managing internal loops
+	goroutineRunner
+}
+
+// NewEventProducer creates a producer that listens for on-chain events.
+func NewEventProducer(appCtx context.Context, services *Services, bufferSize int) *EventProducer {
+	ctx, cancel := context.WithCancel(appCtx)
+	if bufferSize <= 0 {
+		bufferSize = 100 // Default buffer size
+	}
+	p := &EventProducer{
+		services:        services,
+		logger:          services.Logger.With().Str("producer", "event").Logger(),
+		ctx:             ctx,
+		cancel:          cancel,
+		taskChan:        make(chan *TaskSubmitted, bufferSize),              // Ensure taskChan is initialized
+		sinkEvents:      make(chan *engine.EngineTaskSubmitted, bufferSize), // Buffer raw events too
+		maxBufferSize:   bufferSize,
+		goroutineRunner: goroutineRunner{}, // Initialize embedded runner
+	}
+
+	// Create the subscription manager, passing a closure for the connection logic
+	connectFn := func(connectCtx context.Context) (event.Subscription, error) {
+		client := p.services.OwnerAccount.Client.Client
+		if client == nil {
+			return nil, errors.New("ethereum client is nil")
+		}
+		engineAddr := p.services.Config.BaseConfig.EngineAddress
+		engineContract, err := engine.NewEngine(engineAddr, client)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create engine contract instance: %w", err)
+		}
+		// Get block number within the connect timeout context
+		blockNo, err := client.BlockNumber(connectCtx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get block number for subscription: %w", err)
+		}
+		// IMPORTANT: Use the manager's PARENT context (p.ctx) for the long-running Watch call
+		// The connectCtx is only for the setup phase (getting blockNo etc.)
+		return engineContract.WatchTaskSubmitted(&bind.WatchOpts{
+			Start:   &blockNo,
+			Context: p.ctx, // Use producer's main context for watch duration
+		}, p.sinkEvents, nil, nil, nil) // Use the WaitGroup from the embedded runner
+	}
+
+	p.subManager = NewSubscriptionManager(p.ctx, &p.WaitGroup, p.logger, "TaskSubmitted", connectFn)
+
+	return p
+}
+
+func (p *EventProducer) Name() string { return "event" }
+
+// Start begins the event listener loop.
+func (p *EventProducer) Start(ctx context.Context) error {
+	// Start the subscription manager (manages connection/reconnection)
+	p.subManager.Start()
+	// Start the loop to process events received in the sink
+	p.Go(p.processEventsLoop) // Use Go wrapper
+	return nil
+}
+
+// Stop signals the listener loop to stop and closes the task channel.
+func (p *EventProducer) Stop() {
+	p.stopOnce.Do(func() {
+		p.logger.Info().Msg("stopping")
+		// Stop the subscription manager first (cancels context, unsubscribes)
+		p.subManager.Stop()
+		if p.cancel != nil {
+			p.cancel() // Signal listener loop
+		}
+		p.Wait()          // Wait for manager AND processEventsLoop
+		close(p.taskChan) // Close channel after all goroutines exit
+		p.logger.Info().Msg("stopped")
+	})
+}
+
+// GetTask waits for a task from the internal channel or context cancellation.
+func (p *EventProducer) GetTask(ctx context.Context) (*TaskSubmitted, error) {
+	p.logger.Debug().Int("chan_len", len(p.taskChan)).Msg("worker requesting task")
+	select {
+	case <-p.ctx.Done(): // Producer context stopping
+		return nil, errors.New("event producer stopped")
+	case <-ctx.Done(): // Worker context stopping
+		return nil, ctx.Err()
+	case task, ok := <-p.taskChan:
+		if !ok {
+			// Channel closed means producer is stopped
+			return nil, errors.New("event producer channel closed")
+		}
+		p.logger.Info().Str("task", task_common.TaskId(task.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing task from event buffer")
+		return task, nil
+	}
+}
+
+// processEventsLoop waits for events from the sink channel and pushes them to the task channel.
+func (p *EventProducer) processEventsLoop() {
+	p.logger.Info().Msg("starting event processing loop")
+
+	for {
+		select {
+		case <-p.ctx.Done():
+			p.logger.Info().Msg("shutting down event processing loop")
+			return
+
+		case event := <-p.sinkEvents:
+			if event == nil {
+				continue
+			}
+
+			ts := &TaskSubmitted{
+				TaskId: event.Id,
+				TxHash: event.Raw.TxHash,
+			}
+			taskIdStr := task_common.TaskId(ts.TaskId).String()
+
+			p.logger.Info().Str("task", taskIdStr).Int("chan_len", len(p.taskChan)).Msg("received TaskSubmitted event")
+
+			select {
+			case p.taskChan <- ts:
+				p.logger.Debug().Str("task", taskIdStr).Int("chan_len", len(p.taskChan)).Msg("event task buffered for worker")
+			case <-p.ctx.Done():
+				p.logger.Warn().Str("task", taskIdStr).Msg("context cancelled during event processing, discarding event")
+				// Do not return here, allow loop to continue checking context
+			default:
+				p.logger.Warn().Str("task", taskIdStr).Int("buffer_size", p.maxBufferSize).Msg("event task channel full, discarding new event")
+			}
+		}
+	}
+}
+
+// BulkMine Strategy: Uses StorageProducer.
+type BulkMineStrategy struct {
+	*baseStrategy
+	producer TaskProducer
+}
+
+// NewBulkMineStrategy creates the strategy with a StorageProducer.
 func NewBulkMineStrategy(appContext context.Context, services *Services, miner *Miner, gpuPool *GPUPool) (*BulkMineStrategy, error) {
-	// BulkMine processes tasks from DB, MUST NOT EVICT.
-	base, err := newBaseStrategy(appContext, services, miner, gpuPool, "bulkmine", false, false) // false = does not need task events, false = disable eviction
+	base, err := newBaseStrategy(appContext, services, miner, gpuPool, "bulkmine")
 	if err != nil {
 		return nil, err
 	}
+	// Size the producer buffer use numWorkers*2 for now?
+	producer := NewStorageProducer(base.ctx, services, base.numWorkers*2)
+
 	return &BulkMineStrategy{
 		baseStrategy: &base,
+		producer:     producer,
 	}, nil
 }
 
@@ -344,305 +778,380 @@ func (s *BulkMineStrategy) Name() string { return s.strategyName }
 
 func (s *BulkMineStrategy) Start() error {
 	s.logger.Info().Msgf("starting %s strategy", s.Name())
-	// Start workers
-	err := s.baseStrategy.start(s.handleTask, nil) // No event handler needed
-	if err != nil {
-		return err
-	}
-	// Start pulling tasks from storage
-	s.Go(s.pullTasksFromStorage)
-	return nil
+	return s.baseStrategy.start(s.producer, s.handleTask)
 }
 
-// handleTask is the specific task processing logic for BulkMine.
-func (s *BulkMineStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmitted) {
-	// assert that the task is not nil
-	if ts == nil {
-		s.logger.Error().Msg("task is nil")
-		return
+// handleTask processes a task received from the StorageProducer.
+func (s *BulkMineStrategy) handleTask(workerId int, gpu *task_common.GPU, ts *TaskSubmitted) {
+	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task_common.TaskId(ts.TaskId).String()).Logger()
+
+	taskId := task_common.TaskId(ts.TaskId)
+
+	requeueTask := func(taskId task_common.TaskId) {
+		// Requeue ONLY because this strategy uses StorageProducer
+		requeued, errDb := s.services.TaskStorage.RequeueTaskIfNoCommitmentOrSolution(taskId)
+		if errDb != nil {
+			workerLogger.Error().Err(errDb).Msg("failed to requeue task to DB")
+		} else if requeued {
+			workerLogger.Info().Msg("task requeued successfully to DB")
+		} else {
+			workerLogger.Warn().Msg("task not requeued (may have commitment/solution or other error)")
+		}
 	}
 
-	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", ts.TaskId.String()).Logger()
-
-	// Decode the transaction (uses cache internally)
+	// Decode the transaction (uses base cache)
 	params, err := s.decodeTransaction(ts.TxHash)
 	if err != nil {
-		// Error already logged by decodeTransaction
-		s.taskQueue.TaskFailed(ts.TaskId)
+		// Check if the error is permanent (decode issue or not found)
+		if errors.Is(err, ErrTxDecodePermanent) || errors.Is(err, ethereum.NotFound) {
+			workerLogger.Error().Err(err).Msg("permanent decode failure for task, dropping")
+			// TODO: consider deleting the task from storage
+		} else {
+			// Assume other errors (like context cancelled or transient network issues) might be recoverable
+			workerLogger.Warn().Err(err).Msg("transient error decoding transaction, requeueing task")
+			requeueTask(taskId)
+		}
+		gpu.SetStatus("Error")
 		return
 	}
 
-	// Solve the task using decoded params
 	solveStart := time.Now()
-	_, err = s.miner.SolveTask(s.ctx, ts.TaskId, params, gpu, false) // false = not validateOnly
+	_, err = s.miner.SolveTask(s.ctx, taskId, params, gpu, false) // false = not validateOnly
 	solveElapsed := time.Since(solveStart)
 
 	if err != nil {
-		workerLogger.Error().Msg("solve taks failed, requeueing task")
-
-		requeued, err := s.services.TaskStorage.RequeueTaskIfNoCommitmentOrSolution(ts.TaskId)
-		if err != nil {
-			workerLogger.Error().Err(err).Msg("failed to requeue task")
-		} else if requeued {
-			workerLogger.Info().Msg("task requeued successfully")
-		} else {
-			workerLogger.Error().Msg("task not requeued due to existing commitment and/or solution")
-		}
-
-		s.taskQueue.TaskFailed(ts.TaskId) // Mark as failed in the in-memory queue regardless
+		workerLogger.Error().Err(err).Msg("solve task failed, attempting requeue to DB")
+		// Requeue ONLY because this strategy uses StorageProducer
+		requeueTask(taskId)
 		gpu.SetStatus("Error")
 	} else {
 		workerLogger.Info().Str("elapsed", solveElapsed.String()).Msg("task solved successfully")
-		s.taskQueue.TaskCompleted(ts.TaskId)
-		s.gpuPool.AddSolveTime(solveElapsed) // Add successful solve time to pool average
-		gpu.SetStatus("Idle")                // Set back to Idle after successful solve
+		s.gpuPool.AddSolveTime(solveElapsed)
+		gpu.SetStatus("Idle")
 	}
 }
 
-// pullTasksFromStorage continuously pulls tasks from the DB and adds them to the queue.
-func (s *BulkMineStrategy) pullTasksFromStorage() {
-	s.logger.Info().Msg("started task storage puller")
-
-	// TODO: make this configurable or change approach (can we get signal from db task storage)
-	// or dont pull tasks if gpus are busy etc.
-	ticker := time.NewTicker(20 * time.Millisecond)
-
-	defer ticker.Stop()
-
-	lastEmptyWarning := time.Now()
-
-	poppedCount := 0
-	for {
-		select {
-		case <-s.ctx.Done(): // Use strategy's context
-			s.logger.Info().Int("total_popped", poppedCount).Msg("stopping task storage puller")
-			return
-		case <-ticker.C:
-			// Check context again after ticker fires
-			if s.ctx.Err() != nil {
-				continue
-			}
-
-			taskId, txHash, err := s.services.TaskStorage.PopTask()
-			if err != nil {
-				if err == sql.ErrNoRows {
-					// Queue is empty, normal condition, wait for next tick
-					// we should warn the user there are no tasks to do but only ever n seconds to not flood the logs etc
-					if time.Since(lastEmptyWarning) > 10*time.Second {
-						s.logger.Warn().Msg("task storage is empty, nothing to do. will sleep for 2 seconds")
-						lastEmptyWarning = time.Now()
-					}
-					time.Sleep(2 * time.Second)
-				} else {
-					// Log actual DB errors
-					s.logger.Error().Err(err).Msg("could not pop task from storage, will retry")
-					time.Sleep(5 * time.Second) // Backoff on error
-				}
-				continue
-			}
-
-			// We got a task from storage
-			poppedCount++
-			s.logger.Info().Str("task", taskId.String()).Int("popped_count", poppedCount).Msg("popped task from storage")
-
-			ts := &TaskSubmitted{
-				TaskId: taskId,
-				TxHash: txHash,
-			}
-
-			// Add to the queue, AddTask handles deduplication and signalling
-			added := s.taskQueue.AddTask(ts)
-			if !added {
-				s.logger.Warn().Str("task", taskId.String()).Msg("popped task from storage was already known/inflight")
-			}
-			// Small delay to prevent overwhelming the queue
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
-}
-
-// Stop ensures base strategy stop is called.
+// Stop stops the base workers and the storage producer.
 func (s *BulkMineStrategy) Stop() {
-	s.baseStrategy.Stop()
+	s.logger.Info().Msgf("stopping %s strategy", s.Name())
+	s.producer.Stop()     // Stop the producer first
+	s.baseStrategy.Stop() // Then stop the base (workers)
+	s.logger.Info().Msgf("%s strategy stopped", s.Name())
 }
 
-// --- AutoMine Strategy ---
-// Inherits directly from BulkMineStrategy. Its behavior is identical in terms of
-// task processing (pulls from storage, decodes Tx, solves).
-// The selection of this strategy signals that BatchTransactionManager should be
-// configured to automatically create tasks.
-
+// AutoMine Strategy: Inherits from BulkMine, uses StorageProducer.
 type AutoMineStrategy struct {
 	*BulkMineStrategy // Embed BulkMineStrategy as a pointer
 }
 
+// NewAutoMineStrategy creates the strategy with a StorageProducer.
 func NewAutoMineStrategy(appContext context.Context, services *Services, miner *Miner, gpuPool *GPUPool) (*AutoMineStrategy, error) {
-	if !services.Config.BatchTasks.Enabled {
-		// if the batch tasks are disabled, we can still use the automine strategy
-		// but we need to warn the user that batch tasks are disabled
-		services.Logger.Warn().Msg("note: batch tasks are disabled so no new tasks will be generated (enable with batchtasks.enabled=true)")
-	}
 	if services.Config.Miner.BatchMode != 1 {
-		return nil, errors.New("automine strategy requires solver batch mode to be 1 (solver.batch_mode=1)")
+		return nil, errors.New("automine strategy requires batch mode to be enabled (solver.batchmode=1)")
+	}
+	if !services.Config.BatchTasks.Enabled {
+		// this should be a warning
+		services.Logger.Warn().Msg("automine strategy uses batch tasks, but batch tasks are not enabled (batchtasks.enabled=false)")
 	}
 
-	// AutoMine relies on BulkMine logic (processing from DB), MUST NOT EVICT.
-	// Note: We pass the correct strategy name "automine" here.
-	base, err := newBaseStrategy(appContext, services, miner, gpuPool, "automine", false, false) // false = no task events needed, false = disable eviction
+	// TODO: validate that the automine model fee is set correctly - it needs to be the same as model.fee as per onchain ontract
+
+	// Create the embedded BulkMineStrategy
+	bulkStrategy, err := NewBulkMineStrategy(appContext, services, miner, gpuPool)
 	if err != nil {
 		return nil, err
 	}
-
-	// We need to create the *embedded* BulkMineStrategy using the base we just configured
-	bulkStrategy := &BulkMineStrategy{baseStrategy: &base}
+	// Override the logger name
+	bulkStrategy.logger = services.Logger.With().Str("strategy", "automine").Logger()
+	bulkStrategy.strategyName = "automine" // Ensure base strategy name is also updated
 
 	return &AutoMineStrategy{
 		BulkMineStrategy: bulkStrategy,
 	}, nil
 }
 
-func (s *AutoMineStrategy) Name() string { return s.strategyName }
-
-func (s *AutoMineStrategy) Start() error {
-	return s.BulkMineStrategy.Start()
+// Listen Strategy uses EventProducer
+type ListenStrategy struct {
+	*baseStrategy
+	producer TaskProducer
 }
 
-func (s *AutoMineStrategy) Stop() {
-	s.BulkMineStrategy.Stop()
-}
-
-func (s *AutoMineStrategy) HandleTaskSubmitted(event *engine.EngineTaskSubmitted) {
-	s.BulkMineStrategy.HandleTaskSubmitted(event)
-}
-
-// --- SolutionSampler Strategy ---
-// Samples tasks from the solution submitted event and adds them to the queue for validation
-
-type SolutionSamplerStrategy struct {
-	*baseStrategy                      // Embed pointer
-	sampleTicker          *time.Ticker // Ticker for periodic sampling batch processing
-	maxTaskSampleSize     int
-	tasksSamples          []*TaskSubmitted
-	sampleIndex           int
-	solutionEventSub      event.Subscription // Hold the subscription to manage errors
-	sinkSolutionSubmitted chan *engine.EngineSolutionSubmitted
-}
-
-func NewSolutionSamplerStrategy(appCtx context.Context, services *Services, miner *Miner, gpuPool *GPUPool) (*SolutionSamplerStrategy, error) {
-	sinkSolutionSubmitted := make(chan *engine.EngineSolutionSubmitted, 1024)
-
-	// SolutionSampler uses TaskSubmitted events for caching, might receive many, CAN EVICT.
-	base, err := newBaseStrategy(appCtx, services, miner, gpuPool, "solutionsampler", true, true) // true = needs task events, true = enable eviction
+// NewListenStrategy creates the strategy with an EventProducer.
+func NewListenStrategy(appContext context.Context, services *Services, miner *Miner, gpuPool *GPUPool) (*ListenStrategy, error) {
+	base, err := newBaseStrategy(appContext, services, miner, gpuPool, "listen")
 	if err != nil {
 		return nil, err
 	}
+	// Size the producer buffer - needs config? Let's use numWorkers*2 for now.
+	producer := NewEventProducer(base.ctx, services, base.numWorkers*2) // Use strategy's context
 
-	numWorkers := gpuPool.NumGPUs() * services.Config.NumWorkersPerGPU // Get numWorkers again for sample size
-	return &SolutionSamplerStrategy{
-		baseStrategy:          &base,
-		maxTaskSampleSize:     numWorkers,
-		tasksSamples:          make([]*TaskSubmitted, 0, numWorkers),
-		sinkSolutionSubmitted: sinkSolutionSubmitted,
-		solutionEventSub:      nil,
+	return &ListenStrategy{
+		baseStrategy: &base,
+		producer:     producer,
 	}, nil
 }
 
-// HandleTaskSubmitted caches the TaskID -> TxHash mapping for later lookup when a solution is seen.
-func (s *SolutionSamplerStrategy) HandleTaskSubmitted(event *engine.EngineTaskSubmitted) {
-	s.taskQueue.CacheTxHash(event.Id, event.Raw.TxHash)
+func (s *ListenStrategy) Name() string { return s.strategyName }
+
+// Start starts the base workers and the event producer.
+func (s *ListenStrategy) Start() error {
+	s.logger.Info().Msgf("starting %s strategy", s.Name())
+	return s.baseStrategy.start(s.producer, s.handleTask)
 }
 
-func (s *SolutionSamplerStrategy) connectToSolutionSubmittedEvents() {
-	if s.solutionEventSub != nil {
-		s.solutionEventSub.Unsubscribe()
-	}
+// handleTask processes a task received from the EventProducer.
+func (s *ListenStrategy) handleTask(workerId int, gpu *task_common.GPU, ts *TaskSubmitted) {
+	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task_common.TaskId(ts.TaskId).String()).Logger()
 
-	s.logger.Info().Msg("subscribing to SolutionSubmitted events...")
-	subCtx, cancel := context.WithTimeout(s.ctx, 15*time.Second)
-	defer cancel()
-	blockNo, err := s.services.OwnerAccount.Client.Client.BlockNumber(subCtx)
+	params, err := s.decodeTransaction(ts.TxHash)
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to get current block number for solution event subscription")
+		workerLogger.Error().Err(err).Msg("decode transaction failed (event task)")
+		gpu.SetStatus("Error")
 		return
 	}
 
-	engineContract, err := engine.NewEngine(s.services.Config.BaseConfig.EngineAddress, s.services.OwnerAccount.Client.Client)
-	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to create engine contract instance for solution event watching")
-		return
-	}
-
-	s.solutionEventSub, err = engineContract.WatchSolutionSubmitted(&bind.WatchOpts{
-		Start:   &blockNo,
-		Context: s.ctx,
-	}, s.sinkSolutionSubmitted, nil, nil)
+	solveStart := time.Now()
+	_, err = s.miner.SolveTask(s.ctx, ts.TaskId, params, gpu, false)
+	solveElapsed := time.Since(solveStart)
 
 	if err != nil {
-		s.logger.Error().Err(err).Msg("failed to subscribe to SolutionSubmitted events")
+		workerLogger.Error().Err(err).Msg("solve task failed (event task - not requeued)")
+		// Event tasks are ephemeral, not requeued
+		gpu.SetStatus("Error")
 	} else {
-		s.logger.Info().Msg("subscribed to SolutionSubmitted events")
+		workerLogger.Info().Str("elapsed", solveElapsed.String()).Msg("task solved successfully (event task)")
+		s.gpuPool.AddSolveTime(solveElapsed)
+		gpu.SetStatus("Idle")
 	}
-
 }
 
-func (s *SolutionSamplerStrategy) Name() string { return s.strategyName }
+// Stop stops the base workers and the event producer.
+func (s *ListenStrategy) Stop() {
+	s.logger.Info().Msgf("stopping %s strategy", s.Name())
+	s.producer.Stop()     // Stop producer
+	s.baseStrategy.Stop() // Stop base (workers)
+	s.logger.Info().Msgf("%s strategy stopped", s.Name())
+}
 
-func (s *SolutionSamplerStrategy) Start() error {
-	s.logger.Info().Msg("starting SolutionSampler strategy")
+// SolutionEventProducer listens for SolutionSubmitted events, looks up TxHash, and produces validation tasks.
+// It collects samples over a period and dispatches them in batches.
+type SolutionEventProducer struct {
+	services     *Services
+	logger       zerolog.Logger
+	txParamCache *lru.Cache // Reference to baseStrategy's cache
+	ctx          context.Context
+	cancel       context.CancelFunc
+	stopOnce     sync.Once
+	taskChan     chan *TaskSubmitted // Output channel for validation tasks
+	bufferSize   int
 
-	// Start common components (workers, task event listener)
-	err := s.baseStrategy.start(s.handleSampledTask, s.HandleTaskSubmitted)
-	if err != nil {
-		return err
+	// Event handling specific fields
+	sinkTaskSubmitted     chan *engine.EngineTaskSubmitted     // Sink for TaskSubmitted events
+	sinkSolutionSubmitted chan *engine.EngineSolutionSubmitted // Sink for SolutionSubmitted events
+	maxTaskSampleSize     int                                  // Max samples to keep per period
+
+	// Subscription management
+	taskSubManager     *subscriptionManager // Manages TaskSubmitted subscription
+	solutionSubManager *subscriptionManager // Manages SolutionSubmitted subscription
+
+	// Sample collection state
+	sampleMutex    sync.Mutex
+	tasksSamples   []*TaskSubmitted // Using pointer to avoid copying large structs
+	sampleIndex    int
+	dispatchTicker *time.Ticker
+
+	// Embed goroutineRunner for managing internal loops
+	goroutineRunner
+}
+
+// NewSolutionEventProducer creates a producer for the SolutionSampler strategy.
+// It requires access to the baseStrategy's txParamCache.
+func NewSolutionEventProducer(appCtx context.Context, services *Services, txParamCache *lru.Cache, bufferSize, sampleSize int, dispatchInterval time.Duration) *SolutionEventProducer {
+	ctx, cancel := context.WithCancel(appCtx)
+	if bufferSize <= 0 {
+		bufferSize = 100 // Default buffer size
+	}
+	if sampleSize <= 0 {
+		sampleSize = 50 // Default sample size
+	}
+	if dispatchInterval <= 0 {
+		dispatchInterval = 1 * time.Minute // Default dispatch interval
+	}
+	if txParamCache == nil {
+		services.Logger.Error().Msg("SolutionEventProducer created without a valid txParamCache! It will not be able to produce tasks.")
 	}
 
-	// Start the goroutine to listen for SolutionSubmitted events
-	s.connectToSolutionSubmittedEvents() // Initial connection
-	s.Go(s.listenForSolutions)
+	p := &SolutionEventProducer{
+		services:              services,
+		logger:                services.Logger.With().Str("producer", "solutionevent").Logger(),
+		txParamCache:          txParamCache,
+		ctx:                   ctx,
+		cancel:                cancel,
+		taskChan:              make(chan *TaskSubmitted, bufferSize),
+		bufferSize:            bufferSize,
+		sinkTaskSubmitted:     make(chan *engine.EngineTaskSubmitted, 200),     // Sink channel for Task events
+		sinkSolutionSubmitted: make(chan *engine.EngineSolutionSubmitted, 200), // Sink channel for Solution events
+		maxTaskSampleSize:     sampleSize,
+		tasksSamples:          make([]*TaskSubmitted, 0, sampleSize),
+		dispatchTicker:        time.NewTicker(dispatchInterval),
+		goroutineRunner:       goroutineRunner{}, // Initialize embedded runner
+	}
 
-	// Start the ticker for processing samples periodically
-	s.sampleTicker = time.NewTicker(1 * time.Minute) // Process samples every minute
-	s.Go(s.periodicSampleProcessor)
+	// ConnectFunc for TaskSubmitted events
+	connectTaskFn := func(connectCtx context.Context) (event.Subscription, error) {
+		client := p.services.OwnerAccount.Client.Client
+		if client == nil {
+			return nil, errors.New("ethereum client is nil")
+		}
+		engineAddr := p.services.Config.BaseConfig.EngineAddress
+		engineContract, err := engine.NewEngine(engineAddr, client)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create engine contract instance: %w", err)
+		}
+		blockNo, err := client.BlockNumber(connectCtx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get block number: %w", err)
+		}
+		return engineContract.WatchTaskSubmitted(&bind.WatchOpts{
+			Start:   &blockNo,
+			Context: p.ctx, // Use producer's main context
+		}, p.sinkTaskSubmitted, nil, nil, nil) // Use the WaitGroup from the embedded runner
+	}
+	p.taskSubManager = NewSubscriptionManager(p.ctx, &p.WaitGroup, p.logger, "TaskSubmitted", connectTaskFn)
 
+	// ConnectFunc for SolutionSubmitted events
+	connectSolutionFn := func(connectCtx context.Context) (event.Subscription, error) {
+		client := p.services.OwnerAccount.Client.Client
+		if client == nil {
+			return nil, errors.New("ethereum client is nil")
+		}
+		engineAddr := p.services.Config.BaseConfig.EngineAddress
+		engineContract, err := engine.NewEngine(engineAddr, client)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create engine contract instance: %w", err)
+		}
+		blockNo, err := client.BlockNumber(connectCtx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get block number: %w", err)
+		}
+		return engineContract.WatchSolutionSubmitted(&bind.WatchOpts{
+			Start:   &blockNo,
+			Context: p.ctx, // Use producer's main context
+		}, p.sinkSolutionSubmitted, nil, nil) // Use the WaitGroup from the embedded runner
+	}
+	p.solutionSubManager = NewSubscriptionManager(p.ctx, &p.WaitGroup, p.logger, "SolutionSubmitted", connectSolutionFn)
+
+	return p
+}
+
+func (p *SolutionEventProducer) Name() string { return "solutionevent" }
+
+// Start begins the subscription managers and the event processing/dispatching loops.
+func (p *SolutionEventProducer) Start(ctx context.Context) error {
+	if p.txParamCache == nil {
+		p.logger.Error().Msg("cannot start: txParamCache is nil")
+		return errors.New("SolutionEventProducer requires a valid txParamCache")
+	}
+	p.logger.Info().Msg("starting")
+
+	p.taskSubManager.Start()     // Manages TaskSubmitted connection
+	p.solutionSubManager.Start() // Manages SolutionSubmitted connection
+
+	p.Go(p.processTaskSubmittedEvents)
+	p.Go(p.processSolutionSubmittedEvents)
+	p.Go(p.sampleDispatcherLoop)
 	return nil
 }
 
-// listenForSolutions handles incoming solution events and adds them to the sample pool.
-func (s *SolutionSamplerStrategy) listenForSolutions() {
-	s.logger.Info().Msg("started solution event listener")
+// Stop signals the loops to stop, stops the ticker/managers, and closes the output task channel.
+func (p *SolutionEventProducer) Stop() {
+	p.stopOnce.Do(func() {
+		p.logger.Info().Msg("stopping")
+		// Stop ticker first
+		if p.dispatchTicker != nil {
+			p.dispatchTicker.Stop()
+		}
+		// Stop subscription managers (unsubscribes, cancels internal context)
+		if p.taskSubManager != nil {
+			p.taskSubManager.Stop()
+		}
+		if p.solutionSubManager != nil {
+			p.solutionSubManager.Stop()
+		}
+		// Cancel main producer context to signal processing loops
+		if p.cancel != nil {
+			p.cancel()
+		}
+		p.Wait()          // Waits for all goroutines started via p.Go AND the subscription managers
+		close(p.taskChan) // Close channel after all goroutines exit
+		p.logger.Info().Msg("stopped")
+	})
+}
 
-	maxBackoff := 30 * time.Second
-	currentBackoff := 1 * time.Second
+// GetTask waits for a validation task generated from the dispatcher loop.
+func (p *SolutionEventProducer) processTaskSubmittedEvents() {
+	p.logger.Info().Msg("starting TaskSubmitted event processing loop (for caching)")
 
 	for {
 		select {
-		case <-s.ctx.Done():
-			s.logger.Info().Msg("stopping solution event listener")
+		case <-p.ctx.Done():
+			p.logger.Info().Msg("shutting down TaskSubmitted event processing loop")
 			return
-		case err := <-s.solutionEventSub.Err():
-			if err == nil {
-				continue
+		case event, ok := <-p.sinkTaskSubmitted:
+			if !ok {
+				p.logger.Info().Msg("TaskSubmitted sink channel closed, exiting loop")
+				return
 			}
-			s.logger.Warn().Err(err).Msgf("solution submitted subscription error, attempting reconnect in %s", currentBackoff)
-			time.Sleep(currentBackoff)
-			currentBackoff = (currentBackoff * 2) + time.Duration(rand.Intn(500))*time.Millisecond
-			if currentBackoff > maxBackoff {
-				currentBackoff = maxBackoff
-			}
-			s.connectToSolutionSubmittedEvents() // Call the reconnect func
-
-		case event := <-s.sinkSolutionSubmitted:
+			// should not happen but...
 			if event == nil {
 				continue
-			} // Skip nil events
+			}
 
-			// Reset backoff on successful event read
-			currentBackoff = 1 * time.Second
+			if p.txParamCache == nil {
+				p.logger.Error().Msg("received TaskSubmitted event but txParamCache is nil, cannot cache")
+				continue
+			}
+			p.logger.Debug().Str("task", task_common.TaskId(event.Id).String()).Msg("received TaskSubmitted, caching TxHash")
+			p.txParamCache.Add(task_common.TaskId(event.Id).String(), event.Raw.TxHash)
+		}
+	}
+}
 
-			// Get the TxHash from cache (essential for this strategy)
-			txHash, found := s.taskQueue.GetCachedTxHash(event.Task)
+// processSolutionSubmittedEvents waits for events from the sink and adds them to the sample pool.
+func (p *SolutionEventProducer) processSolutionSubmittedEvents() {
+	p.logger.Info().Msg("starting SolutionSubmitted event processing loop (for sampling)")
+
+	for {
+		select {
+		case <-p.ctx.Done():
+			p.logger.Info().Msg("shutting down SolutionSubmitted event processing loop")
+			return
+		case event, ok := <-p.sinkSolutionSubmitted:
+			if !ok {
+				p.logger.Info().Msg("SolutionSubmitted sink channel closed, exiting loop")
+				return
+			}
+			if event == nil {
+				continue
+			}
+
+			if p.txParamCache == nil {
+				p.logger.Error().Msg("received SolutionSubmitted event but txParamCache is nil, cannot produce task")
+				continue
+			}
+
+			taskIdStr := task_common.TaskId(event.Task).String()
+			p.logger.Debug().Str("task", taskIdStr).Msg("received SolutionSubmitted event, looking up TxHash for sampling")
+
+			// Look up TxHash from cache
+			val, found := p.txParamCache.Get(taskIdStr)
 			if !found {
-				s.logger.Warn().Str("task", task.TaskId(event.Task).String()).Msg("solution event received but no TxHash found in cache, skipping sample")
+				p.logger.Warn().Str("task", taskIdStr).Msg("solution event received but no TxHash found in cache, cannot validate/sample")
+				continue
+			}
+			txHash, ok := val.(common.Hash)
+			if !ok {
+				p.logger.Error().Str("task", taskIdStr).Msgf("invalid type found in txParamCache for task, expected common.Hash, got %T", val)
 				continue
 			}
 
@@ -651,88 +1160,192 @@ func (s *SolutionSamplerStrategy) listenForSolutions() {
 				TxHash: txHash,
 			}
 
-			// Add to sample using reservoir sampling
-			s.sampleIndex++
-			if len(s.tasksSamples) < s.maxTaskSampleSize {
-				s.tasksSamples = append(s.tasksSamples, ts)
-				s.logger.Debug().Str("task", ts.TaskId.String()).Int("sample_size", len(s.tasksSamples)).Msg("added solution to sample pool")
+			// Apply Reservoir Sampling
+			p.sampleMutex.Lock()
+			p.sampleIndex++
+			if len(p.tasksSamples) < p.maxTaskSampleSize {
+				p.tasksSamples = append(p.tasksSamples, ts)
+				p.logger.Debug().Str("task", taskIdStr).Int("sample_size", len(p.tasksSamples)).Msg("added solution to sample pool")
 			} else {
-				j := rand.Intn(s.sampleIndex)
-				if j < s.maxTaskSampleSize {
-					s.tasksSamples[j] = ts
-					s.logger.Debug().Str("task", ts.TaskId.String()).Int("replaced_index", j).Msg("replaced task in sample pool")
+				j := rand.Intn(p.sampleIndex)
+				if j < p.maxTaskSampleSize {
+					p.tasksSamples[j] = ts
+					p.logger.Debug().Str("task", taskIdStr).Int("replaced_index", j).Int("sample_size", len(p.tasksSamples)).Msg("replaced task in sample pool")
 				}
 			}
+			p.sampleMutex.Unlock()
+			// Note: Task is added to sample pool, dispatcher loop handles sending to workers.
 		}
 	}
 }
 
-// periodicSampleProcessor triggers the processing of collected samples.
-func (s *SolutionSamplerStrategy) periodicSampleProcessor() {
-	s.logger.Info().Msg("started periodic sample processor")
+// sampleDispatcherLoop periodically takes the collected samples and queues them for workers.
+func (p *SolutionEventProducer) sampleDispatcherLoop() {
+	p.logger.Info().Msg("starting sample dispatcher loop")
 
 	for {
 		select {
-		case <-s.ctx.Done():
-			s.logger.Info().Msg("stopping periodic sample processor")
+		case <-p.ctx.Done():
+			p.logger.Info().Msg("stopping sample dispatcher loop")
 			return
-		case <-s.sampleTicker.C:
-			if s.ctx.Err() != nil {
-				continue
+		case <-p.dispatchTicker.C:
+			p.logger.Debug().Msg("dispatch ticker fired, processing samples")
+
+			var newSamples []*TaskSubmitted
+
+			// Lock, copy, clear internal sample buffer
+			p.sampleMutex.Lock()
+			if len(p.tasksSamples) > 0 {
+				newSamples = make([]*TaskSubmitted, len(p.tasksSamples))
+				copy(newSamples, p.tasksSamples)
+				p.tasksSamples = p.tasksSamples[:0] // Clear while retaining capacity
+				p.sampleIndex = 0
+				p.logger.Info().Int("count", len(newSamples)).Msg("copied new samples for dispatch")
+			} else {
+				p.logger.Debug().Msg("no new samples collected in this period")
+				// Even if no new samples, we might still need to trim the existing queue if it grew unexpectedly.
+				// However, the main logic handles the combination and trimming naturally.
 			}
-			s.processSamples()
+			p.sampleMutex.Unlock()
+
+			// --- Drain existing tasks from channel ---
+			oldWaitingTasks := make([]*TaskSubmitted, 0, p.bufferSize) // Capacity hint
+		drainingLoop:
+			for {
+				select {
+				case task, ok := <-p.taskChan:
+					if !ok {
+						p.logger.Warn().Msg("task channel closed unexpectedly during drain")
+						break drainingLoop // Exit if channel got closed
+					}
+					oldWaitingTasks = append(oldWaitingTasks, task)
+				default: // Channel is empty
+					break drainingLoop
+				}
+			}
+			if len(oldWaitingTasks) > 0 {
+				p.logger.Info().Int("count", len(oldWaitingTasks)).Msg("drained waiting tasks from channel")
+			}
+
+			// --- Combine new samples and old tasks (new samples first) ---
+			combinedTasks := append(newSamples, oldWaitingTasks...)
+
+			// --- Trim oldest tasks if combined list exceeds buffer size ---
+			numToKeep := len(combinedTasks)
+			droppedOldestCount := 0
+			if numToKeep > p.bufferSize {
+				droppedOldestCount = numToKeep - p.bufferSize
+				combinedTasks = combinedTasks[:p.bufferSize] // Keep the first bufferSize elements (newest)
+				numToKeep = p.bufferSize
+				p.logger.Warn().Int("dropped_count", droppedOldestCount).Int("kept_count", numToKeep).Int("buffer_size", p.bufferSize).Msg("combined task list exceeded buffer size, oldest tasks dropped")
+			}
+
+			// --- Refill channel with the combined & trimmed list ---
+			if numToKeep > 0 {
+				p.logger.Info().Int("count", numToKeep).Msg("refilling channel with prioritized tasks...")
+				for _, ts := range combinedTasks {
+					if ts == nil {
+						continue
+					} // Safety check
+					taskIdStr := task_common.TaskId(ts.TaskId).String()
+					// Send should not block excessively as channel was drained and list trimmed to capacity,
+					// but still respect context cancellation.
+					select {
+					case p.taskChan <- ts:
+						p.logger.Debug().Str("task", taskIdStr).Int("q_len", len(p.taskChan)).Msg("added task back to channel")
+					case <-p.ctx.Done():
+						p.logger.Warn().Str("task", taskIdStr).Msg("context cancelled during channel refill, stopping refill")
+						return // Stop refilling if context is cancelled
+					}
+				}
+				p.logger.Info().Int("count", numToKeep).Int("final_q_len", len(p.taskChan)).Msg("finished refilling channel")
+			} else if droppedOldestCount > 0 {
+				// Log if we only dropped tasks and added nothing new (e.g., no new samples)
+				p.logger.Info().Int("dropped_count", droppedOldestCount).Msg("only dropped oldest tasks, no new tasks to add")
+			}
 		}
 	}
 }
 
-// processSamples copies the current samples and adds them to the task queue
-// for the workers to pick up and validate.
-func (s *SolutionSamplerStrategy) processSamples() {
-	if len(s.tasksSamples) == 0 {
-		s.logger.Debug().Msg("no samples collected, skipping processing cycle")
-		return
-	}
-
-	s.logger.Info().Int("samples", len(s.tasksSamples)).Msg("processing collected solution samples")
-
-	// Create a copy of the samples to avoid race conditions while iterating
-	samplesToProcess := make([]*TaskSubmitted, len(s.tasksSamples))
-	copy(samplesToProcess, s.tasksSamples)
-
-	// Clear the original sample pool for the next collection period
-	s.tasksSamples = s.tasksSamples[:0]
-	s.sampleIndex = 0
-
-	// Add the copied samples to the main task queue for validation workers
-	addedCount := 0
-	for _, ts := range samplesToProcess {
-		if s.ctx.Err() != nil { // Check for shutdown during adding
-			s.logger.Warn().Msg("shutdown signalled during sample queuing")
-			break
+// GetTask waits for a validation task generated from the dispatcher loop.
+func (p *SolutionEventProducer) GetTask(ctx context.Context) (*TaskSubmitted, error) {
+	p.logger.Debug().Int("chan_len", len(p.taskChan)).Msg("worker requesting validation task")
+	select {
+	case <-p.ctx.Done(): // Producer context stopping
+		return nil, errors.New("solution event producer stopped")
+	case <-ctx.Done(): // Worker context stopping
+		return nil, ctx.Err()
+	case task, ok := <-p.taskChan:
+		if !ok {
+			// Channel closed means producer is stopped
+			return nil, errors.New("solution event producer channel closed")
 		}
-		// AddTask handles signalling workers
-		if s.taskQueue.AddTask(ts) {
-			addedCount++
-		} else {
-			// Task might already be inflight (e.g., if processed previously and failed?)
-			s.logger.Debug().Str("task", ts.TaskId.String()).Msg("sampled task already known/inflight when adding to queue")
-		}
+		p.logger.Info().Str("task", task_common.TaskId(task.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing validation task from event")
+		return task, nil
 	}
-	s.logger.Info().Int("added", addedCount).Int("total_sampled", len(samplesToProcess)).Msg("added samples to task queue for validation")
 }
 
-// handleSampledTask performs the validation logic for a sampled task.
-func (s *SolutionSamplerStrategy) handleSampledTask(workerId int, gpu *task.GPU, ts *TaskSubmitted) {
-	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", ts.TaskId.String()).Logger()
+// SolutionSampler Strategy listens for solutions submitted by others and validates them locally.
+// Uses SolutionEventProducer.
+type SolutionSamplerStrategy struct {
+	*baseStrategy // Embed pointer
+	producer      TaskProducer
+}
+
+// NewSolutionSamplerStrategy creates the strategy using SolutionEventProducer.
+func NewSolutionSamplerStrategy(appCtx context.Context, services *Services, miner *Miner, gpuPool *GPUPool) (*SolutionSamplerStrategy, error) {
+	base, err := newBaseStrategy(appCtx, services, miner, gpuPool, "solutionsampler")
+	if err != nil {
+		return nil, err
+	}
+
+	// Buffer size should match worker count or be slightly larger.
+	bufferSize := base.numWorkers * 2
+	sampleSize := bufferSize
+	if sampleSize <= 0 {
+		sampleSize = 50 // Default sample size if no workers
+	}
+	if bufferSize <= 0 { // If bufferSize (derived from workers) is 0, use default
+		bufferSize = 20 // Default buffer
+	}
+	// TODO: Make dispatch interval configurable
+	dispatchInterval := 1 * time.Minute
+
+	producer := NewSolutionEventProducer(base.ctx, services, base.txParamCache, bufferSize, sampleSize, dispatchInterval)
+
+	return &SolutionSamplerStrategy{
+		baseStrategy: &base,
+		producer:     producer,
+	}, nil
+}
+
+func (s *SolutionSamplerStrategy) Name() string { return s.strategyName }
+
+// Start initializes workers via baseStrategy, using the SolutionEventProducer.
+func (s *SolutionSamplerStrategy) Start() error {
+	s.logger.Info().Msgf("starting %s strategy", s.Name())
+	// Use the standard base start method, passing the producer and the validation handler
+	return s.baseStrategy.start(s.producer, s.handleValidationTask)
+}
+
+// handleValidationTask performs the validation logic. Remains largely the same.
+// It's now the taskHandlerFunc passed to baseStrategy.start.
+func (s *SolutionSamplerStrategy) handleValidationTask(workerId int, gpu *task_common.GPU, ts *TaskSubmitted) {
+	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task_common.TaskId(ts.TaskId).String()).Logger()
 	workerLogger.Info().Msg("validating sampled task")
+	// Set status immediately, might be changed on error
+	gpu.SetStatus("Validating")
 
-	// Decode the transaction (uses cache internally)
+	// Decode the transaction (uses base cache or producer cache)
 	params, err := s.decodeTransaction(ts.TxHash)
 	if err != nil {
-		// Error logged by decodeTransaction
-		s.taskQueue.TaskFailed(ts.TaskId)
-		gpu.IncrementErrorCount()
-		gpu.SetStatus("Error - Decode")
+		// Check if the error is permanent
+		if errors.Is(err, ErrTxDecodePermanent) || errors.Is(err, ethereum.NotFound) {
+			workerLogger.Error().Err(err).Msg("permanent decode failure for solution task, skipping validation")
+		} else {
+			workerLogger.Warn().Err(err).Msg("transient error decoding solution task transaction, skipping validation")
+		}
+		gpu.SetStatus("Error") // Set status even for decode failure
 		return
 	}
 
@@ -743,7 +1356,6 @@ func (s *SolutionSamplerStrategy) handleSampledTask(workerId int, gpu *task.GPU,
 
 	if err != nil {
 		workerLogger.Error().Err(err).Msg("validation: solve task failed")
-		s.taskQueue.TaskFailed(ts.TaskId)
 		if gpu.IsEnabled() {
 			gpu.SetStatus("Error - Validate")
 		}
@@ -751,35 +1363,37 @@ func (s *SolutionSamplerStrategy) handleSampledTask(workerId int, gpu *task.GPU,
 	}
 	if ourCidBytes == nil {
 		workerLogger.Error().Msg("validation: solve task did not return a CID")
-		s.taskQueue.TaskFailed(ts.TaskId)
 		if gpu.IsEnabled() {
-			gpu.SetStatus("Error - Validate")
+			gpu.SetStatus("Error - Validate Null CID")
 		}
 		return
 	}
-	s.taskQueue.TaskCompleted(ts.TaskId) // Mark validation attempt as complete
-	if gpu.IsEnabled() {
-		gpu.SetStatus("Idle")
-	}
+
 	workerLogger.Info().Str("elapsed", solveElapsed.String()).Msg("validation: task solved locally")
 
 	// Fetch on-chain solution for comparison
 	engineContract, err := engine.NewEngine(s.services.Config.BaseConfig.EngineAddress, s.services.OwnerAccount.Client.Client)
 	if err != nil {
 		workerLogger.Error().Err(err).Msg("validation: failed to create engine contract instance")
+		gpu.SetStatus("Idle") // Reset status even if comparison fails
 		return
 	}
 
-	// Use CallOpts with the strategy's context
 	callOpts := &bind.CallOpts{Context: s.ctx}
 	res, err := engineContract.Solutions(callOpts, ts.TaskId)
 	if err != nil {
-		workerLogger.Error().Err(err).Msg("validation: error getting on-chain solution info")
-		return // Cannot compare
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			workerLogger.Warn().Err(err).Msg("validation: context cancelled during Solutions call")
+		} else {
+			workerLogger.Error().Err(err).Msg("validation: error getting on-chain solution info")
+		}
+		gpu.SetStatus("Idle") // Reset status
+		return
 	}
 
 	if res.Blocktime == 0 {
 		workerLogger.Warn().Msg("validation: no solution found on-chain (or call failed silently?), cannot compare")
+		gpu.SetStatus("Idle") // Reset status
 		return
 	}
 
@@ -790,132 +1404,24 @@ func (s *SolutionSamplerStrategy) handleSampledTask(workerId int, gpu *task.GPU,
 
 	if ourCid != solversCid {
 		workerLogger.Warn().Msg("==================== CID MISMATCH DETECTED =====================")
-		workerLogger.Warn().Msgf("  Task ID  : %s", ts.TaskId.String())
+		workerLogger.Warn().Msgf("  Task ID  : %s", task_common.TaskId(ts.TaskId).String())
 		workerLogger.Warn().Msgf("  Our CID  : %s", ourCid)
 		workerLogger.Warn().Msgf("  Their CID: %s", solversCid)
 		workerLogger.Warn().Msgf("  Solver   : %s", res.Validator.String())
-		workerLogger.Warn().Msgf("  Block    : %d", res.Blocktime) // Assuming Blocktime is block number
+		workerLogger.Warn().Msgf("  Block    : %d", res.Blocktime)
 		workerLogger.Warn().Msg("================================================================")
-		// TODO: Add alerting or further action here?
 	} else {
 		workerLogger.Info().Msg("validation: CID matches on-chain solution")
 	}
+
+	// Set status back to Idle after successful validation/comparison
+	gpu.SetStatus("Idle")
 }
 
+// Stop stops the producer and the base workers.
 func (s *SolutionSamplerStrategy) Stop() {
-	s.logger.Info().Msg("stopping SolutionSampler strategy")
-	if s.sampleTicker != nil {
-		s.sampleTicker.Stop()
-	}
-	// Unsubscribe from solution events
-	if s.solutionEventSub != nil {
-		s.solutionEventSub.Unsubscribe()
-		s.logger.Info().Msg("unsubscribed from solution events")
-	}
-	s.baseStrategy.Stop() // Stop base (workers, task listener)
-	s.logger.Info().Msg("SolutionSampler strategy stopped")
-}
-
-// --- Listen Strategy ---
-// This strategy listens for TaskSubmitted events and adds them directly to the queue.
-
-type ListenStrategy struct {
-	*baseStrategy // Embed pointer
-}
-
-func NewListenStrategy(appContext context.Context, services *Services, miner *Miner, gpuPool *GPUPool) (*ListenStrategy, error) {
-	// Listen processes tasks from events, might receive many, CAN EVICT.
-	base, err := newBaseStrategy(appContext, services, miner, gpuPool, "listen", true, true) // true = needs task events, true = enable eviction
-	if err != nil {
-		return nil, err
-	}
-
-	return &ListenStrategy{
-		baseStrategy: &base,
-	}, nil
-}
-
-func (s *ListenStrategy) Name() string { return s.strategyName }
-
-func (s *ListenStrategy) Start() error {
-	s.logger.Info().Msgf("starting %s strategy", s.Name())
-	// Start workers and task event listener
-	return s.baseStrategy.start(s.handleTask, s.HandleTaskSubmitted)
-}
-
-// HandleTaskSubmitted adds the received task event to the processing queue
-// and ensures it's recorded in the local task storage.
-func (s *ListenStrategy) HandleTaskSubmitted(event *engine.EngineTaskSubmitted) {
-	taskId := event.Id
-	txHash := event.Raw.TxHash
-
-	// Cast to task.TaskId for String() method and for AddTasks
-	taskIdTyped := task.TaskId(taskId)
-	taskIdStr := taskIdTyped.String()
-
-	ts := &TaskSubmitted{
-		TaskId: taskId, // Store original [32]byte in TaskSubmitted struct
-		TxHash: txHash,
-	}
-	// Add to the queue, AddTask handles deduplication and signalling workers
-	added := s.taskQueue.AddTask(ts)
-	if !added {
-		s.logger.Warn().Str("task", taskIdStr).Msg("received task event but task was already known/inflight in memory queue")
-		return
-	}
-
-	// zero cost as these are external tasks
-	// status 1 = queued
-	err := s.services.TaskStorage.AddTaskWithStatus(taskIdTyped, txHash, 0, 1)
-	if err != nil {
-		s.logger.Error().Err(err).Str("task", taskIdStr).Str("txHash", txHash.Hex()).
-			Msg("failed to store received task event in database")
-	} else {
-		s.logger.Info().Str("task", taskIdStr).Str("txHash", txHash.Hex()).
-			Msg("stored received task event in database via AddTask")
-	}
-
-}
-
-// handleTask processes a task from the queue (which originated from an event).
-func (s *ListenStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmitted) {
-	// Logic is very similar to BulkMineStrategy's handleTask
-	if ts == nil {
-		s.logger.Error().Msg("task is nil")
-		return
-	}
-	// Cast TaskId here for logging
-	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task.TaskId(ts.TaskId).String()).Logger()
-
-	// Decode the transaction (uses cache internally)
-	params, err := s.decodeTransaction(ts.TxHash)
-	if err != nil {
-		// Error already logged by decodeTransaction
-		s.taskQueue.TaskFailed(ts.TaskId)
-		// TODO: Update task status in DB to indicate decode failure?
-		return
-	}
-
-	// Solve the task using decoded params
-	solveStart := time.Now()
-	_, err = s.miner.SolveTask(s.ctx, ts.TaskId, params, gpu, false) // false = not validateOnly
-	solveElapsed := time.Since(solveStart)
-
-	if err != nil {
-		workerLogger.Error().Err(err).Msg("solve task failed")
-		s.taskQueue.TaskFailed(ts.TaskId)
-		// TODO: Update task status in DB to indicate solve failure?
-		gpu.SetStatus("Error")
-	} else {
-		workerLogger.Info().Str("elapsed", solveElapsed.String()).Msg("task solved successfully")
-		s.taskQueue.TaskCompleted(ts.TaskId)
-		// TODO: Update task status in DB to indicate solve success?
-		s.gpuPool.AddSolveTime(solveElapsed)
-		gpu.SetStatus("Idle")
-	}
-}
-
-// Stop ensures base strategy stop is called.
-func (s *ListenStrategy) Stop() {
-	s.baseStrategy.Stop()
+	s.logger.Info().Msgf("stopping %s strategy", s.Name())
+	s.producer.Stop()     // Stop the specific producer first
+	s.baseStrategy.Stop() // Then stop the base (waits for workers)
+	s.logger.Info().Msgf("%s strategy stopped", s.Name())
 }

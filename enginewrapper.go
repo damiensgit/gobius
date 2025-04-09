@@ -323,6 +323,31 @@ func (m *EngineWrapper) GetModelReward(modelId [32]byte) (*big.Int, error) {
 		totalReward = totalReward.Mul(totalReward, gaugeMultiplier)
 		totalReward = totalReward.Div(totalReward, RewardDenominator)
 
+
+		/* replicate this solidiy calcs in go:
+		  if (total > 0) {
+                uint256 treasuryReward = total -
+                    (total * (1e18 - treasuryRewardPercentage)) /
+                    1e18;
+
+                // v3
+                uint256 taskOwnerReward = total -
+                    (total * (1e18 - taskOwnerRewardPercentage)) /
+                    1e18;
+
+                uint256 validatorReward = total - treasuryReward - taskOwnerReward; // v3
+
+                baseToken.transfer(treasury, treasuryReward);
+                baseToken.transfer(tasks[taskid_].owner, taskOwnerReward); // v3
+                baseToken.transfer(
+                    solutions[taskid_].validator,
+                    validatorReward 
+                );
+
+                emit RewardsPaid(total, treasuryReward, taskOwnerReward, validatorReward);
+            }*/
+
+
 		return totalReward, nil
 	} else {
 		m.logger.Debug().Str("model", common.Bytes2Hex(modelId[:])).Msg("model reward is 0")

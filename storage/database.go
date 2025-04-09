@@ -58,14 +58,25 @@ func (ts *TaskStorageDB) GetPendingSolutionsCountPerValidator() (map[common.Addr
 	return mapValToCounts, err
 }
 
-func (ts *TaskStorageDB) AddCommitment(validator common.Address, taskId task.TaskId, commitment [32]byte) error {
-	err := ts.queries.CreateCommitment(ts.ctx, db.CreateCommitmentParams{
+// TryAddCommitment attempts to add a commitment to the database
+// Returns true if the commitment was added, false if it already exists
+// Returns an error if there is an error adding the commitment
+func (ts *TaskStorageDB) TryAddCommitment(validator common.Address, taskId task.TaskId, commitment [32]byte) (bool, error) {
+	exists, err := ts.queries.CheckCommitmentExists(ts.ctx, taskId)
+	if err != nil {
+		return false, err
+	}
+	if exists > 0 {
+		return false, nil // Commitment already exists, skip adding
+	}
+
+	err = ts.queries.CreateCommitment(ts.ctx, db.CreateCommitmentParams{
 		Taskid:     taskId,
 		Commitment: commitment,
 		Validator:  validator,
 	})
 
-	return err
+	return true, err
 }
 
 func (ts *TaskStorageDB) AddSolution(validator common.Address, taskId task.TaskId, cid []byte) error {
@@ -224,17 +235,12 @@ func (ts *TaskStorageDB) AddTasksToClaim(taskIds []task.TaskId, value float64) (
 	return claimTime, nil
 }
 
-func (ts *TaskStorageDB) DeleteClaim(taskkey string) error {
-	return nil
-}
-
 func (ts *TaskStorageDB) DeleteClaims(tasks []task.TaskId) error {
 	tx, err := ts.sqlite.Begin()
 	if err != nil {
 		return err
 	}
 	qtx := ts.queries.WithTx(tx)
-	start := time.Now()
 
 	defer tx.Rollback()
 
@@ -247,7 +253,6 @@ func (ts *TaskStorageDB) DeleteClaims(tasks []task.TaskId) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	ts.logger.Println("DeleteClaims time:", time.Since(start))
 
 	return nil
 
@@ -341,8 +346,6 @@ func beginImmediate(db *sql.DB) (*sql.Tx, error) {
 }
 
 func (ts *TaskStorageDB) PopTask() (task.TaskId, common.Hash, error) {
-	start := time.Now()
-
 	tx, err := beginImmediate(ts.sqlite)
 	if err != nil {
 		return task.TaskId{}, common.Hash{}, err
@@ -358,7 +361,6 @@ func (ts *TaskStorageDB) PopTask() (task.TaskId, common.Hash, error) {
 	if err := tx.Commit(); err != nil {
 		return task.TaskId{}, common.Hash{}, err
 	}
-	ts.logger.Println("popTaskFromQueue time:", time.Since(start))
 
 	return row.Taskid, row.Txhash, nil
 }
@@ -408,6 +410,33 @@ func (ts *TaskStorageDB) UpdateTaskStatusAndCost(tasks []task.TaskId, status int
 			Taskid:        taskId,
 			Cumulativegas: value,
 			Status:        status,
+		})
+		if err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (ts *TaskStorageDB) UpdateTaskStatusOnly(tasks []task.TaskId, status int64) error {
+	// start a transaction
+	tx, err := ts.sqlite.Begin()
+	if err != nil {
+		return err
+	}
+	qtx := ts.queries.WithTx(tx)
+
+	defer tx.Rollback()
+
+	for _, taskId := range tasks {
+		_, err := qtx.UpdateTaskStatus(ts.ctx, db.UpdateTaskStatusParams{
+			Taskid: taskId,
+			Status: status,
 		})
 		if err != nil {
 			return err
@@ -487,4 +516,40 @@ func (ts *TaskStorageDB) RequeueTaskIfNoCommitmentOrSolution(taskId task.TaskId)
 	rows, err := ts.queries.RequeueTaskIfNoCommitmentOrSolution(ts.ctx, taskId)
 
 	return rows > 0, err
+}
+
+func (ts *TaskStorageDB) DeleteTask(taskid task.TaskId) error {
+	_, err := ts.queries.DeletedTask(ts.ctx, taskid)
+	return err
+}
+
+func (ts *TaskStorageDB) UpsertTaskToClaimable(taskid task.TaskId, txhash common.Hash, claimTime time.Time) error {
+	claimTime = claimTime.Add(ts.minclaimtime)
+
+	params := db.UpsertTaskToClaimableParams{
+		Taskid:    taskid,
+		Txhash:    txhash,
+		Claimtime: claimTime.Unix(),
+	}
+	return ts.queries.UpsertTaskToClaimable(ts.ctx, params)
+}
+
+func (ts *TaskStorageDB) GetAllTasks() ([]db.Task, error) {
+	tasks, err := ts.queries.GetAllTasks(ts.ctx)
+
+	return tasks, err
+}
+
+func (ts *TaskStorageDB) GetTotalTasksGas() (int64, float64, error) {
+	data, err := ts.queries.GetTotalTasksGas(ts.ctx)
+
+	if err != nil {
+		return 0, 0.0, err
+	}
+
+	if data.Sum.Valid {
+		return data.Count, data.Sum.Float64, err
+	}
+
+	return data.Count, 0.0, err
 }
