@@ -393,7 +393,7 @@ func (tm *BatchTransactionManager) processBatchPoller(appQuit context.Context, w
 			profitLevel, baseFee, rewardInAIUS, ethPrice, basePrice, err := tm.calcProfit(nil)
 			if err != nil {
 				tm.services.Logger.Error().Err(err).Msg("could not calculate profit, skipping batch")
-				return
+				continue
 			}
 
 			start := time.Now()

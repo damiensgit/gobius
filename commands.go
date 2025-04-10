@@ -25,23 +25,26 @@ import (
 	"github.com/rs/zerolog"
 )
 
-func importUnsolvedTasks(filename string, logger *zerolog.Logger, ctx context.Context) error {
+func importUnsolvedTasks(appQuit context.Context, filename string, removeMode bool, logger *zerolog.Logger, ctx context.Context) error {
 	// Get the services from the context
 	services, ok := ctx.Value(servicesKey{}).(*Services)
 	if !ok {
 		log.Fatal("Could not get services from context")
 	}
 
-	logger.Info().Str("file", filename).Msg("importing tasks into task queue")
+	if removeMode {
+		logger.Info().Str("file", filename).Msg("removing tasks listed in file from task queue")
+	} else {
+		logger.Info().Str("file", filename).Msg("importing tasks into task queue")
+	}
 
 	file, err := os.Open(filename)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("could not open file")
 	}
 	// send file to json decoder
-
 	decoder := json.NewDecoder(file)
-	taskIdsToTxes := make(map[string]string)
+	taskIdsToTxes := make(map[string]string) // Still need TxHash if importing, might be unused if removing
 	err = decoder.Decode(&taskIdsToTxes)
 	if err != nil {
 		logger.Fatal().Err(err).Msg("could not decode file")
@@ -49,19 +52,72 @@ func importUnsolvedTasks(filename string, logger *zerolog.Logger, ctx context.Co
 	file.Close()
 
 	totalItemstoProcess := len(taskIdsToTxes)
-	logger.Info().Int("tasks", totalItemstoProcess).Msg("processing tasks from file")
+	if removeMode {
+		logger.Info().Int("tasks", totalItemstoProcess).Msg("processing tasks from file for removal")
+	} else {
+		logger.Info().Int("tasks", totalItemstoProcess).Msg("processing tasks from file for import")
+	}
 
-	mapOfHashsByTasks := make(map[string][]task.TaskId)
+	s := spinner.New(spinner.CharSets[11], 500*time.Millisecond, spinner.WithWriter(os.Stderr)) // Ensure spinner writes to stderr if needed
+	if removeMode {
+		s.Suffix = " removing tasks..."
+	} else {
+		s.Suffix = " processing tasks..."
+	}
+	s.FinalMSG = "completed!\n"
+	s.Start()
+	defer s.Stop() // Ensure spinner stops
+
 	mapOfPendingSolTasks := make(map[task.TaskId]struct{})
-
 	pendingSols, err := services.TaskStorage.GetAllSolutions()
 	if err != nil {
 		logger.Fatal().Err(err).Msg("could not get all pending solutions")
 	}
-
 	for _, v := range pendingSols {
 		mapOfPendingSolTasks[v.TaskId] = struct{}{}
 	}
+
+	if removeMode {
+		removedCount := 0
+		skippedPendingCount := 0
+		index := 0
+		for taskIdStr := range taskIdsToTxes {
+			index++
+			select {
+			case <-appQuit.Done():
+				logger.Info().Msg("app quit signal received, stopping removal")
+				return nil
+			default:
+			}
+
+			id, err := task.ConvertTaskIdString2Bytes(taskIdStr)
+			if err != nil {
+				logger.Error().Err(err).Str("task", taskIdStr).Msg("could not convert task ID string")
+				continue // Skip this task
+			}
+
+			// *** Check if a solution is pending for this task ***
+			if _, isPending := mapOfPendingSolTasks[id]; isPending {
+				logger.Warn().Str("task", taskIdStr).Msg("skipping removal: task has a pending solution")
+				skippedPendingCount++
+				continue // Skip deletion attempt
+			}
+
+			// Attempt to delete the task
+			err = services.TaskStorage.DeleteTask(id)
+			if err != nil {
+				logger.Error().Err(err).Str("task", taskIdStr).Msg("failed to delete task")
+			} else {
+				logger.Debug().Str("task", taskIdStr).Msg("task removed successfully")
+				removedCount++
+			}
+			s.Suffix = fmt.Sprintf(" removing tasks [%d/%d] (removed: %d, skipped_pending: %d)\n", index, totalItemstoProcess, removedCount, skippedPendingCount)
+		}
+		logger.Info().Int("removed", removedCount).Int("skipped_pending", skippedPendingCount).Int("total_processed", totalItemstoProcess).Msg("finished removing tasks from queue")
+		return nil // End function here for removal mode
+	}
+
+	mapOfHashsByTasks := make(map[string][]task.TaskId)
 
 	allTasks, err := services.TaskStorage.GetQueuedTasks()
 	if err != nil {
@@ -70,21 +126,26 @@ func importUnsolvedTasks(filename string, logger *zerolog.Logger, ctx context.Co
 
 	mapOfTaskOnwers := make(map[common.Address]int)
 
-	uniqueTasksMap := map[task.TaskId]struct{}{}
+	uniqueTasksMap := make(map[task.TaskId]struct{})
 	for _, v := range allTasks {
-		uniqueTasksMap[v.TaskId] = struct{}{}
+		uniqueTasksMap[v.TaskId] = struct{}{} // Corrected syntax
 	}
 
 	whitelistedCount := 0
 	solvedCount := 0
 	pendingCount := 0
-	s := spinner.New(spinner.CharSets[11], 500*time.Millisecond)
-	s.Suffix = " processing tasks..."
-	s.FinalMSG = "completed!\n"
-	s.Start()
+	alreadyExists := 0
 	index := 0
 	for taskId, txHash := range taskIdsToTxes {
 		index++
+
+		select {
+		case <-appQuit.Done():
+			logger.Info().Msg("app quit signal received, stopping import")
+			return nil
+		default:
+			// continue
+		}
 
 		id, err := task.ConvertTaskIdString2Bytes(taskId)
 		if err != nil {
@@ -98,7 +159,8 @@ func importUnsolvedTasks(filename string, logger *zerolog.Logger, ctx context.Co
 		}
 
 		if _, ok := uniqueTasksMap[id]; ok {
-			logger.Warn().Str("task", taskId).Msg("task already exists in the storage tasks list")
+			logger.Debug().Str("task", taskId).Msg("task already exists in the storage tasks list")
+			alreadyExists++
 			continue
 		}
 
@@ -118,27 +180,12 @@ func importUnsolvedTasks(filename string, logger *zerolog.Logger, ctx context.Co
 		logger.Debug().Uint64("blocktime", res.Blocktime).Bool("claimed", res.Claimed).Str("validator", res.Validator.String()).Str("Cid", common.Bytes2Hex(res.Cid[:])).Msg("old tasks being added to queue")
 
 		if res.Blocktime == 0 {
-			// isCommitment, err := miner.services.TaskStorage.IsCommitment(id)
-			// if err != nil {
-			// 	logger.Err(err).Msg("failed to check if task has a commitment")
-			// 	return err
-			// }
-
-			// if isCommitment {
-			// 	continue
-			// }
-
 			mapOfHashsByTasks[txHash] = append(mapOfHashsByTasks[txHash], id)
-
 		} else {
 			solvedCount++
 		}
 
-		s.Suffix = fmt.Sprintf(" processing tasks [%d/%d]\n", index, totalItemstoProcess)
-
-		// if index >= (totalItemstoProcess*10)/100 {
-		// 	break
-		// }
+		s.Suffix = fmt.Sprintf(" processing tasks [%d/%d] (already imported: %d)\n", index, totalItemstoProcess, alreadyExists)
 	}
 
 	addedTasksCount := 0
@@ -201,7 +248,6 @@ func taskCheck(logger *zerolog.Logger, ctx context.Context) error {
 		}
 
 		s.Suffix = fmt.Sprintf(" processing tasks [%d/%d]\n", index, totalItemstoProcess)
-
 	}
 
 	for owner, v := range mapOfTaskOnwers {
@@ -597,7 +643,7 @@ func verifyAllTasks(ctx context.Context, dryMode bool) error {
 			// Update task status in storage only if it has changed
 			if taskStatusToSet != v.Status {
 				if !dryMode {
-					err = services.TaskStorage.AddOrUpdateTaskWithStatus(v.Taskid, common.Hash{}, taskStatusToSet)
+					err = services.TaskStorage.AddOrUpdateTaskWithStatus(v.Taskid, v.Txhash, taskStatusToSet)
 					if err != nil {
 						services.Logger.Error().Err(err).Str("taskid", v.Taskid.String()).Int64("targetStatus", taskStatusToSet).Msg("Error updating task status in storage")
 					} else {
@@ -809,7 +855,7 @@ func verifySolutions(ctx context.Context) error {
 				shouldDeleteSolution = true
 				services.Logger.Debug().Str("taskid", t.TaskId.String()).Msg("Local solution found, but no local commitment. Setting status to 0, deleting solution.")
 			} else {
-				// Case 2: Local commitment AND local solution exist. Check commitment's on-chain status.
+				// Case 2: Local commitment exists. Check its on-chain status and local solution presence.
 				isOnChainCommitment := false
 				if commitmentData.Commitment != [32]byte{} {
 					block, err := services.Engine.Engine.Commitments(nil, commitmentData.Commitment)
@@ -1523,7 +1569,7 @@ func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *cl
 					}
 
 					// Update task status in storage, using the TxHash from the log event
-					err = services.TaskStorage.AddOrUpdateTaskWithStatus(taskId, common.Hash{}, taskStatusToSet)
+					err = services.TaskStorage.AddOrUpdateTaskWithStatus(taskId, currentlog.TxHash, taskStatusToSet)
 					if err != nil {
 						log.Printf("WARN: Failed to add/update task %s to status %d: %v", taskId.String(), taskStatusToSet, err)
 					} else {
@@ -1542,4 +1588,179 @@ func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *cl
 	}
 
 	log.Printf("Finished scanning. Total TaskSubmitted logs found: %d, Total unsolved tasks added: %d", totalFound, totalAdded)
+}
+
+// exportUnsolvedTasks scans blocks for TaskSubmitted events and exports unsolved ones to a JSON file.
+// It filters by sender and block range, checking only for on-chain solutions, ignoring local storage.
+// The output format matches the input format for importUnsolvedTasks.
+func exportUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *client.Client, fromBlock int64, endBlock int64, initialBlockSize int64, senderFilter common.Address, outputFilename string) error {
+
+	eventAbi, err := engine.EngineMetaData.GetAbi()
+	if err != nil {
+		return fmt.Errorf("error getting engine abi: %w", err)
+	}
+
+	taskSubmittedEvent := eventAbi.Events["TaskSubmitted"].ID
+
+	// Determine the end block if not provided or invalid
+	if endBlock <= 0 || endBlock < fromBlock {
+		log.Printf("End block not specified or invalid (%d), fetching latest block number...", endBlock)
+		currentBlockUint, err := rpcClient.Client.BlockNumber(context.Background())
+		if err != nil {
+			return fmt.Errorf("failed to get current block number: %w", err)
+		}
+		endBlock = int64(currentBlockUint)
+		log.Printf("Scanning up to latest block: %d", endBlock)
+	}
+
+	if fromBlock >= endBlock {
+		log.Printf("From block %d is already at or beyond end block %d. Nothing to scan.", fromBlock, endBlock)
+		return nil
+	}
+
+	log.Printf("Scanning for unsolved tasks from block %d to %d for export to %s", fromBlock, endBlock, outputFilename)
+
+	currentBlockSize := initialBlockSize
+	minBlockSize := int64(100)   // Don't go smaller than this
+	maxBlockSize := int64(50000) // Limit increase
+	increaseStep := int64(500)   // How much to increase size on success
+
+	// Ensure initial size is within bounds
+	if currentBlockSize < minBlockSize {
+		currentBlockSize = minBlockSize
+	}
+	if currentBlockSize > maxBlockSize {
+		currentBlockSize = maxBlockSize
+	}
+
+	query := ethereum.FilterQuery{
+		Addresses: []common.Address{services.Config.BaseConfig.EngineAddress},
+		Topics:    [][]common.Hash{{taskSubmittedEvent}},
+	}
+
+	loopFromBlock := fromBlock // Use a separate variable for loop iteration
+	totalFound := 0
+	totalExported := 0
+	unsolvedTasksMap := make(map[string]string) // Map[taskIdString]txHashString
+
+	isFiltering := senderFilter != (common.Address{}) // Check if filter is active
+	if isFiltering {
+		log.Printf("Filtering for tasks submitted by sender: %s", senderFilter.Hex())
+	}
+
+	s := spinner.New(spinner.CharSets[11], 500*time.Millisecond, spinner.WithWriter(os.Stderr))
+	s.Suffix = " scanning blocks..."
+	s.FinalMSG = "scan completed!\n"
+	s.Start()
+	defer s.Stop()
+
+	for loopFromBlock <= endBlock {
+		select {
+		case <-appQuit.Done():
+			log.Printf("WARN: exportUnsolvedTasks received shutdown signal. Aborting scan at block %d.", loopFromBlock)
+			return fmt.Errorf("scan aborted") // Exit the function early
+		default:
+		}
+
+		// Calculate the end block for this specific query batch
+		loopToBlock := loopFromBlock + currentBlockSize - 1 // Range is inclusive
+		if loopToBlock > endBlock {
+			loopToBlock = endBlock
+		}
+
+		s.Suffix = fmt.Sprintf(" scanning blocks %d to %d (size %d)... found: %d exported: %d", loopFromBlock, loopToBlock, currentBlockSize, totalFound, totalExported)
+		query.FromBlock = big.NewInt(loopFromBlock)
+		query.ToBlock = big.NewInt(loopToBlock)
+
+		// Use the appQuit context for the potentially long-running FilterLogs call
+		logs, err := rpcClient.FilterLogs(appQuit, query)
+
+		if err != nil {
+			// Check if error suggests block range is too large (heuristic check)
+			errStr := strings.ToLower(err.Error())
+			isRangeError := strings.Contains(errStr, "block range") ||
+				strings.Contains(errStr, "limit") ||
+				strings.Contains(errStr, "response size") ||
+				strings.Contains(errStr, "timeout") ||
+				strings.Contains(errStr, "too many logs")
+
+			if isRangeError && currentBlockSize > minBlockSize {
+				log.Printf("WARN: FilterLogs error (likely range too large) with size %d: %v. Reducing size.", currentBlockSize, err)
+				// Reduce block size significantly, e.g., halve it, but not below min
+				newSize := max(minBlockSize, currentBlockSize/2)
+				if newSize == currentBlockSize { // Ensure reduction if already near min
+					newSize = max(minBlockSize, newSize-increaseStep)
+				}
+				currentBlockSize = newSize
+				log.Printf("Retrying same range with smaller block size: %d", currentBlockSize)
+				// Loop continues without advancing loopFromBlock, trying the smaller size
+			} else {
+				// Error is not recognized as a range issue, or we're already at min size
+				return fmt.Errorf("unrecoverable error filtering logs from %d to %d: %w", loopFromBlock, loopToBlock, err)
+			}
+		} else {
+			if len(logs) > 0 {
+				log.Printf("Found %d TaskSubmitted logs in range %d-%d", len(logs), loopFromBlock, loopToBlock)
+				totalFound += len(logs)
+			}
+
+			for _, currentlog := range logs {
+				parsedLog, err := services.Engine.Engine.ParseTaskSubmitted(currentlog)
+				if err != nil {
+					log.Printf("WARN: Failed to parse TaskSubmitted log at block %d, tx %s: %v", currentlog.BlockNumber, currentlog.TxHash.Hex(), err)
+					continue
+				}
+
+				// Apply sender filter if active
+				if isFiltering && parsedLog.Sender != senderFilter {
+					continue // Skip this task, does not match filter
+				}
+
+				taskId := task.TaskId(parsedLog.Id)
+
+				// Fetch on-chain solution info ONLY
+				sol, err := services.Engine.Engine.Solutions(nil, taskId)
+				if err != nil {
+					log.Printf("WARN: Failed to get solution info for task %s: %v", taskId.String(), err)
+					continue // Skip if we can't get solution info
+				}
+
+				// If NO solution exists on-chain, add it to our export map
+				if sol.Blocktime == 0 {
+					taskIdStr := taskId.String()
+					txHashStr := currentlog.TxHash.Hex()
+					if _, exists := unsolvedTasksMap[taskIdStr]; !exists {
+						unsolvedTasksMap[taskIdStr] = txHashStr
+						totalExported++
+						log.Printf("DEBUG: Found unsolved task %s (Tx: %s) for export.", taskIdStr, txHashStr)
+					} else {
+						log.Printf("DEBUG: Task %s already found, skipping duplicate.", taskIdStr)
+					}
+				}
+			}
+
+			// Successfully processed this range, advance to the next block
+			loopFromBlock = loopToBlock + 1
+
+			// Try increasing block size for the next iteration, up to the max
+			currentBlockSize = min(maxBlockSize, currentBlockSize+increaseStep)
+		}
+	}
+
+	log.Printf("Finished scanning. Total TaskSubmitted logs found: %d, Total unsolved tasks identified for export: %d", totalFound, totalExported)
+
+	// Marshal the map to JSON
+	jsonData, err := json.MarshalIndent(unsolvedTasksMap, "", "  ") // Indent for readability
+	if err != nil {
+		return fmt.Errorf("failed to marshal results to JSON: %w", err)
+	}
+
+	// Write JSON data to the output file
+	err = os.WriteFile(outputFilename, jsonData, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to write JSON to file %s: %w", outputFilename, err)
+	}
+
+	log.Printf("Successfully exported %d unsolved tasks to %s", totalExported, outputFilename)
+	return nil
 }
