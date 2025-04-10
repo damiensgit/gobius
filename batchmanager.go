@@ -22,10 +22,13 @@ import (
 	"sync"
 	"time"
 
+	// Added for OnChainOracle
+
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	// Added for OnChainOracle
 )
 
 const profitEstimateBatchSize = 200
@@ -163,18 +166,22 @@ func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float6
 	basefeeinEth := tm.services.Eth.ToFloat(basefee)
 	basefeeinGwei := basefeeinEth * 1000000000
 
-	if tm.services.Config.BaseConfig.TestnetType > 0 {
-		basePrice, ethPrice = 30, 2000
-	} else {
-		basePrice, ethPrice, err = tm.services.Paraswap.GetPrices()
-		if err != nil {
-			tm.services.Logger.Error().Err(err).Msg("could not get prices from oracle!")
-			//return 0, 0, 0, 0, 0, err
-			// TODO: for local offline testing we need to handle this!
-			// if our oracle is offline for extended period of time the miner will be come inactive as it wont be able to process
-			// various tasks
+	// Use the PriceOracle interface to get prices
+	basePrice, ethPrice, err = tm.services.OracleProvider.GetPrices()
+	if err != nil {
+		tm.services.Logger.Error().Err(err).Msg("could not get prices from oracle!")
+		// Fallback logic remains for now, but consider making it configurable or removing it
+		// if the oracle should be the single source of truth.
+		if tm.services.Config.BaseConfig.TestnetType > 0 {
+			tm.services.Logger.Warn().Msg("Oracle failed, using default testnet prices (30, 2000)")
+			basePrice, ethPrice = 30, 2000
+		} else {
+			// Consider if a fallback is appropriate on mainnet or if we should return error
+			tm.services.Logger.Warn().Msg("Oracle failed, using default mainnet prices (30, 2000)")
 			basePrice, ethPrice = 30, 2000
 		}
+		// If using fallbacks, reset the error so the function can continue
+		err = nil
 	}
 
 	tm.cache.Set("base_price", basePrice)

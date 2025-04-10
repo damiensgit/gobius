@@ -355,9 +355,28 @@ func (bs *baseStrategy) gpuWorker(workerId int, gpu *task_common.GPU, producer T
 		ts, err := producer.GetTask(bs.ctx) // Pass baseStrategy context
 
 		if err != nil {
-			// Handles context cancellation or permanent producer errors
-			workerLogger.Warn().Err(err).Msg("failed to get task from producer or context cancelled, worker exiting")
-			return
+			// Check if the error is due to context cancellation (worker should exit)
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				workerLogger.Info().Err(err).Msg("worker context cancelled, exiting")
+				return // Exit worker
+			}
+
+			// Check if the error indicates the producer is permanently stopped (worker should exit)
+			if errors.Is(err, ErrProducerStopped) {
+				workerLogger.Info().Err(err).Msg("producer stopped, worker exiting")
+				return // Exit worker
+			}
+
+			// Otherwise, assume transient error, log, wait, and retry
+			workerLogger.Warn().Err(err).Msg("transient error getting task from producer, retrying after delay...")
+			// Add a small delay to avoid tight looping on persistent transient errors
+			select {
+			case <-time.After(5 * time.Second):
+				continue // Retry GetTask
+			case <-bs.ctx.Done():
+				workerLogger.Info().Msg("worker context cancelled during retry delay, exiting")
+				return // Exit if cancelled during sleep
+			}
 		}
 
 		// If GetTask returns without error, we have a valid task
@@ -483,6 +502,10 @@ type StorageProducer struct {
 	goroutineRunner
 }
 
+// ErrProducerStopped indicates that the TaskProducer has been permanently stopped
+// and cannot provide more tasks.
+var ErrProducerStopped = errors.New("producer stopped")
+
 // NewStorageProducer creates a producer that polls the storage.
 func NewStorageProducer(appCtx context.Context, services *Services, poolSize int) *StorageProducer {
 	ctx, cancel := context.WithCancel(appCtx) // Create derived context for internal loop
@@ -596,13 +619,13 @@ func (p *StorageProducer) GetTask(ctx context.Context) (*TaskSubmitted, error) {
 	p.logger.Debug().Int("chan_len", len(p.taskChan)).Msg("worker requesting task")
 	select {
 	case <-p.ctx.Done(): // Producer context stopping
-		return nil, errors.New("storage producer stopped")
+		return nil, ErrProducerStopped // Use shared sentinel error
 	case <-ctx.Done(): // Worker context stopping
 		return nil, ctx.Err()
 	case task, ok := <-p.taskChan:
 		if !ok {
 			// Channel closed means producer is stopped
-			return nil, errors.New("storage producer channel closed")
+			return nil, ErrProducerStopped // Use shared sentinel error
 		}
 		p.logger.Info().Str("task", task_common.TaskId(task.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing task from buffer")
 		return task, nil
@@ -704,13 +727,13 @@ func (p *EventProducer) GetTask(ctx context.Context) (*TaskSubmitted, error) {
 	p.logger.Debug().Int("chan_len", len(p.taskChan)).Msg("worker requesting task")
 	select {
 	case <-p.ctx.Done(): // Producer context stopping
-		return nil, errors.New("event producer stopped")
+		return nil, ErrProducerStopped // Use shared sentinel error
 	case <-ctx.Done(): // Worker context stopping
 		return nil, ctx.Err()
 	case task, ok := <-p.taskChan:
 		if !ok {
 			// Channel closed means producer is stopped
-			return nil, errors.New("event producer channel closed")
+			return nil, ErrProducerStopped // Use shared sentinel error
 		}
 		p.logger.Info().Str("task", task_common.TaskId(task.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing task from event buffer")
 		return task, nil
@@ -1272,13 +1295,13 @@ func (p *SolutionEventProducer) GetTask(ctx context.Context) (*TaskSubmitted, er
 	p.logger.Debug().Int("chan_len", len(p.taskChan)).Msg("worker requesting validation task")
 	select {
 	case <-p.ctx.Done(): // Producer context stopping
-		return nil, errors.New("solution event producer stopped")
+		return nil, ErrProducerStopped // Use shared sentinel error
 	case <-ctx.Done(): // Worker context stopping
 		return nil, ctx.Err()
 	case task, ok := <-p.taskChan:
 		if !ok {
 			// Channel closed means producer is stopped
-			return nil, errors.New("solution event producer channel closed")
+			return nil, ErrProducerStopped // Use shared sentinel error
 		}
 		p.logger.Info().Str("task", task_common.TaskId(task.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing validation task from event")
 		return task, nil

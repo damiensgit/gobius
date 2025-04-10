@@ -54,6 +54,7 @@ type Services struct {
 	TaskStorage        *storage.TaskStorageDB
 	AutoMineParams     *SubmitTaskParams
 	Paraswap           *paraswap.ParaswapManager
+	OracleProvider     IPriceOracle
 	TaskTracker        *metrics.TaskTracker
 	IpfsOracle         ipfs.OracleClient
 }
@@ -177,11 +178,30 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 
 	engineWrapper := NewEngineWrapper(engineContract, voterContract, logger)
 
+	// required for auto sell, and optionally for price oracle
 	paraswapManager := paraswap.NewParaswapManager(
 		senderOwnerAccount,
 		baseTokenContract,
 		cfg.BaseConfig.BaseToken,
 		logger)
+
+	var oracleProvider IPriceOracle
+
+	// if the oracle contract is set in config use onchain oracle
+	if cfg.PriceOracleContract != (common.Address{}) {
+		oracleProvider, err = NewOnChainOracle(rpc.Client, cfg.PriceOracleContract, eth, cfg.BaseConfig.BaseToken, logger)
+		if err != nil {
+			logger.Error().Err(err).Msg("failed to create onchain oracle")
+		}
+	} else {
+		// otherwise use paraswap
+		// NOTE: the api has rate limiting so not suitable for high volume/block update
+		oracleProvider = paraswapManager
+	}
+	_, _, err = oracleProvider.GetPrices()
+	if err != nil {
+		logger.Error().Err(err).Msg("failed to get prices from onchain oracle")
+	}
 
 	taskMetrics := metrics.NewTaskTracker(appQuit)
 
@@ -212,6 +232,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 		TaskStorage:        ts,
 		AutoMineParams:     st,
 		Paraswap:           paraswapManager,
+		OracleProvider:     oracleProvider,
 		TaskTracker:        taskMetrics,
 		IpfsOracle:         ipfsOracle,
 		ArbiusRouter:       arbiusRouter,
