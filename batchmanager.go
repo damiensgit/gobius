@@ -1059,6 +1059,7 @@ func (tm *BatchTransactionManager) processBatch(
 		tx, err := account.NonceManagerWrapper(tm.services.Config.Miner.ErrorMaxRetries, tm.services.Config.Miner.ErrorBackoffTime, tm.services.Config.Miner.ErrorBackofMultiplier, false, func(opts *bind.TransactOpts) (interface{}, error) {
 			if isEstimationMode {
 				opts.GasLimit = 0 // Force estimation
+				opts.GasMargin = tm.services.Config.Miner.GasEstimationMargin
 			} else {
 				opts.GasLimit = hardcodedGasLimit // Use hardcoded limit
 			}
@@ -1241,6 +1242,7 @@ func (tm *BatchTransactionManager) processBatch(
 		tx, err := validatorToSendSubmits.Account.NonceManagerWrapper(tm.services.Config.Miner.ErrorMaxRetries, tm.services.Config.Miner.ErrorBackoffTime, tm.services.Config.Miner.ErrorBackofMultiplier, false, func(opts *bind.TransactOpts) (interface{}, error) {
 			if isEstimationMode {
 				opts.GasLimit = 0 // Force estimation
+				opts.GasMargin = tm.services.Config.Miner.GasEstimationMargin
 			} else {
 				opts.GasLimit = hardcodedGasLimit // Use hardcoded limit
 			}
