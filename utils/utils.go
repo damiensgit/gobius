@@ -93,17 +93,17 @@ func ExpRetryWithContext(ctx context.Context, logger zerolog.Logger, fn func() (
 			continue
 		}
 
-		// Check if context was cancelled before sleeping
+		// Check if context was cancelled before logging the retry warning and sleeping
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			logger.Warn().Err(ctxErr).Msg("context cancelled while retrying")
-			// Return the context error preferentially, but include the latest function error for context
+			// Context is cancelled, return the error immediately without logging the warning
 			return result, fmt.Errorf("context cancelled: %w (last error: %v)", ctxErr, err)
 		}
 
+		// Context is still active, log the retry warning and sleep
 		sleepDuration := time.Duration(backoff) * time.Millisecond
 		logger.Warn().Dur("sleep_duration", sleepDuration).Err(err).Msg("retry request failed, retrying")
 		time.Sleep(sleepDuration)
-		backoff *= 1.5 // Double the backoff time
+		backoff *= 1.5 // Increase the backoff time
 	}
 
 	logger.Error().Int("tries", tries).Msg("retry request failed after multiple attempts")

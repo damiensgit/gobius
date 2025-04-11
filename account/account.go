@@ -472,6 +472,13 @@ func (account *Account) SendEther(opts *bind.TransactOpts, toAddress common.Addr
 		// just use network defaults (estimate gas, etc)
 		opts = account.GetOpts(0, nil, nil, nil)
 	}
+	// Ensure value is set in the options
+	if opts.Value == nil {
+		opts.Value = value
+	} else if opts.Value.Cmp(value) != 0 {
+		account.logger.Warn().Str("opts_value", opts.Value.String()).Str("param_value", value.String()).Msg("opts.Value already set, overriding with parameter value")
+		opts.Value = value // Override if already set but different, log a warning
+	}
 
 	// Send the transaction
 	return account.SendTransactionWithOpts(opts, &toAddress, nil)

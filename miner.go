@@ -331,12 +331,13 @@ func (m *Miner) SolveTask(ctx context.Context, taskId task.TaskId, params *Submi
 		if err != nil {
 			// Check if the error is due to context cancellation (timeout or explicit cancel)
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				m.services.Logger.Info().Err(err).Str("task", taskIdStr).Msg("SolveTask cancelled or timed out")
+				// Log concise message for expected context cancellation
+				m.services.Logger.Info().Str("task", taskIdStr).Msg("context cancelled or timed out during inference")
 				return nil, err // Propagate the context error
 			}
 
 			// Handle other errors (GPU busy, actual inference errors, etc.)
-			m.services.Logger.Error().Err(err).Str("task", taskIdStr).Msg("error on gpu during GetCID, incrementing error counter")
+			m.services.Logger.Error().Err(err).Str("task", taskIdStr).Msg("error on gpu during inference, incrementing error counter")
 			gpu.IncrementErrorCount()
 			return nil, err
 		}

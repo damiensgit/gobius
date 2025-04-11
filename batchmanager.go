@@ -414,6 +414,55 @@ func (tm *BatchTransactionManager) processBatchPoller(appQuit context.Context, w
 	}
 }
 
+func (tm *BatchTransactionManager) isIntrinsicGasTooHigh(ctx context.Context) (bool, error) {
+	if !tm.services.Config.Miner.EnableIntrinsicGasCheck {
+		return false, nil // Check disabled
+	}
+
+	baseline := tm.services.Config.Miner.IntrinsicGasBaseline
+	if baseline == 0 {
+		baseline = 22000 // Default baseline if not set
+	}
+	thresholdMultiplier := tm.services.Config.Miner.IntrinsicGasThresholdMultiplier
+	if thresholdMultiplier <= 0 {
+		thresholdMultiplier = 1.1 // Default multiplier if not set
+	}
+
+	opts := tm.services.OwnerAccount.GetOpts(0, nil, nil, nil)
+	opts.NoSend = true
+	opts.Value = big.NewInt(1)
+
+	// Estimate gas for a simple transfer
+	gasEstimate, err := tm.services.OwnerAccount.SendTransactionWithOpts(opts, &common.Address{}, []byte{})
+	if err != nil {
+		tm.services.Logger.Error().Err(err).Msg("failed to estimate intrinsic gas cost")
+		// Decide how to handle errors - fail open (assume normal) or fail closed (assume high)?
+		// Let's fail open for now to avoid blocking unnecessarily due to transient estimation errors.
+		return false, fmt.Errorf("failed to estimate intrinsic gas: %w", err)
+	}
+
+	gasLimit := gasEstimate.Gas()
+
+	threshold := uint64(float64(baseline) * thresholdMultiplier)
+	isHigh := gasLimit > threshold
+
+	if isHigh {
+		tm.services.Logger.Warn().
+			Uint64("estimated_gas", gasLimit).
+			Uint64("baseline", baseline).
+			Float64("multiplier", thresholdMultiplier).
+			Uint64("threshold", threshold).
+			Msg("🚨 high intrinsic gas detected")
+	} else {
+		tm.services.Logger.Debug().
+			Uint64("estimated_gas", gasLimit).
+			Uint64("threshold", threshold).
+			Msg("intrinsic gas check passed")
+	}
+
+	return isHigh, nil
+}
+
 func (tm *BatchTransactionManager) processBatch(
 	appQuit context.Context,
 	wg *sync.WaitGroup,
@@ -433,6 +482,21 @@ func (tm *BatchTransactionManager) processBatch(
 		tm.services.Logger.Warn().Msg("engine is paused, skipping batch")
 		time.Sleep(10 * time.Second)
 		return
+	}
+
+	if tm.services.Config.Miner.EnableIntrinsicGasCheck {
+		isHigh, checkErr := tm.isIntrinsicGasTooHigh(appQuit) // Use appQuit context
+		if checkErr != nil {
+			// Logged within the check function, decide if we need to return or proceed
+			tm.services.Logger.Error().Err(checkErr).Msg("error checking intrinsic gas, proceeding cautiously")
+			// Potentially return here if strict safety is needed
+		}
+		if isHigh {
+			tm.services.Logger.Warn().Msg("intrinsic gas cost too high") //, skipping batch processing")
+			// Potentially add a short sleep here if desired
+			// time.Sleep(5 * time.Second)
+			//return // Skip the rest of the batch processing
+		}
 	}
 
 	totalTasks, err := tm.services.TaskStorage.TotalTasks()

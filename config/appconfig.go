@@ -138,24 +138,27 @@ type BatchConfig struct {
 }
 
 type SolverConfig struct {
-	Enabled                 bool             `json:"enabled"`
-	WaitForTasksOnShutdown  bool             `json:"wait_for_tasks_on_shutdown"` // If true, allow running tasks to finish on shutdown
-	CommitmentsAndSolutions CommitmentOption `json:"commitments_and_solutions"`  // one of: "donothing", "doboth", "docommitments", "dosolutions"
-	CommitmentBatch         BatchConfig      `json:"commitment_batch"`
-	SolutionBatch           BatchConfig      `json:"solution_batch"`
-	ConcurrentBatches       bool             `json:"concurrent_batches"`       // if true, submit multiple batches of commitments and solutions concurrently (requires multiple accounts)
-	ProfitMode              string           `json:"profit_mode"`              // profit mode to use for batch operations
-	MinProfit               float64          `json:"min_profit"`               // minimum profit in USD to perform batch operations
-	MaxProfit               float64          `json:"max_profit"`               // maximum profit in USD to perform batch operations
-	PauseStakeBufferLevel   float64          `json:"pause_stake_buffer_level"` // pause submitting commits/solutions if the buffer = (current stake - min stake) is below this level
-	UsePolling              bool             `json:"use_polling"`              // use polling to check profit and submit txes if false, new block triggers batching
-	PollingTime             string           `json:"polling_time"`             // polling interval for profit checks and batching as "1m", "5m", "1h", etc..
-	BatchMode               int              `json:"batch_mode"`               // 0: no batch, single commitment/solution cycle, 1 - normal batching using storage and polling, 2 - batch manually (not used!)
-	NoChecks                bool             `json:"no_checks"`                // perform no onchain checks on the tasks/commitments/solutions, just submit them
-	ErrorMaxRetries         int              `json:"error_max_retries"`        // max retries for tx errors
-	ErrorBackoffTime        float64          `json:"error_backoff"`            // sleep time between retries
-	ErrorBackofMultiplier   float64          `json:"error_backoff_multiplier"` // backoff multiplier tx errors
-	MetricsSampleRate       string           `json:"metrics_sample_rate"`      // sample rate for metrics
+	Enabled                         bool             `json:"enabled"`
+	WaitForTasksOnShutdown          bool             `json:"wait_for_tasks_on_shutdown"` // If true, allow running tasks to finish on shutdown
+	CommitmentsAndSolutions         CommitmentOption `json:"commitments_and_solutions"`  // one of: "donothing", "doboth", "docommitments", "dosolutions"
+	CommitmentBatch                 BatchConfig      `json:"commitment_batch"`
+	SolutionBatch                   BatchConfig      `json:"solution_batch"`
+	ConcurrentBatches               bool             `json:"concurrent_batches"`                 // if true, submit multiple batches of commitments and solutions concurrently (requires multiple accounts)
+	ProfitMode                      string           `json:"profit_mode"`                        // profit mode to use for batch operations
+	MinProfit                       float64          `json:"min_profit"`                         // minimum profit in USD to perform batch operations
+	MaxProfit                       float64          `json:"max_profit"`                         // maximum profit in USD to perform batch operations
+	PauseStakeBufferLevel           float64          `json:"pause_stake_buffer_level"`           // pause submitting commits/solutions if the buffer = (current stake - min stake) is below this level
+	UsePolling                      bool             `json:"use_polling"`                        // use polling to check profit and submit txes if false, new block triggers batching
+	PollingTime                     string           `json:"polling_time"`                       // polling interval for profit checks and batching as "1m", "5m", "1h", etc..
+	BatchMode                       int              `json:"batch_mode"`                         // 0: no batch, single commitment/solution cycle, 1 - normal batching using storage and polling, 2 - batch manually (not used!)
+	NoChecks                        bool             `json:"no_checks"`                          // perform no onchain checks on the tasks/commitments/solutions, just submit them
+	ErrorMaxRetries                 int              `json:"error_max_retries"`                  // max retries for tx errors
+	ErrorBackoffTime                float64          `json:"error_backoff"`                      // sleep time between retries
+	ErrorBackofMultiplier           float64          `json:"error_backoff_multiplier"`           // backoff multiplier tx errors
+	MetricsSampleRate               string           `json:"metrics_sample_rate"`                // sample rate for metrics
+	EnableIntrinsicGasCheck         bool             `json:"enable_intrinsic_gas_check"`         // enable intrinsic gas check
+	IntrinsicGasBaseline            uint64           `json:"intrinsic_gas_baseline"`             // baseline gas cost for a simple transfer
+	IntrinsicGasThresholdMultiplier float64          `json:"intrinsic_gas_threshold_multiplier"` // multiplier for the threshold
 }
 
 type Strategies struct {

@@ -383,7 +383,7 @@ func (bs *baseStrategy) gpuWorker(workerId int, gpu *task.GPU, producer TaskProd
 
 		// If GetTask returns without error, we have a valid task
 		workerLogger.Debug().Str("task", task.TaskId(ts.TaskId).String()).Msg("starting job")
-		gpu.SetStatus("Mining") // Or "Validating"
+		gpu.SetStatus("Mining")
 
 		// Determine the context for the task handler based on config
 		var taskCtx context.Context
@@ -397,13 +397,9 @@ func (bs *baseStrategy) gpuWorker(workerId int, gpu *task.GPU, producer TaskProd
 			taskCtx = bs.ctx
 		}
 
-		// If needed, add an overall timeout here: taskCtx, cancel := context.WithTimeout(taskCtx, 30*time.Minute); defer cancel()
-
 		taskHandler(workerId, gpu, ts, taskCtx) // Pass the determined taskCtx
 
 		workerLogger.Debug().Str("task", task.TaskId(ts.TaskId).String()).Msg("finished job processing")
-
-		// Loop immediately to get the next task
 	}
 }
 
@@ -836,9 +832,9 @@ func (s *BulkMineStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmi
 		// Requeue ONLY because this strategy uses StorageProducer
 		requeued, errDb := s.services.TaskStorage.RequeueTaskIfNoCommitmentOrSolution(taskId)
 		if errDb != nil {
-			workerLogger.Error().Err(errDb).Msg("failed to requeue task to DB")
+			workerLogger.Error().Err(errDb).Msg("failed to requeue task to storage")
 		} else if requeued {
-			workerLogger.Info().Msg("task requeued successfully to DB")
+			workerLogger.Info().Msg("task requeued successfully to storage")
 		} else {
 			workerLogger.Warn().Msg("task not requeued (may have commitment/solution or other error)")
 		}
@@ -857,7 +853,7 @@ func (s *BulkMineStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmi
 			workerLogger.Warn().Err(err).Msg("transient error decoding transaction, requeueing task")
 			requeueTask(taskId)
 		}
-		gpu.SetStatus("Ilde") // Set GPU to error for ANY decode failure
+		gpu.SetStatus("Idle") // Set GPU to error for ANY decode failure
 		return
 	}
 
@@ -868,7 +864,7 @@ func (s *BulkMineStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmi
 	if err != nil {
 		// Check if the error is specifically context cancellation or deadline exceeded
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			workerLogger.Info().Err(err).Msg("task context canceled or deadline exceeded, requeueing task")
+			workerLogger.Info().Msg("task context cancelled, requeueing task")
 			requeueTask(taskId)
 			// Do not mark GPU as error, as it was context cancellation, not a GPU fault
 			gpu.SetStatus("Idle") // Reset status as the task is being abandoned due to cancellation
