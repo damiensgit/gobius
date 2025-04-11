@@ -625,13 +625,13 @@ func (p *StorageProducer) GetTask(ctx context.Context) (*TaskSubmitted, error) {
 		return nil, ErrProducerStopped // Use shared sentinel error
 	case <-ctx.Done(): // Worker context stopping
 		return nil, ctx.Err()
-	case task, ok := <-p.taskChan:
+	case taskFromCh, ok := <-p.taskChan:
 		if !ok {
 			// Channel closed means producer is stopped
 			return nil, ErrProducerStopped // Use shared sentinel error
 		}
-		p.logger.Info().Str("task", task.TaskId(task.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing task from buffer")
-		return task, nil
+		p.logger.Info().Str("task", task.TaskId(taskFromCh.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing task from buffer")
+		return taskFromCh, nil
 	}
 }
 
@@ -733,13 +733,13 @@ func (p *EventProducer) GetTask(ctx context.Context) (*TaskSubmitted, error) {
 		return nil, ErrProducerStopped // Use shared sentinel error
 	case <-ctx.Done(): // Worker context stopping
 		return nil, ctx.Err()
-	case task, ok := <-p.taskChan:
+	case taskFromCh, ok := <-p.taskChan:
 		if !ok {
 			// Channel closed means producer is stopped
 			return nil, ErrProducerStopped // Use shared sentinel error
 		}
-		p.logger.Info().Str("task", task.TaskId(task.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing task from event buffer")
-		return task, nil
+		p.logger.Info().Str("task", task.TaskId(taskFromCh.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing task from event buffer")
+		return taskFromCh, nil
 	}
 }
 
@@ -1301,13 +1301,13 @@ func (p *SolutionEventProducer) GetTask(ctx context.Context) (*TaskSubmitted, er
 		return nil, ErrProducerStopped // Use shared sentinel error
 	case <-ctx.Done(): // Worker context stopping
 		return nil, ctx.Err()
-	case task, ok := <-p.taskChan:
+	case taskFromCh, ok := <-p.taskChan:
 		if !ok {
 			// Channel closed means producer is stopped
 			return nil, ErrProducerStopped // Use shared sentinel error
 		}
-		p.logger.Info().Str("task", task.TaskId(task.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing validation task from event")
-		return task, nil
+		p.logger.Info().Str("task", task.TaskId(taskFromCh.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing validation task from event")
+		return taskFromCh, nil
 	}
 }
 
