@@ -323,7 +323,7 @@ func (m *Miner) SolveTask(ctx context.Context, taskId task.TaskId, params *Submi
 				cid, err = ipfs.GetIPFSHashFast(data)
 			}
 		} else {
-			cid, err = model.GetCID(gpu, taskIdStr, hydrated)
+			cid, err = model.GetCID(ctx, gpu, taskIdStr, hydrated)
 		}
 		//elapsed := time.Since(start)
 		//m.gpura.Add(elapsed)

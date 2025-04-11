@@ -2,6 +2,7 @@ package models
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -36,11 +37,13 @@ type QwenModelResponse struct {
 
 type QwenTestModel struct {
 	Model
-	Filters []MiningFilter
-	config  *config.AppConfig
-	client  *http.Client
-	logger  zerolog.Logger
-	ipfs    ipfs.IPFSClient
+	timeoutDuration     time.Duration
+	ipfsTimeoutDuration time.Duration
+	Filters             []MiningFilter
+	config              *config.AppConfig
+	client              *http.Client
+	logger              zerolog.Logger
+	ipfs                ipfs.IPFSClient
 }
 
 // Ensure QwenTestModel implements the Model interface.
@@ -93,13 +96,42 @@ func NewQwenTestModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logge
 	}
 
 	http := &http.Client{
-		Timeout: time.Second * 30,
+		// Timeout is now handled per-request via context
+		// Timeout: time.Second * 30,
+	}
+
+	// Use model.ID (the hex string CID) as the key for the Cog map
+	cogConfig, ok := appConfig.ML.Cog[model.ID]
+	// Set default timeouts first
+	var timeout time.Duration = 120 * time.Second    // Default inference timeout
+	var ipfsTimeout time.Duration = 30 * time.Second // Default IPFS timeout
+	if ok {
+		// Parse inference timeout
+		parsedTimeout, err := time.ParseDuration(cogConfig.HttpTimeout)
+		if err != nil {
+			logger.Warn().Err(err).Str("model", model.ID).Str("config_timeout", cogConfig.HttpTimeout).Msg("failed to parse model timeout from cog config, using default 120s")
+			// Keep default timeout
+		} else {
+			timeout = parsedTimeout
+		}
+		// Parse IPFS timeout
+		parsedIpfsTimeout, err := time.ParseDuration(cogConfig.IpfsTimeout)
+		if err != nil {
+			logger.Warn().Err(err).Str("model", model.ID).Str("config_ipfs_timeout", cogConfig.IpfsTimeout).Msg("failed to parse IPFS timeout from cog config, using default 30s")
+			// Keep default ipfsTimeout
+		} else {
+			ipfsTimeout = parsedIpfsTimeout
+		}
+	} else {
+		logger.Error().Str("model", model.ID).Msg("model ID not found in ML.Cog map, required for QwenTestModel. Using default timeout 120s")
+		// Keep default timeout, but log as Error as it's unexpected for a Cog model
 	}
 
 	m := &QwenTestModel{
-		Model:  QwenTestModelTemplate,
-		config: appConfig,
-		//url:    url[0],
+		Model:               QwenTestModelTemplate,
+		timeoutDuration:     timeout,
+		ipfsTimeoutDuration: ipfsTimeout, // Store the IPFS timeout
+		config:              appConfig,
 		Filters: []MiningFilter{
 			{
 				MinFee:  0,
@@ -258,13 +290,24 @@ func (m *QwenTestModel) GetID() string {
 	return m.Model.ID
 }
 
-func (m *QwenTestModel) GetFiles(gpu *common.GPU, taskid string, input any) ([]ipfs.IPFSFile, error) {
+func (m *QwenTestModel) GetFiles(ctx context.Context, gpu *common.GPU, taskid string, input any) ([]ipfs.IPFSFile, error) {
 
 	marshaledInput, _ := json.Marshal(input)
 
-	postResp, err := m.client.Post(gpu.Url, "application/json", bytes.NewBuffer([]byte(marshaledInput)))
+	req, err := http.NewRequestWithContext(ctx, "POST", gpu.Url, bytes.NewBuffer(marshaledInput))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	postResp, err := m.client.Do(req)
+	if err != nil {
+		// Check if the error is context deadline exceeded
+		if errors.Is(err, context.DeadlineExceeded) {
+			m.logger.Error().Err(err).Str("task", taskid).Str("gpu", gpu.Url).Msg("model inference request timed out")
+			return nil, fmt.Errorf("model inference timed out: %w", err)
+		}
+		return nil, fmt.Errorf("failed to POST to GPU: %w", err)
 	}
 	defer postResp.Body.Close()
 
@@ -290,16 +333,28 @@ func (m *QwenTestModel) GetFiles(gpu *common.GPU, taskid string, input any) ([]i
 	return []ipfs.IPFSFile{{Name: "out-1.txt", Path: path, Buffer: buffer}}, nil
 }
 
-func (m *QwenTestModel) GetCID(gpu *common.GPU, taskid string, input any) ([]byte, error) {
+func (m *QwenTestModel) GetCID(ctx context.Context, gpu *common.GPU, taskid string, input any) ([]byte, error) {
+
+	// Create a new context with the stored model-specific timeout
+	timeoutCtx, cancel := context.WithTimeout(ctx, m.timeoutDuration)
+	defer cancel()
+
 	paths, err := utils.ExpRetry(m.logger, func() (any, error) {
-		return m.GetFiles(gpu, taskid, input)
+		// Pass the timeout context to GetFiles
+		return m.GetFiles(timeoutCtx, gpu, taskid, input)
 	}, 3, 1000)
 	if err != nil {
 		return nil, err
 	}
 
+	// Note: IPFS pinning might need its own context/timeout strategy if it becomes slow
+	// Create a new context for IPFS pinning with its specific timeout
+	ipfsCtx, ipfsCancel := context.WithTimeout(ctx, m.ipfsTimeoutDuration)
+	defer ipfsCancel()
+
 	cid58, err := utils.ExpRetry(m.logger, func() (any, error) {
-		return m.ipfs.PinFilesToIPFS(taskid, paths.([]ipfs.IPFSFile))
+		// Pass the ipfsCtx to PinFilesToIPFS
+		return m.ipfs.PinFilesToIPFS(ipfsCtx, taskid, paths.([]ipfs.IPFSFile))
 	}, 3, 1000)
 
 	if err != nil {
@@ -323,7 +378,7 @@ func (m *QwenTestModel) Validate(gpu *common.GPU, taskid string) error {
 		},
 	}
 
-	cid, err := m.GetCID(gpu, "startup-test-taskid", testPrompt)
+	cid, err := m.GetCID(context.Background(), gpu, "startup-test-taskid", testPrompt)
 	if err != nil {
 		return err
 	}

@@ -217,17 +217,16 @@ type Claimer struct {
 }
 
 type ML struct {
-	Strategy  string         `json:"strategy"`
-	Replicate Replicate      `json:"replicate"`
-	Cog       map[string]Cog `json:"cog"`
-}
-
-type Replicate struct {
-	APIToken string `json:"api_token"`
+	Strategy string         `json:"strategy"`
+	Cog      map[string]Cog `json:"cog"`
 }
 
 type Cog struct {
-	URL []string `json:"url"`
+	// HttpTimeout specifies the duration allowed for a model inference request (e.g., "120s", "5m").
+	HttpTimeout string `json:"http_timeout"`
+	// IpfsTimeout specifies the duration allowed for IPFS pinning operations (e.g., "30s").
+	IpfsTimeout string   `json:"ipfs_timeout"`
+	URL         []string `json:"url"`
 }
 
 type IPFS struct {

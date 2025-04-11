@@ -15,7 +15,7 @@ import (
 
 // Interface for IPFS things
 type IPFSClient interface {
-	PinFilesToIPFS(taskid string, filesToAdd []IPFSFile) (string, error)
+	PinFilesToIPFS(ctx context.Context, taskid string, filesToAdd []IPFSFile) (string, error)
 	PinFileToIPFS(data []byte, filename string) string
 }
 
@@ -53,30 +53,16 @@ func (ic *BaseIPFSClient) PinFileToIPFS(data []byte, filename string) string {
 
 // PinFilesToIPFS adds the files to IPFS
 // note: taskid is not used in this function until pinata support is added
-func (ic *BaseIPFSClient) PinFilesToIPFS(taskid string, filesToAdd []IPFSFile) (string, error) {
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
+func (ic *BaseIPFSClient) PinFilesToIPFS(ctx context.Context, taskid string, filesToAdd []IPFSFile) (string, error) {
 	mapOfFiles := map[string]files.Node{}
 	for _, file := range filesToAdd {
-		//path := filepath.Join(ic.config.CachePath, file.Path)
-		// fileHandle, err := os.Open(file.Path)
-		// if err != nil {
-		// 	return "", err
-		// }
-		// defer fileHandle.Close()
-
 		mapOfFiles[file.Name] = files.NewReaderFile(file.Buffer)
-		//fmt.Println("adding file", filename, " path:", path)
 	}
 	mapDirectory := files.NewMapDirectory(mapOfFiles)
 	test, err := ic.api.Unixfs().Add(ctx, mapDirectory, ic.ipfsOptions...)
 	if err != nil {
-		//fmt.Println(err.Error())
 		return "", err
 	}
-	//fmt.Println(test.RootCid().String())
 	return test.RootCid().String(), nil
 }
 
