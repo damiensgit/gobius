@@ -387,7 +387,7 @@ func (account *Account) WaitForConfirmedTx(tx *types.Transaction) (receipt *type
 		account.logger.Error().
 			Str("reason", revertReason).
 			Str("txhash", tx.Hash().String()).
-			Str("	", tx.GasFeeCap().String()).
+			Str("gasfeecap", tx.GasFeeCap().String()).
 			Str("gasfeetip", tx.GasTipCap().String()).
 			Msg("❌ transaction was not successful")
 		return receipt, false, revertReason, nil

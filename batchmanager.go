@@ -22,13 +22,10 @@ import (
 	"sync"
 	"time"
 
-	// Added for OnChainOracle
-
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
-	// Added for OnChainOracle
 )
 
 const profitEstimateBatchSize = 200
@@ -1043,40 +1040,99 @@ func (tm *BatchTransactionManager) processBatch(
 
 		batchCommitmentLen := len(batchCommitments)
 
+		if batchCommitmentLen == 0 {
+			return nil // Nothing to process
+		}
+
 		if batchCommitmentLen < minBatchSize {
-			if batchCommitmentLen > 0 {
-				tm.services.Logger.Info().Int("min_batch_size", minBatchSize).Int("commitments", batchCommitmentLen).Msg("available commitments below min batch size")
-			}
+			tm.services.Logger.Info().Int("min_batch_size", minBatchSize).Int("commitments", batchCommitmentLen).Msg("available commitments below min batch size")
 			return nil
 		}
 
 		tm.services.Logger.Info().Str("account", account.Address.String()).Msgf("bulk submitting %d commitment(s)", len(batchCommitments))
 
+		isEstimationMode := tm.services.Config.Miner.EnableGasEstimationMode
+
+		// Calculate hardcoded limit first
+		hardcodedGasLimit := uint64(28_500*batchCommitmentLen + 3_500_000)
+		// NonceManagerWrapper call
 		tx, err := account.NonceManagerWrapper(tm.services.Config.Miner.ErrorMaxRetries, tm.services.Config.Miner.ErrorBackoffTime, tm.services.Config.Miner.ErrorBackofMultiplier, false, func(opts *bind.TransactOpts) (interface{}, error) {
-			opts.GasLimit = uint64(28_500*len(batchCommitments) + 3_500_000)
-			return tm.services.BulkTasks.BulkSignalCommitment(opts, batchCommitments)
+			if isEstimationMode {
+				opts.GasLimit = 0 // Force estimation
+			} else {
+				opts.GasLimit = hardcodedGasLimit // Use hardcoded limit
+			}
+			opts.NoSend = true // don't send the transaction yet
+			tx, err := tm.services.BulkTasks.BulkSignalCommitment(opts, batchCommitments)
+			if err != nil {
+				return nil, err
+			}
+			// send the transaction from correct account
+			return account.SendSignedTransaction(tx)
 		})
+
+		// Log gas limit info
+		if tx != nil {
+			actualGasLimit := tx.Gas()
+			logFields := map[string]interface{}{
+				"tx_gas_limit": actualGasLimit,
+				"batch_size":   batchCommitmentLen,
+				"function":     "sendCommitments",
+			}
+
+			if isEstimationMode {
+				logFields["mode"] = "estimate"
+				logFields["hardcoded_gas_limit"] = hardcodedGasLimit
+				if hardcodedGasLimit > 0 {
+					diff := (float64(actualGasLimit) - float64(hardcodedGasLimit)) / float64(hardcodedGasLimit) * 100.0
+					logFields["diff_percent"] = fmt.Sprintf("%.2f%%", diff)
+				} else {
+					logFields["diff_percent"] = "N/A (hardcoded is 0)"
+				}
+				tm.services.Logger.Info().Fields(logFields).Msg("gas limit estimation complete")
+			} else {
+				logFields["hardcoded_gas_limit"] = hardcodedGasLimit
+				logFields["mode"] = "normal"
+				tm.services.Logger.Info().Fields(logFields).Msg("gas limit set for transaction")
+			}
+		}
 
 		if err != nil {
 			tm.services.Logger.Error().Err(err).Msg("error sending batch commitment")
 			return err
 		}
+		if tx == nil {
+			return errors.New("assertion: transaction is nil but no error reported from NonceManagerWrapper")
+		}
 
-		receipt, success, _, _ := account.WaitForConfirmedTx(tx)
+		// --- Normal logic continues below (WaitForConfirmedTx, etc.) ---
+		receipt, success, _, waitErr := account.WaitForConfirmedTx(tx)
+		// Capture waitErr separately from the wrapper err
 
 		txCost := new(big.Int)
 
+		// Process receipt even if WaitMined failed or tx reverted, if receipt exists
 		if receipt != nil {
-			gasCostPerTask := float64(receipt.GasUsed) / float64(len(batchCommitments))
+			gasCostPerTask := 0.0
+			if batchCommitmentLen > 0 {
+				gasCostPerTask = float64(receipt.GasUsed) / float64(batchCommitmentLen)
+			}
 			txCost.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
 			gp := tm.services.Config.BaseConfig.BaseToken.ToFloat(receipt.EffectiveGasPrice)
 			tm.services.Logger.Info().Uint64("gas_used", receipt.GasUsed).Float64("gas_per_commit", gasCostPerTask).Float64("gas_price", gp).Msg("**** bulk commitment gas used *****")
-			tm.cumulativeGasUsed.AddCommitment(txCost)
+			tm.cumulativeGasUsed.AddCommitment(txCost) // Add cost regardless of success
+		}
+
+		// Handle error from waiting for confirmation
+		if waitErr != nil {
+			tm.services.Logger.Error().Err(waitErr).Str("txhash", tx.Hash().String()).Msg("Error waiting for commitment confirmation")
+			return waitErr // Return the wait error
 		}
 
 		if !success {
-			tm.services.Logger.Error().Err(err).Msg("batch commitments tx reverted")
-			return err
+			// Transaction was mined but reverted
+			tm.services.Logger.Error().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("batch commitments tx reverted")
+			return errors.New("batch commitments tx reverted")
 		}
 
 		tm.services.Logger.Info().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("batch commitments tx accepted!")
@@ -1084,9 +1140,9 @@ func (tm *BatchTransactionManager) processBatch(
 		var signalledCommitments [][32]byte
 		for _, log := range receipt.Logs {
 			if len(log.Topics) > 0 && log.Topics[0] == tm.signalCommitmentEvent {
-				parsed, err := tm.services.Engine.Engine.ParseSignalCommitment(*log)
-				if err != nil {
-					tm.services.Logger.Error().Err(err).Msg("could not parse signal commitment event")
+				parsed, parseErr := tm.services.Engine.Engine.ParseSignalCommitment(*log)
+				if parseErr != nil {
+					tm.services.Logger.Error().Err(parseErr).Msg("could not parse signal commitment event")
 					continue
 				}
 				signalledCommitments = append(signalledCommitments, parsed.Commitment)
@@ -1102,9 +1158,9 @@ func (tm *BatchTransactionManager) processBatch(
 					commitmentsToUpdateAndDelete = append(commitmentsToUpdateAndDelete, taskId)
 				}
 			} else {
-				blockNo, err := tm.services.Engine.Engine.Commitments(nil, commitment)
-				if err != nil {
-					tm.services.Logger.Error().Err(err).Str("commitment", commitmentStr).Msg("could not get commitment block number")
+				blockNo, chainErr := tm.services.Engine.Engine.Commitments(nil, commitment)
+				if chainErr != nil {
+					tm.services.Logger.Error().Err(chainErr).Str("commitment", commitmentStr).Msg("could not get commitment block number")
 					continue
 				}
 				// if we have a non zero block no, there is already a commitment for this task, so delete it
@@ -1113,9 +1169,9 @@ func (tm *BatchTransactionManager) processBatch(
 						// Found on chain, but not in *this* batch's logs. Still needs cleanup/status update.
 						commitmentsToUpdateAndDelete = append(commitmentsToUpdateAndDelete, taskId)
 					}
-					tm.services.Logger.Warn().Str("commitment", commitmentStr).Msg("commitment was already accepted")
+					tm.services.Logger.Warn().Str("commitment", commitmentStr).Msg("commitment was already accepted (found on-chain)")
 				} else {
-					tm.services.Logger.Warn().Str("commitment", commitmentStr).Msg("commitment was not accepted")
+					tm.services.Logger.Warn().Str("commitment", commitmentStr).Msg("commitment was not accepted (not in logs, not on-chain)")
 				}
 			}
 		}
@@ -1135,14 +1191,14 @@ func (tm *BatchTransactionManager) processBatch(
 			if len(commitmentsToUpdateAndDelete) > 0 && txCost.Cmp(big.NewInt(0)) > 0 {
 				costPerCommitment = tm.services.Config.BaseConfig.BaseToken.ToFloat(txCost) / float64(len(commitmentsToUpdateAndDelete))
 			}
-			err = tm.services.TaskStorage.UpdateTaskStatusAndCost(commitmentsToUpdateAndDelete, 2, costPerCommitment)
-			if err != nil {
-				tm.services.Logger.Error().Err(err).Msg("error updating task data in storage")
-				return err
+			updateErr := tm.services.TaskStorage.UpdateTaskStatusAndCost(commitmentsToUpdateAndDelete, 2, costPerCommitment)
+			if updateErr != nil {
+				tm.services.Logger.Error().Err(updateErr).Msg("error updating task data in storage")
+				return updateErr
 			}
 			tm.services.Logger.Info().Int("accepted", len(commitmentsToUpdateAndDelete)).Float64("cost_per_commit", costPerCommitment).Msg("✅ submitted commitments")
 		}
-		return nil
+		return nil // Successful completion
 	}
 
 	sendSolutions := func(validatorToSendSubmits *Validator, batchTasks storage.TaskDataSlice, wg *sync.WaitGroup, noChecks bool, minBatchSize int) error {
@@ -1150,10 +1206,12 @@ func (tm *BatchTransactionManager) processBatch(
 		batchSolutions, batchTaskIds := batchTasks.GetSolutions()
 		batchSolutionsLen := len(batchSolutions)
 
+		if batchSolutionsLen == 0 {
+			return nil // Nothing to process
+		}
+
 		if batchSolutionsLen < minBatchSize {
-			if batchSolutionsLen > 0 {
-				tm.services.Logger.Info().Int("min_batch_size", minBatchSize).Int("solutions", batchSolutionsLen).Msg("available solutions below min batch size")
-			}
+			tm.services.Logger.Info().Int("min_batch_size", minBatchSize).Int("solutions", batchSolutionsLen).Msg("available solutions below min batch size")
 			// No error, just not enough tasks to meet the minimum batch size
 			return nil
 		}
@@ -1170,117 +1228,157 @@ func (tm *BatchTransactionManager) processBatch(
 		tm.services.Logger.Info().Str("account", validatorToSendSubmits.ValidatorAddress().String()).Msgf("bulk submitting %d solution(s)", len(solutionsToSubmit))
 
 		if len(solutionsToSubmit) != len(tasksToSubmit) {
-			tm.services.Logger.Error().Msg("ASSERT: MISMATCHED NUMBER OF TASKS AND SOLUTIONS BEING SUBMITTED!")
+			err := errors.New("ASSERT: MISMATCHED NUMBER OF TASKS AND SOLUTIONS BEING SUBMITTED!")
+			tm.services.Logger.Error().Err(err).Msg("Internal error")
 			return err
 		}
 
-		if len(solutionsToSubmit) > 0 {
-			tx, err := validatorToSendSubmits.Account.NonceManagerWrapper(tm.services.Config.Miner.ErrorMaxRetries, tm.services.Config.Miner.ErrorBackoffTime, tm.services.Config.Miner.ErrorBackofMultiplier, false, func(opts *bind.TransactOpts) (interface{}, error) {
-				opts.GasLimit = uint64(139_500*len(solutionsToSubmit) + 3_500_000)
-				opts.NoSend = true
-				tx, err := tm.services.Engine.Engine.BulkSubmitSolution(opts, tasksToSubmit, solutionsToSubmit)
-				if err != nil {
-					return nil, err
-				}
-				return validatorToSendSubmits.Account.SendSignedTransaction(tx)
-			})
+		isEstimationMode := tm.services.Config.Miner.EnableGasEstimationMode
 
+		// Calculate hardcoded limit first
+		hardcodedGasLimit := uint64(139_500*batchSolutionsLen + 3_500_000)
+		// NonceManagerWrapper call
+		tx, err := validatorToSendSubmits.Account.NonceManagerWrapper(tm.services.Config.Miner.ErrorMaxRetries, tm.services.Config.Miner.ErrorBackoffTime, tm.services.Config.Miner.ErrorBackofMultiplier, false, func(opts *bind.TransactOpts) (interface{}, error) {
+			if isEstimationMode {
+				opts.GasLimit = 0 // Force estimation
+			} else {
+				opts.GasLimit = hardcodedGasLimit // Use hardcoded limit
+			}
+			opts.NoSend = true // don't send the transaction yet
+			tx, err := tm.services.Engine.Engine.BulkSubmitSolution(opts, tasksToSubmit, solutionsToSubmit)
 			if err != nil {
-				tm.services.Logger.Error().Err(err).Int("batch_size", len(solutionsToSubmit)).Msg("error sending batch solutions transaction")
-				return err
+				return nil, err
+			}
+			// send the transaction from correct account
+			return validatorToSendSubmits.Account.SendSignedTransaction(tx)
+		})
+
+		if tx != nil {
+			actualGasLimit := tx.Gas()
+			logFields := map[string]interface{}{
+				"tx_gas_limit": actualGasLimit,
+				"batch_size":   batchSolutionsLen,
+				"function":     "sendSolutions",
+				"validator":    validatorToSendSubmits.ValidatorAddress().String(),
 			}
 
-			receipt, success, _, _ := validatorToSendSubmits.Account.WaitForConfirmedTx(tx)
-
-			txCost := new(big.Int)
-
-			if receipt != nil {
-				txCost.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
-				gp := tm.services.Config.BaseConfig.BaseToken.ToFloat(receipt.EffectiveGasPrice)
-				gasPerSol := 0.0
-				if len(solutionsToSubmit) > 0 {
-					gasPerSol = float64(receipt.GasUsed) / float64(len(solutionsToSubmit))
-				}
-				tm.services.Logger.Info().Uint64("gas", receipt.GasUsed).Float64("gas_per_sol", gasPerSol).Float64("gas_price", gp).Msg("**** bulk solution gas usage *****")
-				tm.cumulativeGasUsed.AddSolution(txCost)
-			}
-
-			if !success {
-				logMsg := tm.services.Logger.Error().Str("txHash", tx.Hash().String()) // Log tx hash safely
-				if receipt != nil {
-					logMsg = logMsg.Uint64("block", receipt.BlockNumber.Uint64()) // Only log block if receipt exists
-				}
-				logMsg.Msg("batch solution transaction reverted on-chain")
-				return err
-			}
-
-			tm.services.Logger.Info().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("batch solutions transaction successfully confirmed!")
-
-			var solutionsSubmitted []task.TaskId
-			for _, log := range receipt.Logs {
-				if len(log.Topics) > 0 && log.Topics[0] == tm.solutionSubmittedEvent {
-					parsed, err := tm.services.Engine.Engine.ParseSolutionSubmitted(*log)
-					if err != nil {
-						tm.services.Logger.Error().Err(err).Msg("could not parse solution submitted event")
-						continue
-					}
-					solutionsSubmitted = append(solutionsSubmitted, parsed.Task)
-				}
-			}
-
-			solutionsToDelete := make([]task.TaskId, 0)
-
-			for _, taskid := range tasksToSubmit {
-				taskIdStr := task.TaskId(taskid).String()
-				if slices.Contains(solutionsSubmitted, taskid) {
-					tm.services.TaskTracker.TaskSucceeded()
-					solutionsToDelete = append(solutionsToDelete, taskid)
+			if isEstimationMode {
+				logFields["mode"] = "estimate"
+				logFields["hardcoded_gas_limit"] = hardcodedGasLimit
+				if hardcodedGasLimit > 0 {
+					diff := (float64(actualGasLimit) - float64(hardcodedGasLimit)) / float64(hardcodedGasLimit) * 100.0
+					logFields["diff_percent"] = fmt.Sprintf("%.2f%%", diff)
 				} else {
-					tm.services.TaskTracker.TaskFailed()
-
-					res, err := tm.services.Engine.Engine.Solutions(nil, taskid)
-					if err != nil {
-						tm.services.Logger.Err(err).Str("taskid", taskIdStr).Msg("error getting solution information for task onchain")
-						continue
-					}
-
-					if res.Blocktime > 0 {
-						solutionsToDelete = append(solutionsToDelete, taskid)
-						tm.services.Logger.Warn().Str("taskid", taskIdStr).Str("validator", res.Validator.String()).Msg("solution was already accepted")
-					} else {
-						tm.services.Logger.Warn().Str("taskid", taskIdStr).Msg("solution was not accepted")
-					}
+					logFields["diff_percent"] = "N/A (hardcoded is 0)"
 				}
-			}
-
-			// do not handle error here as we want to continue processing the next batch
-			err = deleteSolutions(solutionsToDelete)
-			if err != nil {
-				tm.services.Logger.Error().Err(err).Msg("error deleting solutions from storage")
-			}
-
-			unacceptedSolutions := len(tasksToSubmit) - len(solutionsSubmitted)
-			if unacceptedSolutions > 0 {
-				tm.services.Logger.Warn().Int("unaccepted", unacceptedSolutions).Int("total_in_batch", len(tasksToSubmit)).Msg("⚠️ some solutions submitted in batch were not confirmed via logs")
-			}
-
-			if len(solutionsSubmitted) > 0 {
-				gasPerSolution := 0.0
-				if len(solutionsSubmitted) > 0 && txCost.Cmp(big.NewInt(0)) > 0 {
-					gasPerSolution = tm.services.Config.BaseConfig.BaseToken.ToFloat(txCost) / float64(len(solutionsSubmitted))
-				}
-
-				// Add the cost of this batch to all tasks
-				_, err = tm.services.TaskStorage.AddTasksToClaim(solutionsSubmitted, gasPerSolution)
-				if err != nil {
-					tm.services.Logger.Error().Err(err).Msg("error adding tasks to claim in storage")
-					return err
-				}
-				tm.services.Logger.Info().Str("validator", validatorToSendSubmits.ValidatorAddress().String()).Int("accepted", len(solutionsSubmitted)).Float64("cost_per_sol", gasPerSolution).Msg("✅ submitted solutions added to claim storage")
+				tm.services.Logger.Info().Fields(logFields).Msg("gas limit estimation complete")
+			} else {
+				logFields["mode"] = "forced"
+				tm.services.Logger.Info().Fields(logFields).Msg("gas limit set for transaction")
 			}
 		}
 
-		return nil
+		if err != nil {
+			tm.services.Logger.Error().Err(err).Int("batch_size", batchSolutionsLen).Msg("error sending batch solutions transaction")
+			return err
+		}
+
+		if tx == nil {
+			return errors.New("assertion: transaction is nil but no error reported from NonceManagerWrapper")
+		}
+
+		receipt, success, _, waitErr := validatorToSendSubmits.Account.WaitForConfirmedTx(tx)
+
+		txCost := new(big.Int)
+
+		// Process receipt even if WaitMined failed or tx reverted, if receipt exists
+		if receipt != nil {
+			txCost.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
+			gp := tm.services.Config.BaseConfig.BaseToken.ToFloat(receipt.EffectiveGasPrice)
+			gasPerSol := 0.0
+			if batchSolutionsLen > 0 {
+				gasPerSol = float64(receipt.GasUsed) / float64(batchSolutionsLen)
+			}
+			tm.services.Logger.Info().Uint64("gas", receipt.GasUsed).Float64("gas_per_sol", gasPerSol).Float64("gas_price", gp).Msg("**** bulk solution gas usage *****")
+			tm.cumulativeGasUsed.AddSolution(txCost) // Add cost regardless of success
+		}
+
+		if waitErr != nil {
+			tm.services.Logger.Error().Err(waitErr).Str("txhash", tx.Hash().String()).Msg("error waiting for solution confirmation")
+			return waitErr
+		}
+
+		if !success {
+			tm.services.Logger.Error().Str("txHash", tx.Hash().String()).Msg("batch solution transaction reverted on-chain")
+			return errors.New("batch solution transaction reverted on-chain")
+		} else {
+			tm.services.Logger.Info().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("batch solutions transaction successfully confirmed!")
+		}
+
+		var solutionsSubmitted []task.TaskId
+		for _, log := range receipt.Logs {
+			if len(log.Topics) > 0 && log.Topics[0] == tm.solutionSubmittedEvent {
+				parsed, parseErr := tm.services.Engine.Engine.ParseSolutionSubmitted(*log)
+				if parseErr != nil {
+					tm.services.Logger.Error().Err(parseErr).Msg("could not parse solution submitted event")
+					continue
+				}
+				solutionsSubmitted = append(solutionsSubmitted, parsed.Task)
+			}
+		}
+
+		solutionsToDelete := make([]task.TaskId, 0)
+
+		for _, taskid := range tasksToSubmit {
+			taskIdStr := task.TaskId(taskid).String()
+			if slices.Contains(solutionsSubmitted, taskid) {
+				tm.services.TaskTracker.TaskSucceeded()
+				solutionsToDelete = append(solutionsToDelete, taskid)
+			} else {
+				tm.services.TaskTracker.TaskFailed()
+
+				res, chainErr := tm.services.Engine.Engine.Solutions(nil, taskid)
+				if chainErr != nil {
+					tm.services.Logger.Err(chainErr).Str("taskid", taskIdStr).Msg("error getting solution information for task onchain")
+					continue
+				}
+				if res.Blocktime > 0 {
+					solutionsToDelete = append(solutionsToDelete, taskid)
+					tm.services.Logger.Warn().Str("taskid", taskIdStr).Str("validator", res.Validator.String()).Msg("solution was already accepted (found on-chain)")
+				} else {
+					tm.services.Logger.Warn().Str("taskid", taskIdStr).Msg("solution was not accepted (not in logs, not on-chain)")
+				}
+			}
+		}
+
+		// do not handle error here as we want to continue processing the next batch
+		deleteErr := deleteSolutions(solutionsToDelete)
+		if deleteErr != nil {
+			tm.services.Logger.Error().Err(deleteErr).Msg("error deleting solutions from storage")
+		}
+
+		unacceptedSolutions := len(tasksToSubmit) - len(solutionsSubmitted)
+		if unacceptedSolutions > 0 {
+			tm.services.Logger.Warn().Int("unaccepted", unacceptedSolutions).Int("total_in_batch", len(tasksToSubmit)).Msg("⚠️ some solutions submitted in batch were not confirmed via logs")
+		}
+
+		if len(solutionsSubmitted) < 0 {
+			return nil
+		}
+
+		gasPerSolution := 0.0
+		if len(solutionsSubmitted) > 0 && txCost.Cmp(big.NewInt(0)) > 0 {
+			gasPerSolution = tm.services.Config.BaseConfig.BaseToken.ToFloat(txCost) / float64(len(solutionsSubmitted))
+		}
+
+		_, addClaimErr := tm.services.TaskStorage.AddTasksToClaim(solutionsSubmitted, gasPerSolution)
+		if addClaimErr != nil {
+			tm.services.Logger.Error().Err(addClaimErr).Msg("error adding tasks to claim in storage")
+			return addClaimErr
+		}
+		tm.services.Logger.Info().Str("validator", validatorToSendSubmits.ValidatorAddress().String()).Int("accepted", len(solutionsSubmitted)).Float64("cost_per_sol", gasPerSolution).Msg("✅ submitted solutions added to claim storage")
+
+		return nil // Successful completion
 	}
 
 	if tm.services.Config.Miner.CommitmentsAndSolutions != config.DoNothing {
