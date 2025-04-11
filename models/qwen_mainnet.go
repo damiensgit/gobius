@@ -287,6 +287,12 @@ func (m *QwenMainnetModel) GetID() string {
 
 func (m *QwenMainnetModel) GetFiles(ctx context.Context, gpu *common.GPU, taskid string, input any) ([]ipfs.IPFSFile, error) {
 
+	// Check if context is already canceled before doing anything
+	if err := ctx.Err(); err != nil {
+		m.logger.Warn().Err(err).Str("task", taskid).Msg("Context canceled before GetFiles execution")
+		return nil, err
+	}
+
 	marshaledInput, _ := json.Marshal(input)
 
 	req, err := http.NewRequestWithContext(ctx, "POST", gpu.Url, bytes.NewBuffer(marshaledInput))
@@ -343,11 +349,17 @@ func (m *QwenMainnetModel) GetFiles(ctx context.Context, gpu *common.GPU, taskid
 
 func (m *QwenMainnetModel) GetCID(ctx context.Context, gpu *common.GPU, taskid string, input any) ([]byte, error) {
 
+	// Check context before attempting GetFiles
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("parent context canceled before GetCID: %w", err)
+	}
+
 	// Create a new context with the stored model-specific timeout
 	timeoutCtx, cancel := context.WithTimeout(ctx, m.timeoutDuration)
 	defer cancel()
 
-	paths, err := utils.ExpRetry(m.logger, func() (any, error) {
+	// Use ExpRetryWithContext
+	paths, err := utils.ExpRetryWithContext(timeoutCtx, m.logger, func() (any, error) {
 		// Pass the timeout context to GetFiles
 		return m.GetFiles(timeoutCtx, gpu, taskid, input)
 	}, 3, 1000)
@@ -365,7 +377,8 @@ func (m *QwenMainnetModel) GetCID(ctx context.Context, gpu *common.GPU, taskid s
 	ipfsCtx, ipfsCancel := context.WithTimeout(ctx, m.ipfsTimeoutDuration)
 	defer ipfsCancel()
 
-	cid58, err := utils.ExpRetry(m.logger, func() (any, error) {
+	// Use ExpRetryWithContext
+	cid58, err := utils.ExpRetryWithContext(ipfsCtx, m.logger, func() (any, error) {
 		// Pass the ipfsCtx to PinFilesToIPFS
 		// TODO: Update ipfs.PinFilesToIPFS interface to accept context
 		return m.ipfs.PinFilesToIPFS(ipfsCtx, taskid, paths.([]ipfs.IPFSFile))

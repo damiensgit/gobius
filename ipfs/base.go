@@ -54,6 +54,13 @@ func (ic *BaseIPFSClient) PinFileToIPFS(data []byte, filename string) string {
 // PinFilesToIPFS adds the files to IPFS
 // note: taskid is not used in this function until pinata support is added
 func (ic *BaseIPFSClient) PinFilesToIPFS(ctx context.Context, taskid string, filesToAdd []IPFSFile) (string, error) {
+
+	// Check if context is already canceled before doing anything
+	if err := ctx.Err(); err != nil {
+		// Consider logging here if appropriate
+		return "", err
+	}
+
 	mapOfFiles := map[string]files.Node{}
 	for _, file := range filesToAdd {
 		mapOfFiles[file.Name] = files.NewReaderFile(file.Buffer)

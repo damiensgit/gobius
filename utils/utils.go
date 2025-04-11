@@ -3,6 +3,7 @@ package utils
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"math/rand"
 	"strconv"
 	"strings"
@@ -66,6 +67,49 @@ func ExpRetry(logger zerolog.Logger, fn func() (any, error), tries int, base flo
 	return result, err
 }
 
+// ExpRetryWithContext is like ExpRetry but checks for context cancellation during the retry loop.
+func ExpRetryWithContext(ctx context.Context, logger zerolog.Logger, fn func() (any, error), tries int, base float64) (any, error) {
+	var err error
+	var result any
+	totalNonceRetries := 1 // Note: Nonce logic is copied but might be irrelevant here if only used by ExpRetryWithNonceContext
+	backoff := base
+
+	for range tries {
+		result, err = fn()
+		if err == nil {
+			return result, nil
+		}
+		// Basic error checking copied from original ExpRetry
+		if strings.Contains(err.Error(), "solution already submitted") {
+			return result, err
+		} else if strings.Contains(err.Error(), "nonce too low") {
+			logger.Error().Err(err).Int("retries", totalNonceRetries).Msg("nonce too low")
+			time.Sleep(time.Duration(100) * time.Millisecond)
+			tries += 1
+			totalNonceRetries += 1
+			if totalNonceRetries > 20 {
+				break
+			}
+			continue
+		}
+
+		// Check if context was cancelled before sleeping
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			logger.Warn().Err(ctxErr).Msg("context cancelled while retrying")
+			// Return the context error preferentially, but include the latest function error for context
+			return result, fmt.Errorf("context cancelled: %w (last error: %v)", ctxErr, err)
+		}
+
+		sleepDuration := time.Duration(backoff) * time.Millisecond
+		logger.Warn().Dur("sleep_duration", sleepDuration).Err(err).Msg("retry request failed, retrying")
+		time.Sleep(sleepDuration)
+		backoff *= 1.5 // Double the backoff time
+	}
+
+	logger.Error().Int("tries", tries).Msg("retry request failed after multiple attempts")
+	return result, err
+}
+
 func ExpRetryWithNonce(logger zerolog.Logger, fn func(nonce uint64) (any, error), tries int, base, backoffMultiplier float64) (any, error) {
 	return ExpRetryWithNonceContext(context.Background(), logger, fn, tries, base, backoffMultiplier)
 }
@@ -84,10 +128,6 @@ func ExpRetryWithNonceContext(ctx context.Context, logger zerolog.Logger, fn fun
 		result, err = fn(nonce)
 		if err == nil {
 			return result, nil
-		}
-		if ctx.Err() != nil {
-			logger.Error().Err(ctx.Err()).Msg("Context cancelled or errored")
-			return result, ctx.Err()
 		}
 		if strings.Contains(err.Error(), "solution already submitted") {
 			return result, err

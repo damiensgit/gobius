@@ -276,8 +276,12 @@ func (m *Kandinsky2Model) GetID() string {
 }
 
 func (m *Kandinsky2Model) GetFiles(ctx context.Context, gpu *common.GPU, taskid string, input interface{}) ([]ipfs.IPFSFile, error) {
-	// TODO: validate this?
-	//url := m.config.ML.Cog[m.Model.ID].URL
+
+	// Check if context is already canceled before doing anything
+	if err := ctx.Err(); err != nil {
+		m.logger.Warn().Err(err).Str("task", taskid).Msg("Context canceled before GetFiles execution")
+		return nil, err
+	}
 
 	marshaledInput, _ := json.Marshal(input)
 
@@ -344,7 +348,8 @@ func (m *Kandinsky2Model) GetCID(ctx context.Context, gpu *common.GPU, taskid st
 	timeoutCtx, cancel := context.WithTimeout(ctx, m.timeoutDuration)
 	defer cancel()
 
-	paths, err := utils.ExpRetry(m.logger, func() (any, error) {
+	// Use ExpRetryWithContext
+	paths, err := utils.ExpRetryWithContext(timeoutCtx, m.logger, func() (any, error) {
 		// Pass the timeout context to GetFiles
 		return m.GetFiles(timeoutCtx, gpu, taskid, input)
 	}, 3, 1000)
@@ -357,7 +362,8 @@ func (m *Kandinsky2Model) GetCID(ctx context.Context, gpu *common.GPU, taskid st
 	ipfsCtx, ipfsCancel := context.WithTimeout(ctx, m.ipfsTimeoutDuration)
 	defer ipfsCancel()
 
-	cid58, err := utils.ExpRetry(m.logger, func() (any, error) {
+	// Use ExpRetryWithContext
+	cid58, err := utils.ExpRetryWithContext(ipfsCtx, m.logger, func() (any, error) {
 		// Pass the ipfsCtx to PinFilesToIPFS
 		return m.ipfs.PinFilesToIPFS(ipfsCtx, taskid, paths.([]ipfs.IPFSFile))
 	}, 3, 1000)
