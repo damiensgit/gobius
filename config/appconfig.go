@@ -160,6 +160,7 @@ type SolverConfig struct {
 	IntrinsicGasBaseline            uint64           `json:"intrinsic_gas_baseline"`             // baseline gas cost for a simple transfer
 	IntrinsicGasThresholdMultiplier float64          `json:"intrinsic_gas_threshold_multiplier"` // multiplier for the threshold
 	EnableGasEstimationMode         bool             `json:"enable_gas_estimation_mode"`         // enable gas estimation mode
+	GasEstimationMargin             uint64           `json:"gas_estimation_margin"`              // gas margin for gas estimation mode
 }
 
 type Strategies struct {
