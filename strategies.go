@@ -263,7 +263,8 @@ type TaskProducer interface {
 	Name() string
 }
 
-type taskHandlerFunc func(workerId int, gpu *task.GPU, ts *TaskSubmitted)
+// Task handler function signature now includes its own context
+type taskHandlerFunc func(workerId int, gpu *task.GPU, ts *TaskSubmitted, taskCtx context.Context)
 
 // Base Strategy (has common worker logic)
 type baseStrategy struct {
@@ -352,12 +353,13 @@ func (bs *baseStrategy) gpuWorker(workerId int, gpu *task.GPU, producer TaskProd
 		}
 
 		workerLogger.Debug().Msg("requesting task from producer...")
-		ts, err := producer.GetTask(bs.ctx) // Pass baseStrategy context
+		// Use the strategy's context (bs.ctx) to get the task, allowing cancellation here
+		ts, err := producer.GetTask(bs.ctx)
 
 		if err != nil {
 			// Check if the error is due to context cancellation (worker should exit)
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				workerLogger.Info().Err(err).Msg("worker context cancelled, exiting")
+				workerLogger.Info().Err(err).Msg("worker context cancelled while getting task, exiting")
 				return // Exit worker
 			}
 
@@ -381,8 +383,24 @@ func (bs *baseStrategy) gpuWorker(workerId int, gpu *task.GPU, producer TaskProd
 
 		// If GetTask returns without error, we have a valid task
 		workerLogger.Debug().Str("task", task.TaskId(ts.TaskId).String()).Msg("starting job")
-		gpu.SetStatus("Mining")
-		taskHandler(workerId, gpu, ts)
+		gpu.SetStatus("Mining") // Or "Validating"
+
+		// Determine the context for the task handler based on config
+		var taskCtx context.Context
+		if bs.services.Config.Miner.WaitForTasksOnShutdown {
+			// Use Background context to allow task completion on shutdown
+			workerLogger.Debug().Msg("using background context for task execution (wait enabled)")
+			taskCtx = context.Background()
+		} else {
+			// Use the worker's context to allow cancellation on shutdown
+			workerLogger.Debug().Msg("using worker context for task execution (wait disabled)")
+			taskCtx = bs.ctx
+		}
+
+		// If needed, add an overall timeout here: taskCtx, cancel := context.WithTimeout(taskCtx, 30*time.Minute); defer cancel()
+
+		taskHandler(workerId, gpu, ts, taskCtx) // Pass the determined taskCtx
+
 		workerLogger.Debug().Str("task", task.TaskId(ts.TaskId).String()).Msg("finished job processing")
 
 		// Loop immediately to get the next task
@@ -808,7 +826,8 @@ func (s *BulkMineStrategy) Start() error {
 }
 
 // handleTask processes a task received from the StorageProducer.
-func (s *BulkMineStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmitted) {
+// Accepts taskCtx for the actual task processing.
+func (s *BulkMineStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmitted, taskCtx context.Context) {
 	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task.TaskId(ts.TaskId).String()).Logger()
 
 	taskId := task.TaskId(ts.TaskId)
@@ -831,25 +850,34 @@ func (s *BulkMineStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmi
 		// Check if the error is permanent (decode issue or not found)
 		if errors.Is(err, ErrTxDecodePermanent) || errors.Is(err, ethereum.NotFound) {
 			workerLogger.Error().Err(err).Msg("permanent decode failure for task, dropping")
+			// Do NOT requeue permanent decode failures
 			// TODO: consider deleting the task from storage
 		} else {
 			// Assume other errors (like context cancelled or transient network issues) might be recoverable
 			workerLogger.Warn().Err(err).Msg("transient error decoding transaction, requeueing task")
 			requeueTask(taskId)
 		}
-		gpu.SetStatus("Error")
+		gpu.SetStatus("Ilde") // Set GPU to error for ANY decode failure
 		return
 	}
 
 	solveStart := time.Now()
-	_, err = s.miner.SolveTask(s.ctx, taskId, params, gpu, false) // false = not validateOnly
+	_, err = s.miner.SolveTask(taskCtx, taskId, params, gpu, false)
 	solveElapsed := time.Since(solveStart)
 
 	if err != nil {
-		workerLogger.Error().Err(err).Msg("solve task failed, attempting requeue to DB")
-		// Requeue ONLY because this strategy uses StorageProducer
-		requeueTask(taskId)
-		gpu.SetStatus("Error")
+		// Check if the error is specifically context cancellation or deadline exceeded
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			workerLogger.Info().Err(err).Msg("task context canceled or deadline exceeded, requeueing task")
+			requeueTask(taskId)
+			// Do not mark GPU as error, as it was context cancellation, not a GPU fault
+			gpu.SetStatus("Idle") // Reset status as the task is being abandoned due to cancellation
+		} else {
+			// Handle other errors (genuine task processing failures)
+			workerLogger.Error().Err(err).Msg("solve task failed, requeueing task")
+			requeueTask(taskId)
+			gpu.SetStatus("Error") // Mark GPU as having encountered an error
+		}
 	} else {
 		workerLogger.Info().Str("elapsed", solveElapsed.String()).Msg("task solved successfully")
 		s.gpuPool.AddSolveTime(solveElapsed)
@@ -926,7 +954,8 @@ func (s *ListenStrategy) Start() error {
 }
 
 // handleTask processes a task received from the EventProducer.
-func (s *ListenStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmitted) {
+// Accepts taskCtx for the actual task processing.
+func (s *ListenStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmitted, taskCtx context.Context) {
 	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task.TaskId(ts.TaskId).String()).Logger()
 
 	params, err := s.decodeTransaction(ts.TxHash)
@@ -937,7 +966,7 @@ func (s *ListenStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmitt
 	}
 
 	solveStart := time.Now()
-	_, err = s.miner.SolveTask(s.ctx, ts.TaskId, params, gpu, false)
+	_, err = s.miner.SolveTask(taskCtx, ts.TaskId, params, gpu, false)
 	solveElapsed := time.Since(solveStart)
 
 	if err != nil {
@@ -1040,7 +1069,7 @@ func NewSolutionEventProducer(appCtx context.Context, services *Services, txPara
 		}
 		return engineContract.WatchTaskSubmitted(&bind.WatchOpts{
 			Start:   &blockNo,
-			Context: p.ctx, // Use producer's main context
+			Context: p.ctx, // Use producer's main context for watch duration
 		}, p.sinkTaskSubmitted, nil, nil, nil) // Use the WaitGroup from the embedded runner
 	}
 	p.taskSubManager = NewSubscriptionManager(p.ctx, &p.WaitGroup, p.logger, "TaskSubmitted", connectTaskFn)
@@ -1354,9 +1383,9 @@ func (s *SolutionSamplerStrategy) Start() error {
 	return s.baseStrategy.start(s.producer, s.handleValidationTask)
 }
 
-// handleValidationTask performs the validation logic. Remains largely the same.
-// It's now the taskHandlerFunc passed to baseStrategy.start.
-func (s *SolutionSamplerStrategy) handleValidationTask(workerId int, gpu *task.GPU, ts *TaskSubmitted) {
+// handleValidationTask performs the validation logic.
+// Accepts taskCtx for the actual task processing.
+func (s *SolutionSamplerStrategy) handleValidationTask(workerId int, gpu *task.GPU, ts *TaskSubmitted, taskCtx context.Context) {
 	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task.TaskId(ts.TaskId).String()).Logger()
 	workerLogger.Info().Msg("validating sampled task")
 	// Set status immediately, might be changed on error
@@ -1375,24 +1404,31 @@ func (s *SolutionSamplerStrategy) handleValidationTask(workerId int, gpu *task.G
 		return
 	}
 
-	// Solve the task in validateOnly mode using decoded params
 	solveStart := time.Now()
-	ourCidBytes, err := s.miner.SolveTask(s.ctx, ts.TaskId, params, gpu, true) // true = validateOnly
+	// Assign to ourCidBytes, handle error
+	ourCidBytes, err := s.miner.SolveTask(taskCtx, ts.TaskId, params, gpu, true)
 	solveElapsed := time.Since(solveStart)
 
+	// Original error handling for SolveTask in validation (NO requeue)
 	if err != nil {
 		workerLogger.Error().Err(err).Msg("validation: solve task failed")
 		if gpu.IsEnabled() {
-			gpu.SetStatus("Error - Validate")
+			// Use more specific error status if possible
+			// Check for context errors here too for more informative status?
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				gpu.SetStatus("Error")
+			} else {
+				gpu.SetStatus("Error")
+			}
 		}
-		return
+		return // Exit validation on solve error
 	}
 	if ourCidBytes == nil {
 		workerLogger.Error().Msg("validation: solve task did not return a CID")
 		if gpu.IsEnabled() {
-			gpu.SetStatus("Error - Validate Null CID")
+			gpu.SetStatus("Error")
 		}
-		return
+		return // Exit validation if no CID
 	}
 
 	workerLogger.Info().Str("elapsed", solveElapsed.String()).Msg("validation: task solved locally")
@@ -1405,7 +1441,7 @@ func (s *SolutionSamplerStrategy) handleValidationTask(workerId int, gpu *task.G
 		return
 	}
 
-	callOpts := &bind.CallOpts{Context: s.ctx}
+	callOpts := &bind.CallOpts{Context: s.ctx} // Use base strategy context
 	res, err := engineContract.Solutions(callOpts, ts.TaskId)
 	if err != nil {
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

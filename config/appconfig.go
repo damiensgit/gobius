@@ -139,7 +139,8 @@ type BatchConfig struct {
 
 type SolverConfig struct {
 	Enabled                 bool             `json:"enabled"`
-	CommitmentsAndSolutions CommitmentOption `json:"commitments_and_solutions"` // one of: "donothing", "doboth", "docommitments", "dosolutions"
+	WaitForTasksOnShutdown  bool             `json:"wait_for_tasks_on_shutdown"` // If true, allow running tasks to finish on shutdown
+	CommitmentsAndSolutions CommitmentOption `json:"commitments_and_solutions"`  // one of: "donothing", "doboth", "docommitments", "dosolutions"
 	CommitmentBatch         BatchConfig      `json:"commitment_batch"`
 	SolutionBatch           BatchConfig      `json:"solution_batch"`
 	ConcurrentBatches       bool             `json:"concurrent_batches"`       // if true, submit multiple batches of commitments and solutions concurrently (requires multiple accounts)
@@ -338,6 +339,7 @@ func NewAppConfig(testnetType int) AppConfig {
 		},
 		Miner: SolverConfig{
 			Enabled:                 false,
+			WaitForTasksOnShutdown:  false,
 			CommitmentBatch:         BatchConfig{MinBatchSize: 10, MaxBatchSize: 10, NumberOfBatches: 1},
 			SolutionBatch:           BatchConfig{MinBatchSize: 10, MaxBatchSize: 10, NumberOfBatches: 1},
 			CommitmentsAndSolutions: DoBoth,

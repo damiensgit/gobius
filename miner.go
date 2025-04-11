@@ -7,6 +7,7 @@ import (
 	"embed"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	enginewrapper "gobius/bindings/engine"
@@ -328,12 +329,18 @@ func (m *Miner) SolveTask(ctx context.Context, taskId task.TaskId, params *Submi
 		//elapsed := time.Since(start)
 		//m.gpura.Add(elapsed)
 		if err != nil {
-			m.services.Logger.Error().Err(err).Msg("error on gpu, incrementing error counter")
+			// Check if the error is due to context cancellation (timeout or explicit cancel)
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				m.services.Logger.Info().Err(err).Str("task", taskIdStr).Msg("SolveTask cancelled or timed out")
+				return nil, err // Propagate the context error
+			}
+
+			// Handle other errors (GPU busy, actual inference errors, etc.)
+			m.services.Logger.Error().Err(err).Str("task", taskIdStr).Msg("error on gpu during GetCID, incrementing error counter")
 			gpu.IncrementErrorCount()
 			return nil, err
 		}
 		//m.services.Logger.Debug().Str("cid", "0x"+hex.EncodeToString(cid)).Str("elapsed", elapsed.String()).Str("average", m.gpura.Average().String()).Msg("gpu finished & returned result")
-
 	}
 
 	if validateOnly {
