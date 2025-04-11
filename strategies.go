@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"gobius/bindings/engine"
-	task_common "gobius/common" // Renamed import to avoid conflict
+	task "gobius/common" // Renamed import to avoid conflict
 	"math/rand"
 	"sync"
 	"time"
@@ -263,7 +263,7 @@ type TaskProducer interface {
 	Name() string
 }
 
-type taskHandlerFunc func(workerId int, gpu *task_common.GPU, ts *TaskSubmitted)
+type taskHandlerFunc func(workerId int, gpu *task.GPU, ts *TaskSubmitted)
 
 // Base Strategy (has common worker logic)
 type baseStrategy struct {
@@ -318,7 +318,7 @@ func newBaseStrategy(appCtx context.Context, services *Services, miner *Miner, g
 }
 
 // gpuWorker is simplified to pull directly from the producer.
-func (bs *baseStrategy) gpuWorker(workerId int, gpu *task_common.GPU, producer TaskProducer, taskHandler taskHandlerFunc) {
+func (bs *baseStrategy) gpuWorker(workerId int, gpu *task.GPU, producer TaskProducer, taskHandler taskHandlerFunc) {
 	workerLogger := bs.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("producer", producer.Name()).Logger()
 	workerLogger.Info().Msg("started worker")
 
@@ -380,10 +380,10 @@ func (bs *baseStrategy) gpuWorker(workerId int, gpu *task_common.GPU, producer T
 		}
 
 		// If GetTask returns without error, we have a valid task
-		workerLogger.Debug().Str("task", task_common.TaskId(ts.TaskId).String()).Msg("starting job")
+		workerLogger.Debug().Str("task", task.TaskId(ts.TaskId).String()).Msg("starting job")
 		gpu.SetStatus("Mining")
 		taskHandler(workerId, gpu, ts)
-		workerLogger.Debug().Str("task", task_common.TaskId(ts.TaskId).String()).Msg("finished job processing")
+		workerLogger.Debug().Str("task", task.TaskId(ts.TaskId).String()).Msg("finished job processing")
 
 		// Loop immediately to get the next task
 	}
@@ -574,17 +574,20 @@ func (p *StorageProducer) storageQueuePollerLoop() {
 			}
 
 			// Channel has space, okay to try popping a task
-			p.logger.Debug().Msg("Polling storage queue for task...")
-			taskId, txHash, err := p.services.TaskStorage.PopTask()
+			p.logger.Debug().Msg("popping task from storage queue...")
+			var taskId task.TaskId
+			var txHash common.Hash
+			var err error
+			taskId, txHash, err = p.services.TaskStorage.PopTask(p.services.Config.PopTaskRandom)
 
 			if err != nil {
 				var sleepDuration time.Duration
 				if errors.Is(err, sql.ErrNoRows) {
 					sleepDuration = emptyPollInterval
-					p.logger.Debug().Dur("wait", sleepDuration).Msg("DB empty, pausing poll")
+					p.logger.Debug().Dur("wait", sleepDuration).Msg("storage queue empty, pausing poll")
 				} else {
 					sleepDuration = errorPollInterval
-					p.logger.Error().Err(err).Dur("wait", sleepDuration).Msg("DB poll error, pausing poll")
+					p.logger.Error().Err(err).Dur("wait", sleepDuration).Msg("storage queue error, pausing poll")
 				}
 
 				// Wait before retrying, but check context during wait
@@ -627,7 +630,7 @@ func (p *StorageProducer) GetTask(ctx context.Context) (*TaskSubmitted, error) {
 			// Channel closed means producer is stopped
 			return nil, ErrProducerStopped // Use shared sentinel error
 		}
-		p.logger.Info().Str("task", task_common.TaskId(task.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing task from buffer")
+		p.logger.Info().Str("task", task.TaskId(task.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing task from buffer")
 		return task, nil
 	}
 }
@@ -735,7 +738,7 @@ func (p *EventProducer) GetTask(ctx context.Context) (*TaskSubmitted, error) {
 			// Channel closed means producer is stopped
 			return nil, ErrProducerStopped // Use shared sentinel error
 		}
-		p.logger.Info().Str("task", task_common.TaskId(task.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing task from event buffer")
+		p.logger.Info().Str("task", task.TaskId(task.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing task from event buffer")
 		return task, nil
 	}
 }
@@ -759,7 +762,7 @@ func (p *EventProducer) processEventsLoop() {
 				TaskId: event.Id,
 				TxHash: event.Raw.TxHash,
 			}
-			taskIdStr := task_common.TaskId(ts.TaskId).String()
+			taskIdStr := task.TaskId(ts.TaskId).String()
 
 			p.logger.Info().Str("task", taskIdStr).Int("chan_len", len(p.taskChan)).Msg("received TaskSubmitted event")
 
@@ -805,12 +808,12 @@ func (s *BulkMineStrategy) Start() error {
 }
 
 // handleTask processes a task received from the StorageProducer.
-func (s *BulkMineStrategy) handleTask(workerId int, gpu *task_common.GPU, ts *TaskSubmitted) {
-	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task_common.TaskId(ts.TaskId).String()).Logger()
+func (s *BulkMineStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmitted) {
+	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task.TaskId(ts.TaskId).String()).Logger()
 
-	taskId := task_common.TaskId(ts.TaskId)
+	taskId := task.TaskId(ts.TaskId)
 
-	requeueTask := func(taskId task_common.TaskId) {
+	requeueTask := func(taskId task.TaskId) {
 		// Requeue ONLY because this strategy uses StorageProducer
 		requeued, errDb := s.services.TaskStorage.RequeueTaskIfNoCommitmentOrSolution(taskId)
 		if errDb != nil {
@@ -923,8 +926,8 @@ func (s *ListenStrategy) Start() error {
 }
 
 // handleTask processes a task received from the EventProducer.
-func (s *ListenStrategy) handleTask(workerId int, gpu *task_common.GPU, ts *TaskSubmitted) {
-	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task_common.TaskId(ts.TaskId).String()).Logger()
+func (s *ListenStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmitted) {
+	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task.TaskId(ts.TaskId).String()).Logger()
 
 	params, err := s.decodeTransaction(ts.TxHash)
 	if err != nil {
@@ -1134,8 +1137,8 @@ func (p *SolutionEventProducer) processTaskSubmittedEvents() {
 				p.logger.Error().Msg("received TaskSubmitted event but txParamCache is nil, cannot cache")
 				continue
 			}
-			p.logger.Debug().Str("task", task_common.TaskId(event.Id).String()).Msg("received TaskSubmitted, caching TxHash")
-			p.txParamCache.Add(task_common.TaskId(event.Id).String(), event.Raw.TxHash)
+			p.logger.Debug().Str("task", task.TaskId(event.Id).String()).Msg("received TaskSubmitted, caching TxHash")
+			p.txParamCache.Add(task.TaskId(event.Id).String(), event.Raw.TxHash)
 		}
 	}
 }
@@ -1163,7 +1166,7 @@ func (p *SolutionEventProducer) processSolutionSubmittedEvents() {
 				continue
 			}
 
-			taskIdStr := task_common.TaskId(event.Task).String()
+			taskIdStr := task.TaskId(event.Task).String()
 			p.logger.Debug().Str("task", taskIdStr).Msg("received SolutionSubmitted event, looking up TxHash for sampling")
 
 			// Look up TxHash from cache
@@ -1270,7 +1273,7 @@ func (p *SolutionEventProducer) sampleDispatcherLoop() {
 					if ts == nil {
 						continue
 					} // Safety check
-					taskIdStr := task_common.TaskId(ts.TaskId).String()
+					taskIdStr := task.TaskId(ts.TaskId).String()
 					// Send should not block excessively as channel was drained and list trimmed to capacity,
 					// but still respect context cancellation.
 					select {
@@ -1303,7 +1306,7 @@ func (p *SolutionEventProducer) GetTask(ctx context.Context) (*TaskSubmitted, er
 			// Channel closed means producer is stopped
 			return nil, ErrProducerStopped // Use shared sentinel error
 		}
-		p.logger.Info().Str("task", task_common.TaskId(task.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing validation task from event")
+		p.logger.Info().Str("task", task.TaskId(task.TaskId).String()).Int("chan_len", len(p.taskChan)).Msg("providing validation task from event")
 		return task, nil
 	}
 }
@@ -1353,8 +1356,8 @@ func (s *SolutionSamplerStrategy) Start() error {
 
 // handleValidationTask performs the validation logic. Remains largely the same.
 // It's now the taskHandlerFunc passed to baseStrategy.start.
-func (s *SolutionSamplerStrategy) handleValidationTask(workerId int, gpu *task_common.GPU, ts *TaskSubmitted) {
-	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task_common.TaskId(ts.TaskId).String()).Logger()
+func (s *SolutionSamplerStrategy) handleValidationTask(workerId int, gpu *task.GPU, ts *TaskSubmitted) {
+	workerLogger := s.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task.TaskId(ts.TaskId).String()).Logger()
 	workerLogger.Info().Msg("validating sampled task")
 	// Set status immediately, might be changed on error
 	gpu.SetStatus("Validating")
@@ -1427,7 +1430,7 @@ func (s *SolutionSamplerStrategy) handleValidationTask(workerId int, gpu *task_c
 
 	if ourCid != solversCid {
 		workerLogger.Warn().Msg("==================== CID MISMATCH DETECTED =====================")
-		workerLogger.Warn().Msgf("  Task ID  : %s", task_common.TaskId(ts.TaskId).String())
+		workerLogger.Warn().Msgf("  Task ID  : %s", task.TaskId(ts.TaskId).String())
 		workerLogger.Warn().Msgf("  Our CID  : %s", ourCid)
 		workerLogger.Warn().Msgf("  Their CID: %s", solversCid)
 		workerLogger.Warn().Msgf("  Solver   : %s", res.Validator.String())

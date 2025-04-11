@@ -345,24 +345,47 @@ func beginImmediate(db *sql.DB) (*sql.Tx, error) {
 	return tx, err
 }
 
-func (ts *TaskStorageDB) PopTask() (task.TaskId, common.Hash, error) {
+func (ts *TaskStorageDB) PopTask(useRandom bool) (task.TaskId, common.Hash, error) {
 	tx, err := beginImmediate(ts.sqlite)
 	if err != nil {
 		return task.TaskId{}, common.Hash{}, err
 	}
-
 	qtx := ts.queries.WithTx(tx)
+	// Ensure rollback happens even if Commit fails or panics occur
 	defer tx.Rollback()
 
-	row, err := qtx.PopTask(ts.ctx)
-	if err != nil {
-		return task.TaskId{}, common.Hash{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return task.TaskId{}, common.Hash{}, err
+	var taskId task.TaskId
+	var txHash common.Hash
+	var queryErr error // Use a separate variable for the query error
+
+	if useRandom {
+		var row db.PopTaskRandomRow
+		row, queryErr = qtx.PopTaskRandom(ts.ctx)
+		if queryErr == nil { // Assign only if no error
+			taskId = row.Taskid
+			txHash = row.Txhash
+		}
+	} else {
+		var row db.PopTaskRow
+		row, queryErr = qtx.PopTask(ts.ctx)
+		if queryErr == nil { // Assign only if no error
+			taskId = row.Taskid
+			txHash = row.Txhash
+		}
 	}
 
-	return row.Taskid, row.Txhash, nil
+	// Check for error from either PopTaskRandom or PopTask
+	if queryErr != nil {
+		// Don't wrap sql.ErrNoRows, return it directly so callers can check for it
+		return task.TaskId{}, common.Hash{}, queryErr
+	}
+
+	// Commit the transaction
+	if err := tx.Commit(); err != nil {
+		return task.TaskId{}, common.Hash{}, err // Return commit error
+	}
+
+	return taskId, txHash, nil // Return popped task details on successful commit
 }
 
 func (ts *TaskStorageDB) GetClaims(batchSize int) (ClaimTaskSlice, float64, error) {
@@ -390,6 +413,10 @@ func (ts *TaskStorageDB) GetClaims(batchSize int) (ClaimTaskSlice, float64, erro
 			TotalCost: v.Cumulativegas,
 		}
 		claims = append(claims, claim)
+	}
+
+	if averageSamples == 0 {
+		return claims, 0.0, nil
 	}
 
 	return claims, averageGas / float64(averageSamples), nil

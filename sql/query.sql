@@ -143,6 +143,16 @@ WHERE status = 0
 LIMIT 1)
 RETURNING taskid, txhash;
 
+-- name: PopTaskRandom :one
+UPDATE tasks
+SET status = 1
+WHERE taskid = (SELECT taskid
+FROM tasks
+WHERE status = 0
+ORDER BY RANDOM()
+LIMIT 1)
+RETURNING taskid, txhash;
+
 -- name: GetPendingSolutionsCountPerValidator :many
 SELECT 
     solutions.validator,

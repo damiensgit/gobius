@@ -456,18 +456,20 @@ func (v *Validator) CooldownTime(minClaimSolutionTime, minContestationVotePeriod
 }
 
 // Return the maxmimum theoretical submissions that can be sent since the last submission from this validator
-func (v *Validator) MaxSubmissions(blockTime time.Time) (lastSubmission time.Time, maxSubmissions int64) {
+func (v *Validator) MaxSubmissions(blockTime time.Time) (time.Time, int64, error) {
 	lastSubmissionBig, err := v.services.Engine.Engine.LastSolutionSubmission(nil, v.ValidatorAddress())
 	if err != nil {
 		v.services.Logger.Error().Err(err).Msg("LastSolutionSubmission error")
+		// Return zero values and the error if fetching fails
+		return time.Time{}, 0, err
 	}
 
-	lastSubmission = time.Unix(lastSubmissionBig.Int64(), 0)
+	lastSubmission := time.Unix(lastSubmissionBig.Int64(), 0)
 
 	diff := blockTime.Sub(lastSubmission)
 
 	// 10 seconds since last submission, rate limit is 2 seconds between so max sols: 10/2=5
 	// 10 seconds since last submission, rate limit is 0.5 seconds between so max sols: 10/0.5=20
-	maxSubmissions = int64(math.Floor(diff.Seconds() / v.ratelimit))
-	return
+	maxSubmissions := int64(math.Floor(diff.Seconds() / v.ratelimit))
+	return lastSubmission, maxSubmissions, nil
 }

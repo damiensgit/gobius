@@ -682,13 +682,20 @@ func (tm *BatchTransactionManager) processBatch(
 		if claimLen > 0 {
 			canClaim := false
 
-			// claim on approach overrides everything else
-			if tm.services.Config.Claim.ClaimMinReward > 0 {
-				if rewardInAIUS >= tm.services.Config.Claim.ClaimMinReward {
-					tm.services.Logger.Warn().Msgf("** %.8g reward is >= claim min of reward %.8g, claim **", rewardInAIUS, tm.services.Config.Claim.ClaimMinReward)
+			claimMinReward, err := tm.services.LeverOracle.MinClaimLever()
+			if err != nil {
+				tm.services.Logger.Error().Err(err).Msg("could not get minclaim lever from oracle!")
+				return
+			}
+			// debug for now
+			tm.services.Logger.Warn().Msgf("** minclaim lever: %.8g **", claimMinReward)
+
+			if claimMinReward > 0 {
+				if rewardInAIUS >= claimMinReward {
+					tm.services.Logger.Warn().Msgf("** %.8g reward is >= claim min of reward %.8g, claim **", rewardInAIUS, claimMinReward)
 					canClaim = true
 				} else {
-					tm.services.Logger.Warn().Msgf("** %.8g reward is below claim min reward of %.8g, skipping claim **", rewardInAIUS, tm.services.Config.Claim.ClaimMinReward)
+					tm.services.Logger.Warn().Msgf("** %.8g reward is below claim min reward of %.8g, skipping claim **", rewardInAIUS, claimMinReward)
 					canClaim = false
 				}
 			} else if tm.services.Config.Claim.HoardMode {
@@ -718,16 +725,6 @@ func (tm *BatchTransactionManager) processBatch(
 			// }
 
 			if canClaim {
-				// if tm.services.Config.DelegatedMiner.ConcurrentBatches {
-				// 	wg.Add(1)
-				// 	go func(wg *sync.WaitGroup) {
-				// 		defer wg.Done()
-				// 		tm.processBulkClaim(claims, claimMinBatchSize, claimMaxBatchSize)
-				// 	}(&wg)
-				// } else {
-				// 	tm.processBulkClaim(claims, claimMinBatchSize, claimMaxBatchSize)
-				// }
-
 				accountIndex := rand.Intn(len(tm.taskAccounts))
 				sendBulkClaim := func(chunk storage.ClaimTaskSlice, account *account.Account, wg *sync.WaitGroup, batchno int) {
 					defer wg.Done()
@@ -762,7 +759,7 @@ func (tm *BatchTransactionManager) processBatch(
 				tm.services.Logger.Error().Err(err).Msg("error deleting commitment(s) from storage")
 				return err
 			}
-			tm.services.Logger.Warn().Msgf("deleted %d task commitments from storage that are already committed on-chain", len(_commitmentsToDelete))
+			tm.services.Logger.Info().Msgf("deleted %d task commitments from storage that were committed on-chain", len(_commitmentsToDelete))
 		}
 		return nil
 	}
@@ -774,7 +771,7 @@ func (tm *BatchTransactionManager) processBatch(
 				tm.services.Logger.Error().Err(err).Msg("error deleting solution(s) from storage")
 				return err
 			}
-			tm.services.Logger.Warn().Msgf("deleted %d task solutions from storage that are already submitted on-chain", len(_solutionsToDelete))
+			tm.services.Logger.Info().Msgf("deleted %d task solutions from storage that were submitted on-chain", len(_solutionsToDelete))
 		}
 		return nil
 	}
@@ -871,7 +868,11 @@ func (tm *BatchTransactionManager) processBatch(
 		var validator *Validator = nil
 		validatorHighestMin := int64(-1)
 		for _, v := range tm.validators {
-			lastSubmission, maxSols := v.MaxSubmissions(blockTime)
+			lastSubmission, maxSols, err := v.MaxSubmissions(blockTime)
+			if err != nil {
+				tm.services.Logger.Error().Err(err).Str("validator", v.ValidatorAddress().String()).Msg("failed to get max submissions for validator, skipping")
+				continue // Skip this validator if we can't determine max submissions
+			}
 			solsPending, found := solsPerVal[v.ValidatorAddress()]
 
 			if found {
@@ -895,7 +896,7 @@ func (tm *BatchTransactionManager) processBatch(
 		}
 
 		if validator == nil {
-			tm.services.Logger.Info().Msg("no validator found to send solutions for")
+			tm.services.Logger.Info().Msg("no solutions available to submit for any validator right now")
 			return nil, nil, nil
 		} else {
 			tm.services.Logger.Info().Int64("highest_min", validatorHighestMin).Msgf("getting solutions for validator: %s", validator.ValidatorAddress().String())
@@ -1141,7 +1142,11 @@ func (tm *BatchTransactionManager) processBatch(
 			}
 
 			if !success {
-				tm.services.Logger.Error().Str("txHash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("batch solution transaction reverted on-chain")
+				logMsg := tm.services.Logger.Error().Str("txHash", tx.Hash().String()) // Log tx hash safely
+				if receipt != nil {
+					logMsg = logMsg.Uint64("block", receipt.BlockNumber.Uint64()) // Only log block if receipt exists
+				}
+				logMsg.Msg("batch solution transaction reverted on-chain")
 				return err
 			}
 
@@ -1295,7 +1300,14 @@ func (tm *BatchTransactionManager) processBulkClaimFast(account *account.Account
 		return //err
 	}
 
+	// Check if receipt is nil before accessing Status
+	if receipt == nil {
+		tm.services.Logger.Error().Msg("❌ bulk claim returned nil receipt despite no error")
+		return
+	}
+
 	if receipt.Status != types.ReceiptStatusSuccessful {
+		tm.services.Logger.Warn().Str("txhash", receipt.TxHash.String()).Msg("⚠️ bulk claim transaction failed/reverted")
 		return
 	}
 
@@ -1450,7 +1462,14 @@ func (tm *BatchTransactionManager) processBulkClaim(account *account.Account, ta
 
 	//tm.services.Logger.Info().Str("txhash", receipt.TxHash.String()).Msg("bulk claim tx sent")
 
+	// Check if receipt is nil before accessing Status
+	if receipt == nil {
+		tm.services.Logger.Error().Msg("❌ bulk claim returned nil receipt despite no error")
+		return
+	}
+
 	if receipt.Status != types.ReceiptStatusSuccessful {
+		tm.services.Logger.Warn().Str("txhash", receipt.TxHash.String()).Msg("⚠️ bulk claim transaction failed/reverted")
 		return
 	}
 

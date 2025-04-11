@@ -23,12 +23,31 @@ type IPriceOracle interface {
 	GetPrices() (basePrice float64, ethPrice float64, err error)
 }
 
+type ILeverOracle interface {
+	MinClaimLever() (float64, error)
+}
+
 // OnChainOracle implements PriceOracle using an on-chain Quoter contract.
 type OnChainOracle struct {
-	quoter *quoter.Quoter
-	eth    *erc20.TokenERC20
-	aius   *erc20.TokenERC20
-	logger zerolog.Logger
+	quoter    *quoter.Quoter
+	eth       *erc20.TokenERC20
+	aius      *erc20.TokenERC20
+	quoterRaw *quoter.QuoterRaw
+	logger    zerolog.Logger
+	timeout   time.Duration
+}
+
+// create a new lever oracle that just returns the claim level from configuration used for testing
+type MinClaimLeverOracle struct {
+	claimLevel float64
+}
+
+func NewMinClaimLeverOracle(claimLevel float64) *MinClaimLeverOracle {
+	return &MinClaimLeverOracle{claimLevel: claimLevel}
+}
+
+func (o *MinClaimLeverOracle) MinClaimLever() (float64, error) {
+	return o.claimLevel, nil
 }
 
 // NewOnChainOracle creates a new OnChainOracle.
@@ -42,32 +61,50 @@ func NewOnChainOracle(client *ethclient.Client, oracleAddress common.Address, et
 		return nil, err
 	}
 
+	quoterRaw := &quoter.QuoterRaw{Contract: quoterInstance}
+
 	return &OnChainOracle{
-		quoter: quoterInstance,
-		eth:    eth,
-		aius:   aius,
-		logger: logger,
+		quoter:    quoterInstance,
+		eth:       eth,
+		aius:      aius,
+		logger:    logger,
+		quoterRaw: quoterRaw,
+		timeout:   10 * time.Second,
 	}, nil
+}
+
+func (o *OnChainOracle) MinClaimLever() (float64, error) {
+	// timeout after 10 seconds
+	ctx, cancel := context.WithTimeout(context.Background(), o.timeout)
+	defer cancel()
+
+	opts := &bind.CallOpts{Context: ctx}
+	lever, err := o.quoter.ProfitLevel(opts)
+	if err != nil {
+		return 0, err
+	}
+	pl := o.aius.ToFloat(lever)
+	o.logger.Info().Msgf("OnChainOracle lever: %.8g", pl)
+	return pl, nil
 }
 
 // GetPrices fetches prices from the on-chain Quoter contract.
 func (o *OnChainOracle) GetPrices() (float64, float64, error) {
 	// timeout after 10 seconds
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), o.timeout)
 	defer cancel()
 	opts := &bind.CallOpts{Context: ctx}
 	// The function GetAIUSPrice is not 'view' or 'pure' in Solidity,
 	// so the generated binding expects TransactOpts.
 	// We need to use the underlying contract.Call method to perform a read-only eth_call.
 	var out []interface{}
-	quoterRaw := &quoter.QuoterRaw{Contract: o.quoter}
 
 	// Define the return types we expect based on the IQuoter interface (uint, uint)
 	// We need pointers to these types for the Call method.
 	var basePriceReturn *big.Int
 	var ethPriceReturn *big.Int
 
-	err := quoterRaw.Call(opts, &out, "GetAIUSPrice")
+	err := o.quoterRaw.Call(opts, &out, "GetAIUSPrice")
 
 	if err != nil {
 		return 0, 0, fmt.Errorf("failed to call GetAIUSPrice via eth_call: %w", err)
@@ -86,7 +123,7 @@ func (o *OnChainOracle) GetPrices() (float64, float64, error) {
 			return 0, 0, fmt.Errorf("failed to decode ethPriceReturn from contract call result")
 		}
 	} else {
-		return 0, 0, fmt.Errorf("unexpected number of return values from GetAIUSPrice call: expected 2, got %d", len(out))
+		return 0, 0, fmt.Errorf("ASSERT: unexpected number of return values from GetAIUSPrice call: expected 2, got %d", len(out))
 	}
 
 	basePrice := o.aius.ToFloat(basePriceReturn)

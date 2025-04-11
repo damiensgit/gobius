@@ -55,6 +55,7 @@ type Services struct {
 	AutoMineParams     *SubmitTaskParams
 	Paraswap           *paraswap.ParaswapManager
 	OracleProvider     IPriceOracle
+	LeverOracle        ILeverOracle
 	TaskTracker        *metrics.TaskTracker
 	IpfsOracle         ipfs.OracleClient
 }
@@ -186,22 +187,38 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 		logger)
 
 	var oracleProvider IPriceOracle
-
-	// if the oracle contract is set in config use onchain oracle
+	var leverOracle ILeverOracle
+	// Try onchain oracle if configured
 	if cfg.PriceOracleContract != (common.Address{}) {
-		oracleProvider, err = NewOnChainOracle(rpc.Client, cfg.PriceOracleContract, eth, cfg.BaseConfig.BaseToken, logger)
+		oracleContract, err := NewOnChainOracle(rpc.Client, cfg.PriceOracleContract, eth, cfg.BaseConfig.BaseToken, logger)
 		if err != nil {
-			logger.Error().Err(err).Msg("failed to create onchain oracle")
+			// If onchain oracle fails, return the error
+			return nil, nil, fmt.Errorf("failed to create onchain oracle: %w", err)
+		}
+		// Success: override defaults
+		oracleProvider = oracleContract
+		if cfg.Claim.UseLever {
+			leverOracle = oracleContract
+		} else {
+			leverOracle = NewMinClaimLeverOracle(cfg.Claim.ClaimMinReward)
 		}
 	} else {
-		// otherwise use paraswap
+		// otherwise use paraswap for general price oracle
 		// NOTE: the api has rate limiting so not suitable for high volume/block update
 		oracleProvider = paraswapManager
+		// and use the basic lever oracle
+		leverOracle = NewMinClaimLeverOracle(cfg.Claim.ClaimMinReward)
 	}
 	_, _, err = oracleProvider.GetPrices()
 	if err != nil {
 		logger.Error().Err(err).Msg("failed to get prices from onchain oracle")
 	}
+	claimMinReward, err := leverOracle.MinClaimLever()
+	if err != nil {
+		logger.Error().Err(err).Msg("could not get minclaim lever from oracle!")
+	}
+	// debug for now
+	logger.Warn().Msgf("** minclaim lever: %.8g **", claimMinReward)
 
 	taskMetrics := metrics.NewTaskTracker(appQuit)
 
@@ -233,6 +250,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 		AutoMineParams:     st,
 		Paraswap:           paraswapManager,
 		OracleProvider:     oracleProvider,
+		LeverOracle:        leverOracle,
 		TaskTracker:        taskMetrics,
 		IpfsOracle:         ipfsOracle,
 		ArbiusRouter:       arbiusRouter,

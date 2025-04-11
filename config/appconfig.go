@@ -30,6 +30,7 @@ type AppConfig struct {
 	EvilModeRandInt     int               `json:"evil_mode_int"` // for testing purposes
 	NumWorkersPerGPU    int               `json:"num_workers_per_gpu"`
 	PriceOracleContract ethcommon.Address `json:"price_oracle_contract"`
+	PopTaskRandom       bool              `json:"pop_task_random"`
 
 	Miner SolverConfig `json:"solver"`
 
@@ -205,6 +206,7 @@ type Claimer struct {
 	SortByCost      bool    `json:"sort_by_cost"`         // sort the claims by cost
 	// Maximum amount of claims to buffer before submitting them regardless of min reward
 	//MaxClaimsBuffer int     `json:"max_claims_buffer"`
+	UseLever       bool    `json:"use_lever"`        // use the lever oracle for the claim min level
 	ClaimMinReward float64 `json:"claim_min_reward"` // if reward is this level claim regardless
 	//  claim when staked amount approaches stake min level
 	ClaimOnApproachMinStake bool    `json:"claim_on_approach"`
@@ -300,6 +302,7 @@ func NewAppConfig(testnetType int) AppConfig {
 		EvilMode:         false,
 		EvilModeMinTime:  2000,
 		EvilModeRandInt:  1000,
+		PopTaskRandom:    false,
 
 		ValidatorConfig: ValidatorConfig{
 			InitialStake:            0,
