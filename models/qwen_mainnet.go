@@ -95,22 +95,28 @@ func NewQwenMainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig, lo
 	var timeout time.Duration = 120 * time.Second    // Default inference timeout
 	var ipfsTimeout time.Duration = 30 * time.Second // Default IPFS timeout
 	if ok {
-		// Parse inference timeout
-		parsedTimeout, err := time.ParseDuration(cogConfig.HttpTimeout)
-		if err != nil {
-			logger.Warn().Err(err).Str("model", model.ID).Str("config_timeout", cogConfig.HttpTimeout).Msg("failed to parse model timeout from cog config, using default 120s")
-			// Keep default timeout
-		} else {
-			timeout = parsedTimeout
-		}
-		// Parse IPFS timeout
-		parsedIpfsTimeout, err := time.ParseDuration(cogConfig.IpfsTimeout)
-		if err != nil {
-			logger.Warn().Err(err).Str("model", model.ID).Str("config_ipfs_timeout", cogConfig.IpfsTimeout).Msg("failed to parse IPFS timeout from cog config, using default 30s")
-			// Keep default ipfsTimeout
-		} else {
-			ipfsTimeout = parsedIpfsTimeout
-		}
+		// Parse inference timeout only if the string is not empty
+		if cogConfig.HttpTimeout != "" {
+			parsedTimeout, err := time.ParseDuration(cogConfig.HttpTimeout)
+			if err != nil {
+				logger.Warn().Err(err).Str("model", model.ID).Str("config_timeout", cogConfig.HttpTimeout).Msg("failed to parse model timeout from cog config, using default 120s")
+				// Keep default timeout
+			} else {
+				timeout = parsedTimeout
+			}
+		} // Else: HttpTimeout is empty, silently use the default
+
+		// Parse IPFS timeout only if the string is not empty
+		if cogConfig.IpfsTimeout != "" {
+			parsedIpfsTimeout, err := time.ParseDuration(cogConfig.IpfsTimeout)
+			if err != nil {
+				logger.Warn().Err(err).Str("model", model.ID).Str("config_ipfs_timeout", cogConfig.IpfsTimeout).Msg("failed to parse IPFS timeout from cog config, using default 30s")
+				// Keep default ipfsTimeout
+			} else {
+				ipfsTimeout = parsedIpfsTimeout
+			}
+		} // Else: IpfsTimeout is empty, silently use the default
+
 	} else {
 		logger.Error().Str("model", model.ID).Msg("model ID not found in ML.Cog config")
 		return nil
@@ -300,9 +306,16 @@ func (m *QwenMainnetModel) GetFiles(ctx context.Context, gpu *common.GPU, taskid
 	}
 	defer postResp.Body.Close()
 
-	// TODO: cog returns 409 if already runnign a prediction, maybe handle this better
+	// Check for non-OK status codes
 	if postResp.StatusCode != http.StatusOK {
+		// Handle specific 409 Conflict (GPU busy) status
 		bodyBytes, _ := io.ReadAll(postResp.Body)
+		if postResp.StatusCode == http.StatusConflict {
+			m.logger.Warn().Str("task", taskid).Str("gpu", gpu.Url).Int("status", postResp.StatusCode).Str("body", string(bodyBytes)).Msg("resource busy")
+			// Return the specific non-retryable error
+			return nil, ErrResourceBusy
+		}
+		// Handle other non-200 statuses as errors
 		return nil, fmt.Errorf("server returned non-200 status: %d - %s", postResp.StatusCode, string(bodyBytes))
 	}
 
@@ -339,6 +352,11 @@ func (m *QwenMainnetModel) GetCID(ctx context.Context, gpu *common.GPU, taskid s
 		return m.GetFiles(timeoutCtx, gpu, taskid, input)
 	}, 3, 1000)
 	if err != nil {
+		// If the error after retries is specifically ErrGpuBusy, return it directly.
+		if errors.Is(err, ErrResourceBusy) {
+			m.logger.Warn().Str("task", taskid).Str("gpu", gpu.Url).Msg("GPU remained busy after retries")
+		}
+		// Otherwise, return the potentially wrapped error from ExpRetry
 		return nil, err
 	}
 

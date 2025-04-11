@@ -106,22 +106,28 @@ func NewQwenTestModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logge
 	var timeout time.Duration = 120 * time.Second    // Default inference timeout
 	var ipfsTimeout time.Duration = 30 * time.Second // Default IPFS timeout
 	if ok {
-		// Parse inference timeout
-		parsedTimeout, err := time.ParseDuration(cogConfig.HttpTimeout)
-		if err != nil {
-			logger.Warn().Err(err).Str("model", model.ID).Str("config_timeout", cogConfig.HttpTimeout).Msg("failed to parse model timeout from cog config, using default 120s")
-			// Keep default timeout
-		} else {
-			timeout = parsedTimeout
-		}
-		// Parse IPFS timeout
-		parsedIpfsTimeout, err := time.ParseDuration(cogConfig.IpfsTimeout)
-		if err != nil {
-			logger.Warn().Err(err).Str("model", model.ID).Str("config_ipfs_timeout", cogConfig.IpfsTimeout).Msg("failed to parse IPFS timeout from cog config, using default 30s")
-			// Keep default ipfsTimeout
-		} else {
-			ipfsTimeout = parsedIpfsTimeout
-		}
+		// Parse inference timeout only if the string is not empty
+		if cogConfig.HttpTimeout != "" {
+			parsedTimeout, err := time.ParseDuration(cogConfig.HttpTimeout)
+			if err != nil {
+				logger.Warn().Err(err).Str("model", model.ID).Str("config_timeout", cogConfig.HttpTimeout).Msg("failed to parse model timeout from cog config, using default 120s")
+				// Keep default timeout
+			} else {
+				timeout = parsedTimeout
+			}
+		} // Else: HttpTimeout is empty, silently use the default
+
+		// Parse IPFS timeout only if the string is not empty
+		if cogConfig.IpfsTimeout != "" {
+			parsedIpfsTimeout, err := time.ParseDuration(cogConfig.IpfsTimeout)
+			if err != nil {
+				logger.Warn().Err(err).Str("model", model.ID).Str("config_ipfs_timeout", cogConfig.IpfsTimeout).Msg("failed to parse IPFS timeout from cog config, using default 30s")
+				// Keep default ipfsTimeout
+			} else {
+				ipfsTimeout = parsedIpfsTimeout
+			}
+		} // Else: IpfsTimeout is empty, silently use the default
+
 	} else {
 		logger.Error().Str("model", model.ID).Msg("model ID not found in ML.Cog map, required for QwenTestModel. Using default timeout 120s")
 		// Keep default timeout, but log as Error as it's unexpected for a Cog model
@@ -310,6 +316,20 @@ func (m *QwenTestModel) GetFiles(ctx context.Context, gpu *common.GPU, taskid st
 		return nil, fmt.Errorf("failed to POST to GPU: %w", err)
 	}
 	defer postResp.Body.Close()
+
+	// Check for non-OK status codes
+	if postResp.StatusCode != http.StatusOK {
+		// Handle specific 409 Conflict (GPU busy) status
+		if postResp.StatusCode == http.StatusConflict {
+			bodyBytes, _ := io.ReadAll(postResp.Body)
+			m.logger.Warn().Str("task", taskid).Str("gpu", gpu.Url).Int("status", postResp.StatusCode).Str("body", string(bodyBytes)).Msg("GPU busy")
+			// Return the specific non-retryable error
+			return nil, ErrResourceBusy
+		}
+		// Handle other non-200 statuses as errors
+		bodyBytes, _ := io.ReadAll(postResp.Body)
+		return nil, fmt.Errorf("server returned non-200 status: %d - %s", postResp.StatusCode, string(bodyBytes))
+	}
 
 	body, err := io.ReadAll(postResp.Body)
 	if err != nil {

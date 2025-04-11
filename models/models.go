@@ -2,6 +2,7 @@ package models
 
 import (
 	"context"
+	"errors"
 	"strings"
 
 	"gobius/common"
@@ -28,6 +29,9 @@ type ModelInterface interface {
 	HydrateInput(preprocessedInput map[string]any, seed uint64) (InputHydrationResult, error)
 	Validate(gpu *common.GPU, taskid string) error
 }
+
+// ErrResourceBusy indicates that the target GPU reported a 409 Conflict status.
+var ErrResourceBusy = errors.New("resource busy")
 
 type MiningFilter struct {
 	MinFee  int
