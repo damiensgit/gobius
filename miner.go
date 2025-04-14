@@ -751,9 +751,66 @@ func main() {
 			}
 			// Assuming RunAutoTaskSubmit is defined in commands.go (in the same package)
 			RunAutoTaskSubmit(appQuit, appServices, interval)
-		case "getunsolved": // Renamed case from previous attempt
-			// This case is now handled by "unsolvedtasks" below
-			log.Fatal("Use 'unsolvedtasks <startblock> [endblock]' command format.")
+		case "gas-stats":
+			var fromBlock, endBlock int64
+			if len(args) < 2 {
+				log.Fatal("gas-stats requires at least a from-block argument")
+			}
+
+			fromBlock, err = strconv.ParseInt(args[1], 10, 64)
+			if err != nil {
+				log.Fatalf("Invalid from-block value: %v", err)
+			}
+
+			if len(args) >= 3 {
+				endBlock, err = strconv.ParseInt(args[2], 10, 64)
+				if err != nil {
+					log.Fatalf("Invalid end-block value: %v", err)
+				}
+			} else {
+				endBlock = 0 // Signal to calculateGasStats to use the latest block
+			}
+
+			err = calculateGasStats(appQuit, appServices, rpcClient, fromBlock, endBlock, logger)
+			if err != nil {
+				logger.Fatal().Err(err).Msg("error during gas stats calculation")
+			}
+		case "analyzereward":
+			var fromBlock, endBlock, sampleRate int64
+			var threshold float64
+			var err error
+
+			if len(args) < 5 {
+				log.Fatal("analyzereward requires from-block, end-block, threshold, and sample-rate arguments")
+			}
+
+			fromBlock, err = strconv.ParseInt(args[1], 10, 64)
+			if err != nil {
+				log.Fatalf("Invalid from-block value: %v", err)
+			}
+
+			endBlock, err = strconv.ParseInt(args[2], 10, 64)
+			if err != nil {
+				log.Fatalf("Invalid end-block value: %v", err)
+			}
+
+			threshold, err = strconv.ParseFloat(args[3], 64)
+			if err != nil {
+				log.Fatalf("Invalid threshold value: %v", err)
+			}
+
+			sampleRate, err = strconv.ParseInt(args[4], 10, 64)
+			if err != nil {
+				log.Fatalf("Invalid sample-rate value: %v", err)
+			}
+			if sampleRate <= 0 {
+				log.Fatalf("sample-rate must be greater than 0")
+			}
+
+			err = analyzeRewardRecovery(appQuit, appServices, rpcClient, fromBlock, endBlock, threshold, sampleRate, logger)
+			if err != nil {
+				logger.Fatal().Err(err).Msg("error during reward recovery analysis")
+			}
 		default:
 			log.Fatalf("unknown command: %s", command)
 		}

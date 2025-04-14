@@ -209,16 +209,6 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 		// and use the basic lever oracle
 		leverOracle = NewMinClaimLeverOracle(cfg.Claim.ClaimMinReward)
 	}
-	_, _, err = oracleProvider.GetPrices()
-	if err != nil {
-		logger.Error().Err(err).Msg("failed to get prices from onchain oracle")
-	}
-	claimMinReward, err := leverOracle.MinClaimLever()
-	if err != nil {
-		logger.Error().Err(err).Msg("could not get minclaim lever from oracle!")
-	}
-	// debug for now
-	logger.Warn().Msgf("** minclaim lever: %.8g **", claimMinReward)
 
 	taskMetrics := metrics.NewTaskTracker(appQuit)
 

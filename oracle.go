@@ -84,7 +84,6 @@ func (o *OnChainOracle) MinClaimLever() (float64, error) {
 		return 0, err
 	}
 	pl := o.aius.ToFloat(lever)
-	o.logger.Info().Msgf("OnChainOracle lever: %.8g", pl)
 	return pl, nil
 }
 
@@ -128,8 +127,6 @@ func (o *OnChainOracle) GetPrices() (float64, float64, error) {
 
 	basePrice := o.aius.ToFloat(basePriceReturn)
 	ethPrice := o.eth.ToFloat(ethPriceReturn)
-
-	o.logger.Info().Msgf("OnChainOracle prices: AIUS=%.4f, ETH=%.4f", basePrice, ethPrice)
 
 	return basePrice, ethPrice, nil
 }
