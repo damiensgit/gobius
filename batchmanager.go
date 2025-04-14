@@ -555,29 +555,70 @@ func (tm *BatchTransactionManager) processBatch(
 		return
 	}
 
-	//if minProfit > 0 {
 	if usegwei {
 		isProfitable = profitLevel <= minProfit
 	} else {
 		isProfitable = profitLevel >= minProfit
 	}
-	//}
 
-	makeTasks := tm.services.Config.BatchTasks.Enabled && isProfitable && totalTasks < int64(tm.services.Config.BatchTasks.MinTasksInQueue) && tm.services.Config.BatchTasks.BatchSize > 0
-
-	// log above for debugging
-	tm.services.Logger.Info().Bool("make_tasks", makeTasks).Int64("total_tasks", totalTasks).Int("min_tasks_in_queue", tm.services.Config.BatchTasks.MinTasksInQueue).Int("batch_size", tm.services.Config.BatchTasks.BatchSize).Msg("batch conditions")
-
-	taskBatchCount := tm.services.Config.BatchTasks.NumberOfBatches
-	taskBatchSize := tm.services.Config.BatchTasks.BatchSize
-	hoardMode := tm.services.Config.BatchTasks.Enabled && tm.services.Config.BatchTasks.HoardMode && baseFee <= tm.services.Config.BatchTasks.HoardMinGasPrice && totalTasks < int64(tm.services.Config.BatchTasks.HoardMaxQueueSize)
-	if !makeTasks && hoardMode {
-		tm.services.Logger.Warn().Msgf("** task hoard mode on, and basefee is at or below wanted gas price & queue len is below threshold**")
-		makeTasks = true
-		taskBatchCount = tm.services.Config.BatchTasks.HoardModeNumberOfBatches
-		taskBatchSize = tm.services.Config.BatchTasks.HoardModeBatchSize
+	totalSolutions, totalClaims, err := tm.services.TaskStorage.TotalSolutionsAndClaims()
+	if err != nil {
+		tm.services.Logger.Error().Err(err).Msg("failed to get total solutions")
+		return
 	}
-	//		tm.services.SenderOwnerAccount.UpdateNonce()
+
+	// Task creation decision logic
+	makeTasks := false
+	taskBatchCount := 0
+	taskBatchSize := 0
+	batchCfg := tm.services.Config.BatchTasks
+	claimQueuePreventsTasks := false // Initialize here
+
+	// 0. Check if Batch Task Creation is enabled globally
+	if !batchCfg.Enabled {
+		tm.services.Logger.Info().Msg("batch task creation is globally disabled (batchtasks.enabled=false)")
+	} else {
+		// 1. Check if claim queue prevents task creation (only if globally enabled)
+		claimQueuePreventsTasks = batchCfg.MaxClaimQueue > 0 && totalClaims >= int64(batchCfg.MaxClaimQueue)
+		if claimQueuePreventsTasks {
+			tm.services.Logger.Info().Int64("claims", totalClaims).Int("max_claims", batchCfg.MaxClaimQueue).Msg("claim queue is full, task creation disabled")
+		} else {
+			// 2. Check standard task creation conditions (only if globally enabled and claim queue allows)
+			shouldCreateStandardTasks := isProfitable &&
+				totalTasks < int64(batchCfg.MinTasksInQueue) &&
+				batchCfg.BatchSize > 0
+
+			if shouldCreateStandardTasks {
+				makeTasks = true
+				taskBatchCount = batchCfg.NumberOfBatches
+				taskBatchSize = batchCfg.BatchSize
+				tm.services.Logger.Info().Msg("standard task creation conditions met")
+			} else {
+				// 3. Check hoard mode conditions (only if standard conditions not met, globally enabled, and claim queue allows)
+				shouldActivateHoardMode := batchCfg.HoardMode &&
+					baseFee <= batchCfg.HoardMinGasPrice &&
+					totalTasks < int64(batchCfg.HoardMaxQueueSize)
+
+				if shouldActivateHoardMode {
+					makeTasks = true
+					taskBatchCount = batchCfg.HoardModeNumberOfBatches
+					taskBatchSize = batchCfg.HoardModeBatchSize
+					tm.services.Logger.Warn().Msgf("** task hoard mode activated **")
+				}
+			}
+		}
+	}
+
+	// Log final decision factors
+	tm.services.Logger.Info().
+		Bool("make_tasks", makeTasks).
+		Bool("claim_queue_prevents", claimQueuePreventsTasks).
+		Bool("is_profitable", isProfitable).
+		Int64("total_tasks", totalTasks).
+		Int("min_tasks_in_queue", batchCfg.MinTasksInQueue).
+		Int("batch_size_to_use", taskBatchSize).   // Log the size actually being used
+		Int("batch_count_to_use", taskBatchCount). // Log the count actually being used
+		Msg("final task creation decision")
 
 	if makeTasks {
 
@@ -665,12 +706,6 @@ func (tm *BatchTransactionManager) processBatch(
 	totalCommitments, err := tm.services.TaskStorage.TotalCommitments()
 	if err != nil {
 		tm.services.Logger.Error().Err(err).Msg("failed to get total commitments")
-		return
-	}
-
-	totalSolutions, totalClaims, err := tm.services.TaskStorage.TotalSolutionsAndClaims()
-	if err != nil {
-		tm.services.Logger.Error().Err(err).Msg("failed to get total solutions")
 		return
 	}
 
@@ -1094,7 +1129,7 @@ func (tm *BatchTransactionManager) processBatch(
 		receipt, success, _, waitErr := account.WaitForConfirmedTx(tx)
 
 		// Process receipt and metrics (handles nil receipt)
-		txCost := tm.processReceiptAndMetrics(receipt, tm.cumulativeGasUsed.AddCommitment, batchCommitmentLen, "commit")
+		txCost := tm.processReceiptAndMetrics(receipt, tm.cumulativeGasUsed.AddCommitment, batchCommitmentLen, "commitment")
 
 		if waitErr != nil {
 			tm.services.Logger.Error().Err(waitErr).Str("txhash", tx.Hash().String()).Msg("Error waiting for commitment confirmation")
@@ -1103,7 +1138,7 @@ func (tm *BatchTransactionManager) processBatch(
 
 		if !success {
 			// Transaction was mined but reverted
-			tm.services.Logger.Error().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("batch commitments tx reverted")
+			tm.services.Logger.Error().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("batch commitments transaction reverted")
 			return errors.New("batch commitments tx reverted")
 		} else if receipt == nil {
 			err := errors.New("assertion: batch commitments transaction returned nil receipt despite no error")
@@ -1112,7 +1147,7 @@ func (tm *BatchTransactionManager) processBatch(
 		}
 
 		var signalledCommitments [][32]byte
-		tm.services.Logger.Info().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("batch commitments tx accepted!")
+		tm.services.Logger.Info().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("batch commitments transaction accepted")
 		for _, log := range receipt.Logs {
 			if len(log.Topics) > 0 && log.Topics[0] == tm.signalCommitmentEvent {
 				parsed, parseErr := tm.services.Engine.Engine.ParseSignalCommitment(*log)
@@ -1167,7 +1202,7 @@ func (tm *BatchTransactionManager) processBatch(
 				tm.services.Logger.Error().Err(updateErr).Msg("error updating task data in storage")
 				return updateErr
 			}
-			tm.services.Logger.Info().Int("accepted", len(commitmentsToUpdateAndDelete)).Float64("cost_per_commit", costPerCommitment).Msg("✅ submitted commitments")
+			tm.services.Logger.Info().Int("accepted", len(commitmentsToUpdateAndDelete)).Float64("cost_per_commit", costPerCommitment).Msg("✅ commitments accepted and updated in storage")
 		}
 
 		return nil // Successful completion
@@ -1250,7 +1285,7 @@ func (tm *BatchTransactionManager) processBatch(
 			return err
 		}
 
-		tm.services.Logger.Info().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("batch solutions transaction successfully confirmed!")
+		tm.services.Logger.Info().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("batch solutions transaction accepted")
 		var solutionsSubmitted []task.TaskId
 		for _, log := range receipt.Logs {
 			if len(log.Topics) > 0 && log.Topics[0] == tm.solutionSubmittedEvent {
@@ -1306,7 +1341,7 @@ func (tm *BatchTransactionManager) processBatch(
 				tm.services.Logger.Error().Err(addClaimErr).Msg("error adding tasks to claim in storage")
 				return addClaimErr
 			}
-			tm.services.Logger.Info().Str("validator", validatorToSendSubmits.ValidatorAddress().String()).Int("accepted", len(solutionsSubmitted)).Float64("cost_per_sol", gasPerSolution).Msg("✅ submitted solutions added to claim storage")
+			tm.services.Logger.Info().Str("validator", validatorToSendSubmits.ValidatorAddress().String()).Int("accepted", len(solutionsSubmitted)).Float64("cost_per_sol", gasPerSolution).Msg("✅ submitted solutions added to claim queue in storage")
 		}
 
 		return nil // Successful completion
@@ -1400,11 +1435,11 @@ func (tm *BatchTransactionManager) processBulkClaimFast(account *account.Account
 	}
 
 	if receipt.Status != types.ReceiptStatusSuccessful {
-		tm.services.Logger.Warn().Str("txhash", receipt.TxHash.String()).Msg("⚠️ bulk claim transaction failed/reverted")
+		tm.services.Logger.Warn().Str("txhash", receipt.TxHash.String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("⚠️ bulk claim transaction failed/reverted")
 		return
 	}
 
-	tm.services.Logger.Info().Str("txhash", receipt.TxHash.String()).Int("tasks", len(taskIds)).Msg("✅ bulk claim completed! checking logs for claimed tasks...")
+	tm.services.Logger.Info().Str("txhash", receipt.TxHash.String()).Int("tasks", len(taskIds)).Uint64("block", receipt.BlockNumber.Uint64()).Msg("bulk claim transaction accepted")
 
 	tasksClaimed := make([]task.TaskId, 0)
 
@@ -1468,7 +1503,7 @@ func (tm *BatchTransactionManager) processBulkClaimFast(account *account.Account
 	}*/
 
 	if len(tasksClaimed) > 0 {
-		tm.services.Logger.Info().Int("claimed", len(tasksClaimed)).Msg("✅ claimed tasks")
+		tm.services.Logger.Info().Int("claimed", len(tasksClaimed)).Msg("✅ successfully claimed tasks and removed from storage")
 	}
 
 	unclaimedTaskCount := len(tasks) - len(tasksClaimed)
@@ -1560,11 +1595,11 @@ func (tm *BatchTransactionManager) processBulkClaim(account *account.Account, ta
 	}
 
 	if receipt.Status != types.ReceiptStatusSuccessful {
-		tm.services.Logger.Warn().Str("txhash", receipt.TxHash.String()).Msg("⚠️ bulk claim transaction failed/reverted")
+		tm.services.Logger.Warn().Str("txhash", receipt.TxHash.String()).Msg("⚠️ bulk claim transaction failed or reverted")
 		return
 	}
 
-	tm.services.Logger.Info().Str("txhash", receipt.TxHash.String()).Int("tasks", len(taskIds)).Msg("✅ bulk claim completed! checking logs for claimed tasks...")
+	tm.services.Logger.Info().Str("txhash", receipt.TxHash.String()).Int("tasks", len(taskIds)).Uint64("block", receipt.BlockNumber.Uint64()).Msg("bulk claim transaction accepted")
 
 	tasksClaimed := make([]task.TaskId, 0)
 
@@ -1642,7 +1677,7 @@ func (tm *BatchTransactionManager) processBulkClaim(account *account.Account, ta
 	}
 
 	if len(tasksClaimed) > 0 {
-		tm.services.Logger.Info().Int("claimed", len(tasksClaimed)).Msg("✅ claimed tasks")
+		tm.services.Logger.Info().Int("claimed", len(tasksClaimed)).Msg("✅ successfully claimed tasks and removed from storage")
 	}
 
 	unclaimedTaskCount := len(tasksToClaim) - len(tasksClaimed)
@@ -2130,7 +2165,7 @@ func (tm *BatchTransactionManager) BulkTasks(account *account.Account, count int
 
 		// --- Success Case: Process Logs and Update Storage ---
 		if receipt != nil { // Should be non-nil here
-			tm.services.Logger.Info().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("✅ bulk tasks transaction succeeded")
+			tm.services.Logger.Info().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("bulk tasks transaction succeeded")
 
 			var submittedTasks []task.TaskId
 			for _, log := range receipt.Logs {
@@ -2154,14 +2189,13 @@ func (tm *BatchTransactionManager) BulkTasks(account *account.Account, count int
 					// Use the txCost returned by processReceiptAndMetrics
 					costPerTask = tm.services.Config.BaseConfig.BaseToken.ToFloat(txCost) / float64(len(submittedTasks))
 				}
-				tm.services.Logger.Info().Int("accepted", len(submittedTasks)).Float64("cost_per_task", costPerTask).Msg("✅ tasks created")
 
 				addErr := tm.services.TaskStorage.AddTasks(submittedTasks, tx.Hash(), costPerTask)
 				if addErr != nil {
 					tm.services.Logger.Error().Err(addErr).Msg("error adding tasks in storage")
 					return receipt, addErr // Return specific storage error
 				}
-				tm.services.Logger.Info().Int("tasks", len(submittedTasks)).Msgf("added tasks to storage")
+				tm.services.Logger.Info().Int("accepted", len(submittedTasks)).Float64("cost_per_task", costPerTask).Msg("✅ tasks created and added to storage queue")
 			} else {
 				tm.services.Logger.Warn().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("⚠️ no tasks created despite successful transaction")
 			}
@@ -2817,11 +2851,11 @@ func logGasLimitDetails(logger zerolog.Logger, tx *types.Transaction, isEstimati
 func (tm *BatchTransactionManager) processReceiptAndMetrics(receipt *types.Receipt, metricFunc func(*big.Int), batchSize int, itemName string) *big.Int {
 	txCost := big.NewInt(0) // Initialize cost to zero
 	if receipt == nil {
-		tm.services.Logger.Warn().Str("item_name", itemName).Int("batch_size", batchSize).Msg("Receipt is nil, cannot process metrics or log gas used.")
+		tm.services.Logger.Warn().Str("item_name", itemName).Int("batch_size", batchSize).Msg("assertion: receipt is nil in processReceiptAndMetrics")
 		return txCost
 	}
 	if metricFunc == nil {
-		tm.services.Logger.Error().Str("item_name", itemName).Msg("MetricFunc is nil in processReceiptAndMetrics")
+		tm.services.Logger.Error().Str("item_name", itemName).Msg("assertion: metricFunc is nil in processReceiptAndMetrics")
 		return txCost
 	}
 
@@ -2831,15 +2865,11 @@ func (tm *BatchTransactionManager) processReceiptAndMetrics(receipt *types.Recei
 		gasPerItem = float64(receipt.GasUsed) / float64(batchSize)
 	}
 
-	gasPriceGwei := tm.services.Config.BaseConfig.BaseToken.ToFloat(receipt.EffectiveGasPrice)
-	gasPriceGweiStr := fmt.Sprintf("%.4f", gasPriceGwei)
-
 	txCostEthStr := fmt.Sprintf("%.8f", tm.services.Config.BaseConfig.BaseToken.ToFloat(txCost))
 
 	tm.services.Logger.Info().
 		Uint64("gas_used", receipt.GasUsed).
 		Float64(fmt.Sprintf("gas_per_%s", itemName), gasPerItem).
-		Str("gas_price_gwei", gasPriceGweiStr).
 		Str("tx_cost_eth", txCostEthStr).        // Log cost in ETH
 		Str("tx_hash", receipt.TxHash.String()). // Add tx hash for context
 		Msgf("**** bulk %s gas usage *****", itemName)

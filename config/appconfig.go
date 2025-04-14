@@ -129,6 +129,7 @@ type BatchTasks struct {
 	HoardMinGasPrice         float64  `json:"hoard_min_gas_price"`          // min gas price we need to see before we start hoarding tasks
 	HoardMaxQueueSize        int      `json:"hoard_max_queue_size"`         // max size we let the queue get when hoarding tasks
 	PrivateKeys              []string `json:"private_keys"`
+	MaxClaimQueue            int      `json:"max_claim_queue"` // max size we let the claim queue get before disabling task creation
 }
 
 type BatchConfig struct {
@@ -341,6 +342,8 @@ func NewAppConfig(testnetType int) AppConfig {
 			HoardModeNumberOfBatches: 1,
 			HoardMinGasPrice:         0.0,
 			HoardMaxQueueSize:        1000,
+			PrivateKeys:              []string{},
+			MaxClaimQueue:            0, // 0 disables this check
 		},
 		Miner: SolverConfig{
 			Enabled:                 false,
