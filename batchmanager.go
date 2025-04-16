@@ -184,18 +184,14 @@ func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float6
 	// Use the PriceOracle interface to get prices
 	basePrice, ethPrice, err = tm.services.OracleProvider.GetPrices()
 	if err != nil {
-		tm.services.Logger.Error().Err(err).Msg("could not get prices from oracle!")
-		// Fallback logic remains for now, but consider making it configurable or removing it
-		// if the oracle should be the single source of truth.
 		if tm.services.Config.BaseConfig.TestnetType > 0 {
-			tm.services.Logger.Warn().Msg("Oracle failed, using default testnet prices (30, 2000)")
+			tm.services.Logger.Warn().Msg("oracle failed, using default testnet prices (30, 2000)")
 			basePrice, ethPrice = 30, 2000
 		} else {
-			// Consider if a fallback is appropriate on mainnet or if we should return error
-			tm.services.Logger.Warn().Msg("Oracle failed, using default mainnet prices (30, 2000)")
-			basePrice, ethPrice = 30, 2000
+			// TODO:consider uing last known good price
+			tm.services.Logger.Error().Err(err).Msg("could not get prices from oracle!")
+			return 0, 0, 0, 0, 0, err
 		}
-		// If using fallbacks, reset the error so the function can continue
 		err = nil
 	}
 
