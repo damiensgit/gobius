@@ -33,15 +33,17 @@ import (
 const (
 	profitEstimateBatchSize = 200
 
+	// below values are from onchain analysis using the 99% quantile of the gas used for the various functions
+	// during very high inflation of gas intrinics out of gas errors are still possible
 	claimTasksGasPerItem       = 100_828
-	submitTasksGasPerItem      = 140_477 // Assuming this is the correct constant now
+	submitTasksGasPerItem      = 140_477
 	signalCommitmentGasPerItem = 64_544
 	submitSolutionGasPerItem   = 202_125
 
-	baseGasLimitForClaimTasks        = 2_500_000
-	baseGasLimitForSubmitTasks       = 1_500_000 // Using the value from the original BulkTasks calc
+	baseGasLimitForClaimTasks        = 3_500_000
+	baseGasLimitForSubmitTasks       = 2_500_000
 	baseGasLimitForSubmitSolutions   = 3_500_000
-	baseGasLimitForSignalCommitments = 3_500_000
+	baseGasLimitForSignalCommitments = 1_500_000
 
 	gasPriceAdjustmentFactor = 1_000_000_000.0
 )

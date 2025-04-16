@@ -885,18 +885,24 @@ func main() {
 	// TODO: this code only works for websocket/ipc node connections. Add polling support if this fails
 	headers := make(chan *types.Header)
 	var newHeadSub ethereum.Subscription
-	connectToHeaders := func() {
+	var connectErr error // Variable to capture connection error
+
+	connectToHeaders := func() (ethereum.Subscription, error) {
 		ctx, cancel := context.WithTimeout(appContext, 5*time.Second)
 		defer cancel()
 
-		newHeadSub, err = rpcClient.Client.SubscribeNewHead(ctx, headers)
+		// Attempt connection
+		sub, err := rpcClient.Client.SubscribeNewHead(ctx, headers)
 		if err != nil {
-			logger.Fatal().Err(err).Msg("failed to subscribe to new headers, tip: RPC must be websocket/ipc only, not http(s)")
+			logger.Error().Err(err).Msg("failed to subscribe to new headers")
+			return nil, err // Return the error
 		}
 		logger.Info().Msg("subscribed to new headers")
+		return sub, nil // Return the subscription and nil error
 	}
 
-	connectToHeaders()
+	// Initial connection attempt
+	newHeadSub, connectErr = connectToHeaders()
 
 	// --- Select and Start Mining Strategy ---
 	var strategy MiningStrategy
@@ -1000,8 +1006,8 @@ func main() {
 		logger.Info().Msg("running in headless mode; dashboard disabled")
 	}
 
-	maxHeaderBackoff := 30 * time.Second
-	currentHeaderBackoff := 1 * time.Second
+	maxBackoff := 30 * time.Second    // Max backoff duration
+	currentBackoff := 1 * time.Second // Initial backoff duration
 
 	for {
 
@@ -1010,24 +1016,57 @@ func main() {
 		case <-appQuit.Done():
 			logger.Info().Msg("shutting down main loop")
 			goto exit_app
-		case err := <-newHeadSub.Err():
-			if err == nil {
-				continue
-			}
-			logger.Warn().Msgf("new head sub error: %v, will retry in %s", err, currentHeaderBackoff.String())
-			newHeadSub.Unsubscribe()
-
-			time.Sleep(currentHeaderBackoff)
-			currentHeaderBackoff = (currentHeaderBackoff * 2) + time.Duration(rand.Intn(500))*time.Millisecond
-			if currentHeaderBackoff > maxHeaderBackoff {
-				currentHeaderBackoff = maxHeaderBackoff
-			}
-
-			connectToHeaders()
 		case h := <-headers:
+			if newHeadSub == nil {
+				logger.Debug().Msg("header received but subscription inactive, skipping")
+				continue // Skip processing if subscription is down
+			}
 			if h.BaseFee != nil {
 				// update basefee
 				rpcClient.SetBaseFee(h.BaseFee)
+			}
+		case err := <-func() <-chan error {
+			if newHeadSub == nil { // Check if subscription is nil (e.g., initial connect failed)
+				if connectErr != nil { // If there was an initial connect error, return a channel that immediately sends it
+					errChan := make(chan error, 1)
+					errChan <- connectErr
+					close(errChan)
+					connectErr = nil // Clear the initial error after sending
+					return errChan
+				}
+				return nil // No active subscription and no pending initial error
+			}
+			return newHeadSub.Err() // Return the error channel of the active subscription
+		}():
+			if err == nil {
+				// Channel closed unexpectedly? Treat as error.
+				err = errors.New("header subscription error channel closed unexpectedly")
+			}
+			logger.Warn().Err(err).Msgf("header subscription error, attempting reconnect in %s", currentBackoff)
+
+			// Cleanup existing subscription if it exists
+			if newHeadSub != nil {
+				newHeadSub.Unsubscribe()
+				newHeadSub = nil
+			}
+
+			// Wait with backoff, checking for shutdown
+			select {
+			case <-time.After(currentBackoff):
+				// Attempt reconnect
+				newHeadSub, connectErr = connectToHeaders()
+				// Adjust backoff for next potential failure
+				currentBackoff = (currentBackoff * 2) + time.Duration(rand.Intn(500))*time.Millisecond
+				if currentBackoff > maxBackoff {
+					currentBackoff = maxBackoff
+				}
+				if newHeadSub != nil {
+					logger.Info().Msg("reconnected to header subscription successfully")
+					currentBackoff = 1 * time.Second // Reset backoff on success
+				}
+			case <-appQuit.Done():
+				logger.Info().Msg("shutting down during header subscription reconnect backoff")
+				goto exit_app
 			}
 		}
 	}
