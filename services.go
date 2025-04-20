@@ -54,6 +54,8 @@ type Services struct {
 	TaskStorage        *storage.TaskStorageDB
 	AutoMineParams     *SubmitTaskParams
 	Paraswap           *paraswap.ParaswapManager
+	OracleProvider     IPriceOracle
+	LeverOracle        ILeverOracle
 	TaskTracker        *metrics.TaskTracker
 	IpfsOracle         ipfs.OracleClient
 }
@@ -177,11 +179,36 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 
 	engineWrapper := NewEngineWrapper(engineContract, voterContract, logger)
 
+	// required for auto sell, and optionally for price oracle
 	paraswapManager := paraswap.NewParaswapManager(
 		senderOwnerAccount,
 		baseTokenContract,
 		cfg.BaseConfig.BaseToken,
 		logger)
+
+	var oracleProvider IPriceOracle
+	var leverOracle ILeverOracle
+	// Try onchain oracle if configured
+	if cfg.PriceOracleContract != (common.Address{}) {
+		oracleContract, err := NewOnChainOracle(rpc.Client, cfg.PriceOracleContract, eth, cfg.BaseConfig.BaseToken, logger)
+		if err != nil {
+			// If onchain oracle fails, return the error
+			return nil, nil, fmt.Errorf("failed to create onchain oracle: %w", err)
+		}
+		// Success: override defaults
+		oracleProvider = oracleContract
+		if cfg.Claim.UseLever {
+			leverOracle = oracleContract
+		} else {
+			leverOracle = NewMinClaimLeverOracle(cfg.Claim.ClaimMinReward)
+		}
+	} else {
+		// otherwise use paraswap for general price oracle
+		// NOTE: the api has rate limiting so not suitable for high volume/block update
+		oracleProvider = paraswapManager
+		// and use the basic lever oracle
+		leverOracle = NewMinClaimLeverOracle(cfg.Claim.ClaimMinReward)
+	}
 
 	taskMetrics := metrics.NewTaskTracker(appQuit)
 
@@ -212,6 +239,8 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 		TaskStorage:        ts,
 		AutoMineParams:     st,
 		Paraswap:           paraswapManager,
+		OracleProvider:     oracleProvider,
+		LeverOracle:        leverOracle,
 		TaskTracker:        taskMetrics,
 		IpfsOracle:         ipfsOracle,
 		ArbiusRouter:       arbiusRouter,

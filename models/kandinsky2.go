@@ -2,6 +2,7 @@ package models
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -40,12 +41,13 @@ type Kandinsky2ModelResponse struct {
 
 type Kandinsky2Model struct {
 	Model
-	Filters []MiningFilter
-	ipfs    ipfs.IPFSClient
-	config  *config.AppConfig
-	//url     string
-	client *http.Client
-	logger zerolog.Logger
+	timeoutDuration     time.Duration
+	ipfsTimeoutDuration time.Duration
+	Filters             []MiningFilter
+	ipfs                ipfs.IPFSClient
+	config              *config.AppConfig
+	client              *http.Client
+	logger              zerolog.Logger
 }
 
 // Ensure Kandinsky2Model implements the Model interface.
@@ -109,21 +111,57 @@ func NewKandinsky2Model(client ipfs.IPFSClient, appConfig *config.AppConfig, log
 	}
 
 	http := &http.Client{
-		Timeout: time.Second * 30, // TODO: make this a config based setting - set timeout to 30 seconds
+		// Timeout is now handled per-request via context
+		// Timeout: time.Second * 30, // TODO: make this a config based setting - set timeout to 30 seconds
+	}
+
+	// Use model.ID (the hex string CID) as the key for the Cog map
+	cogConfig, ok := appConfig.ML.Cog[model.ID]
+	// Set default timeouts first
+	var timeout time.Duration = 120 * time.Second    // Default inference timeout
+	var ipfsTimeout time.Duration = 30 * time.Second // Default IPFS timeout
+	if ok {
+		// Parse inference timeout only if the string is not empty
+		if cogConfig.HttpTimeout != "" {
+			parsedTimeout, err := time.ParseDuration(cogConfig.HttpTimeout)
+			if err != nil {
+				logger.Warn().Err(err).Str("model", model.ID).Str("config_timeout", cogConfig.HttpTimeout).Msg("failed to parse model timeout from cog config, using default 120s")
+				// Keep default timeout
+			} else {
+				timeout = parsedTimeout
+			}
+		} // Else: HttpTimeout is empty, silently use the default
+
+		// Parse IPFS timeout only if the string is not empty
+		if cogConfig.IpfsTimeout != "" {
+			parsedIpfsTimeout, err := time.ParseDuration(cogConfig.IpfsTimeout)
+			if err != nil {
+				logger.Warn().Err(err).Str("model", model.ID).Str("config_ipfs_timeout", cogConfig.IpfsTimeout).Msg("failed to parse IPFS timeout from cog config, using default 30s")
+				// Keep default ipfsTimeout
+			} else {
+				ipfsTimeout = parsedIpfsTimeout
+			}
+		} // Else: IpfsTimeout is empty, silently use the default
+
+	} else {
+		logger.Error().Str("model", model.ID).Msg("model ID not found in ML.Cog map, required for Kandinsky2Model. Using default timeout 120s")
+		// Keep default timeout, but log as Error as it's unexpected for a Cog model
 	}
 
 	m := &Kandinsky2Model{
-		Model:  Kandinsky2ModelTemplate,
-		config: appConfig,
-		ipfs:   client,
+		Model:               Kandinsky2ModelTemplate,
+		timeoutDuration:     timeout,
+		ipfsTimeoutDuration: ipfsTimeout, // Store the IPFS timeout
+		config:              appConfig,
+		ipfs:                client,
+		client:              http,
+		logger:              logger,
 		Filters: []MiningFilter{
 			{
 				MinFee:  0,
 				MinTime: 0,
 			},
 		},
-		client: http,
-		logger: logger,
 	}
 	m.Model.ID = model.ID
 	return m
@@ -237,18 +275,33 @@ func (m *Kandinsky2Model) GetID() string {
 	return m.Model.ID
 }
 
-func (m *Kandinsky2Model) GetFiles(gpu *common.GPU, taskid string, input interface{}) ([]ipfs.IPFSFile, error) {
-	// TODO: validate this?
-	//url := m.config.ML.Cog[m.Model.ID].URL
+func (m *Kandinsky2Model) GetFiles(ctx context.Context, gpu *common.GPU, taskid string, input interface{}) ([]ipfs.IPFSFile, error) {
+
+	// Check if context is already canceled before doing anything
+	if err := ctx.Err(); err != nil {
+		m.logger.Warn().Err(err).Str("task", taskid).Msg("Context canceled before GetFiles execution")
+		return nil, err
+	}
 
 	marshaledInput, _ := json.Marshal(input)
 
+	req, err := http.NewRequestWithContext(ctx, "POST", gpu.Url, bytes.NewBuffer(marshaledInput))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
 	//start := time.Now()
-	postResp, err := m.client.Post(gpu.Url, "application/json", bytes.NewBuffer([]byte(marshaledInput)))
+	postResp, err := m.client.Do(req)
 	//elapsed := time.Since(start)
 	//fmt.Println("GPU Post took:", elapsed)
 	if err != nil {
-		return nil, err
+		// Check if the error is context deadline exceeded
+		if errors.Is(err, context.DeadlineExceeded) {
+			m.logger.Error().Err(err).Str("task", taskid).Str("gpu", gpu.Url).Msg("model inference request timed out")
+			return nil, fmt.Errorf("model inference timed out: %w", err)
+		}
+		return nil, fmt.Errorf("failed to POST to GPU: %w", err)
 	}
 	defer postResp.Body.Close()
 
@@ -289,25 +342,32 @@ func (m *Kandinsky2Model) GetFiles(gpu *common.GPU, taskid string, input interfa
 	return []ipfs.IPFSFile{{Name: "out-1.png", Path: path, Buffer: buffer}}, nil
 }
 
-func (m *Kandinsky2Model) GetCID(gpu *common.GPU, taskid string, input interface{}) ([]byte, error) {
-	//start := time.Now()
-	paths, err := utils.ExpRetry(m.logger, func() (interface{}, error) {
-		return m.GetFiles(gpu, taskid, input)
+func (m *Kandinsky2Model) GetCID(ctx context.Context, gpu *common.GPU, taskid string, input interface{}) ([]byte, error) {
+
+	// Create a new context with the stored model-specific timeout
+	timeoutCtx, cancel := context.WithTimeout(ctx, m.timeoutDuration)
+	defer cancel()
+
+	// Use ExpRetryWithContext
+	paths, err := utils.ExpRetryWithContext(timeoutCtx, m.logger, func() (any, error) {
+		// Pass the timeout context to GetFiles
+		return m.GetFiles(timeoutCtx, gpu, taskid, input)
 	}, 3, 1000)
-	//elapsed := time.Since(start)
-	//fmt.Println("GPU DIRECT CALL TOOK:", elapsed)
 	if err != nil {
-		return nil, err //errors.New("cannot get paths")
+		return nil, err
 	}
 
-	//start = time.Now()
-	// TODO: calculate cid and pin async
-	cid58, err := utils.ExpRetry(m.logger, func() (interface{}, error) {
-		return m.ipfs.PinFilesToIPFS(taskid, paths.([]ipfs.IPFSFile))
-	}, 3, 1000)
-	//elapsed = time.Since(start)
+	// Note: IPFS pinning might need its own context/timeout strategy if it becomes slow
+	// Create a new context for IPFS pinning with its specific timeout
+	ipfsCtx, ipfsCancel := context.WithTimeout(ctx, m.ipfsTimeoutDuration)
+	defer ipfsCancel()
 
-	//fmt.Println("IPFS DIRECT CALL TOOK:", elapsed)
+	// Use ExpRetryWithContext
+	cid58, err := utils.ExpRetryWithContext(ipfsCtx, m.logger, func() (any, error) {
+		// Pass the ipfsCtx to PinFilesToIPFS
+		return m.ipfs.PinFilesToIPFS(ipfsCtx, taskid, paths.([]ipfs.IPFSFile))
+	}, 3, 1000)
+
 	if err != nil {
 		return nil, errors.New("cannot pin files to retrieve cid")
 	}
@@ -324,14 +384,15 @@ func (m *Kandinsky2Model) GetCID(gpu *common.GPU, taskid string, input interface
 func (m *Kandinsky2Model) Validate(gpu *common.GPU, taskid string) error {
 	testPrompt := Kandinsky2Prompt{
 		Input: Kadinsky2Inner{
-			Prompt: "render a cat in the style of kandinsky",
-			Height: 768,
+			Prompt: "Hello World",
 			Width:  768,
-			Seed:   1337,
+			Height: 768,
+			Seed:   100,
 		},
 	}
 
-	cid, err := m.GetCID(gpu, "startup-test-taskid", testPrompt)
+	// Use a background context for validation
+	cid, err := m.GetCID(context.Background(), gpu, "startup-test-taskid", testPrompt)
 	if err != nil {
 		return err
 	}

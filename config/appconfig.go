@@ -30,6 +30,7 @@ type AppConfig struct {
 	EvilModeRandInt     int               `json:"evil_mode_int"` // for testing purposes
 	NumWorkersPerGPU    int               `json:"num_workers_per_gpu"`
 	PriceOracleContract ethcommon.Address `json:"price_oracle_contract"`
+	PopTaskRandom       bool              `json:"pop_task_random"`
 
 	Miner SolverConfig `json:"solver"`
 
@@ -128,6 +129,7 @@ type BatchTasks struct {
 	HoardMinGasPrice         float64  `json:"hoard_min_gas_price"`          // min gas price we need to see before we start hoarding tasks
 	HoardMaxQueueSize        int      `json:"hoard_max_queue_size"`         // max size we let the queue get when hoarding tasks
 	PrivateKeys              []string `json:"private_keys"`
+	MaxClaimQueue            int      `json:"max_claim_queue"` // max size we let the claim queue get before disabling task creation
 }
 
 type BatchConfig struct {
@@ -137,23 +139,29 @@ type BatchConfig struct {
 }
 
 type SolverConfig struct {
-	Enabled                 bool             `json:"enabled"`
-	CommitmentsAndSolutions CommitmentOption `json:"commitments_and_solutions"` // one of: "donothing", "doboth", "docommitments", "dosolutions"
-	CommitmentBatch         BatchConfig      `json:"commitment_batch"`
-	SolutionBatch           BatchConfig      `json:"solution_batch"`
-	ConcurrentBatches       bool             `json:"concurrent_batches"`       // if true, submit multiple batches of commitments and solutions concurrently (requires multiple accounts)
-	ProfitMode              string           `json:"profit_mode"`              // profit mode to use for batch operations
-	MinProfit               float64          `json:"min_profit"`               // minimum profit in USD to perform batch operations
-	MaxProfit               float64          `json:"max_profit"`               // maximum profit in USD to perform batch operations
-	PauseStakeBufferLevel   float64          `json:"pause_stake_buffer_level"` // pause submitting commits/solutions if the buffer = (current stake - min stake) is below this level
-	UsePolling              bool             `json:"use_polling"`              // use polling to check profit and submit txes if false, new block triggers batching
-	PollingTime             string           `json:"polling_time"`             // polling interval for profit checks and batching as "1m", "5m", "1h", etc..
-	BatchMode               int              `json:"batch_mode"`               // 0: no batch, single commitment/solution cycle, 1 - normal batching using storage and polling, 2 - batch manually (not used!)
-	NoChecks                bool             `json:"no_checks"`                // perform no onchain checks on the tasks/commitments/solutions, just submit them
-	ErrorMaxRetries         int              `json:"error_max_retries"`        // max retries for tx errors
-	ErrorBackoffTime        float64          `json:"error_backoff"`            // sleep time between retries
-	ErrorBackofMultiplier   float64          `json:"error_backoff_multiplier"` // backoff multiplier tx errors
-	MetricsSampleRate       string           `json:"metrics_sample_rate"`      // sample rate for metrics
+	Enabled                         bool             `json:"enabled"`
+	WaitForTasksOnShutdown          bool             `json:"wait_for_tasks_on_shutdown"` // If true, allow running tasks to finish on shutdown
+	CommitmentsAndSolutions         CommitmentOption `json:"commitments_and_solutions"`  // one of: "donothing", "doboth", "docommitments", "dosolutions"
+	CommitmentBatch                 BatchConfig      `json:"commitment_batch"`
+	SolutionBatch                   BatchConfig      `json:"solution_batch"`
+	ConcurrentBatches               bool             `json:"concurrent_batches"`                 // if true, submit multiple batches of commitments and solutions concurrently (requires multiple accounts)
+	ProfitMode                      string           `json:"profit_mode"`                        // profit mode to use for batch operations
+	MinProfit                       float64          `json:"min_profit"`                         // minimum profit in USD to perform batch operations
+	MaxProfit                       float64          `json:"max_profit"`                         // maximum profit in USD to perform batch operations
+	PauseStakeBufferLevel           float64          `json:"pause_stake_buffer_level"`           // pause submitting commits/solutions if the buffer = (current stake - min stake) is below this level
+	UsePolling                      bool             `json:"use_polling"`                        // use polling to check profit and submit txes if false, new block triggers batching
+	PollingTime                     string           `json:"polling_time"`                       // polling interval for profit checks and batching as "1m", "5m", "1h", etc..
+	BatchMode                       int              `json:"batch_mode"`                         // 0: no batch, single commitment/solution cycle, 1 - normal batching using storage and polling, 2 - batch manually (not used!)
+	NoChecks                        bool             `json:"no_checks"`                          // perform no onchain checks on the tasks/commitments/solutions, just submit them
+	ErrorMaxRetries                 int              `json:"error_max_retries"`                  // max retries for tx errors
+	ErrorBackoffTime                float64          `json:"error_backoff"`                      // sleep time between retries
+	ErrorBackofMultiplier           float64          `json:"error_backoff_multiplier"`           // backoff multiplier tx errors
+	MetricsSampleRate               string           `json:"metrics_sample_rate"`                // sample rate for metrics
+	EnableIntrinsicGasCheck         bool             `json:"enable_intrinsic_gas_check"`         // enable intrinsic gas check
+	IntrinsicGasBaseline            uint64           `json:"intrinsic_gas_baseline"`             // baseline gas cost for a simple transfer
+	IntrinsicGasThresholdMultiplier float64          `json:"intrinsic_gas_threshold_multiplier"` // multiplier for the threshold
+	EnableGasEstimationMode         bool             `json:"enable_gas_estimation_mode"`         // enable gas estimation mode
+	GasEstimationMargin             uint64           `json:"gas_estimation_margin"`              // gas margin for gas estimation mode
 }
 
 type Strategies struct {
@@ -205,6 +213,7 @@ type Claimer struct {
 	SortByCost      bool    `json:"sort_by_cost"`         // sort the claims by cost
 	// Maximum amount of claims to buffer before submitting them regardless of min reward
 	//MaxClaimsBuffer int     `json:"max_claims_buffer"`
+	UseLever       bool    `json:"use_lever"`        // use the lever oracle for the claim min level
 	ClaimMinReward float64 `json:"claim_min_reward"` // if reward is this level claim regardless
 	//  claim when staked amount approaches stake min level
 	ClaimOnApproachMinStake bool    `json:"claim_on_approach"`
@@ -215,17 +224,16 @@ type Claimer struct {
 }
 
 type ML struct {
-	Strategy  string         `json:"strategy"`
-	Replicate Replicate      `json:"replicate"`
-	Cog       map[string]Cog `json:"cog"`
-}
-
-type Replicate struct {
-	APIToken string `json:"api_token"`
+	Strategy string         `json:"strategy"`
+	Cog      map[string]Cog `json:"cog"`
 }
 
 type Cog struct {
-	URL []string `json:"url"`
+	// HttpTimeout specifies the duration allowed for a model inference request (e.g., "120s", "5m").
+	HttpTimeout string `json:"http_timeout"`
+	// IpfsTimeout specifies the duration allowed for IPFS pinning operations (e.g., "30s").
+	IpfsTimeout string   `json:"ipfs_timeout"`
+	URL         []string `json:"url"`
 }
 
 type IPFS struct {
@@ -300,6 +308,7 @@ func NewAppConfig(testnetType int) AppConfig {
 		EvilMode:         false,
 		EvilModeMinTime:  2000,
 		EvilModeRandInt:  1000,
+		PopTaskRandom:    false,
 
 		ValidatorConfig: ValidatorConfig{
 			InitialStake:            0,
@@ -333,9 +342,12 @@ func NewAppConfig(testnetType int) AppConfig {
 			HoardModeNumberOfBatches: 1,
 			HoardMinGasPrice:         0.0,
 			HoardMaxQueueSize:        1000,
+			PrivateKeys:              []string{},
+			MaxClaimQueue:            0, // 0 disables this check
 		},
 		Miner: SolverConfig{
 			Enabled:                 false,
+			WaitForTasksOnShutdown:  false,
 			CommitmentBatch:         BatchConfig{MinBatchSize: 10, MaxBatchSize: 10, NumberOfBatches: 1},
 			SolutionBatch:           BatchConfig{MinBatchSize: 10, MaxBatchSize: 10, NumberOfBatches: 1},
 			CommitmentsAndSolutions: DoBoth,

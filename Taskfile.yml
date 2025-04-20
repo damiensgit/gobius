@@ -188,6 +188,20 @@ tasks:
           PKG: basetoken
           TYPE: BaseToken
           OUT_DIR: "{{.BINDINGS_DIR}}/basetoken"
+  
+  build:quoter:
+    desc: Build Quoter interface
+    deps: [build:dir]
+    cmds:
+      - task: _build:contract
+        vars:
+          NAME: IQuoter
+          PKG: quoter
+          TYPE: Quoter
+          OUT_DIR: "{{.BINDINGS_DIR}}/quoter"
+          SRC_DIR: "{{.LOCAL_CONTRACTS}}"
+          BASE_PATH: "."
+          CONTRACT_NAME: IQuoter
 
   build:sqlc:
     desc: Generate Go code from SQL schema
@@ -204,6 +218,7 @@ tasks:
       - task: build:bulktasks
       - task: build:sqlc
       - task: build:arbiusrouterv1
+      - task: build:quoter
   clean:
     desc: Clean build artifacts
     cmds:

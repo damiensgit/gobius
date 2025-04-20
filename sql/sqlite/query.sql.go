@@ -620,6 +620,29 @@ func (q *Queries) PopTask(ctx context.Context) (PopTaskRow, error) {
 	return i, err
 }
 
+const popTaskRandom = `-- name: PopTaskRandom :one
+UPDATE tasks
+SET status = 1
+WHERE taskid = (SELECT taskid
+FROM tasks
+WHERE status = 0
+ORDER BY RANDOM()
+LIMIT 1)
+RETURNING taskid, txhash
+`
+
+type PopTaskRandomRow struct {
+	Taskid task.TaskId
+	Txhash common.Hash
+}
+
+func (q *Queries) PopTaskRandom(ctx context.Context) (PopTaskRandomRow, error) {
+	row := q.db.QueryRowContext(ctx, popTaskRandom)
+	var i PopTaskRandomRow
+	err := row.Scan(&i.Taskid, &i.Txhash)
+	return i, err
+}
+
 const recoverStaleTasks = `-- name: RecoverStaleTasks :exec
 UPDATE tasks
 SET status = 0

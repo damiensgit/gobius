@@ -1,6 +1,8 @@
 package models
 
 import (
+	"context"
+	"errors"
 	"strings"
 
 	"gobius/common"
@@ -21,12 +23,15 @@ type InputHydrationResult any
 
 // TODO: add context support to GetFiles and GetCID
 type ModelInterface interface {
-	GetFiles(gpu *common.GPU, taskid string, input any) ([]ipfs.IPFSFile, error)
-	GetCID(gpu *common.GPU, taskid string, input any) ([]byte, error)
+	GetFiles(ctx context.Context, gpu *common.GPU, taskid string, input any) ([]ipfs.IPFSFile, error)
+	GetCID(ctx context.Context, gpu *common.GPU, taskid string, input any) ([]byte, error)
 	GetID() string
 	HydrateInput(preprocessedInput map[string]any, seed uint64) (InputHydrationResult, error)
 	Validate(gpu *common.GPU, taskid string) error
 }
+
+// ErrResourceBusy indicates that the target GPU reported a 409 Conflict status.
+var ErrResourceBusy = errors.New("resource busy")
 
 type MiningFilter struct {
 	MinFee  int

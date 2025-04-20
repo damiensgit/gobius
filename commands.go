@@ -2,26 +2,35 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"gobius/account"
+	"gobius/bindings/basetoken" // Added for BaseToken ABI
 	"gobius/bindings/engine"
 	"gobius/client"
 	task "gobius/common"
 	"gobius/metrics"
 	"gobius/storage"
 	"log"
+	"math"
 	"math/big"
 	"math/rand"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
+	"bytes" // Added for bytes.Equal
+	"gobius/bindings/bulktasks"
+
 	"github.com/briandowns/spinner"
 	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/core/types" // Added for deriving addresses
+	"github.com/olekukonko/tablewriter"          // Added for table output
 	"github.com/rs/zerolog"
 )
 
@@ -554,9 +563,14 @@ func verifyAllTasks(ctx context.Context, dryMode bool) error {
 					err = services.TaskStorage.UpsertTaskToClaimable(v.Taskid, common.Hash{}, claimTime)
 					if err != nil {
 						services.Logger.Error().Err(err).Msg("error updating task in storage")
+					} else {
+						tasksUpdated++
+						services.Logger.Info().Str("taskid", v.Taskid.String()).Int64("old_status", v.Status).Int64("new_status", 3).Msg("Task status updated to claimable.") // Status 3 is claimable
 					}
+				} else {
+					tasksUpdated++
+					services.Logger.Info().Str("taskid", v.Taskid.String()).Int64("old_status", v.Status).Int64("new_status", 3).Msg("Task status updated to claimable (dry run).") // Status 3 is claimable
 				}
-				claimable++
 			}
 			// flag any commitments and solutions to delete
 			commitmentsToDelete = append(commitmentsToDelete, v.Taskid)
@@ -1762,5 +1776,761 @@ func exportUnsolvedTasks(appQuit context.Context, services *Services, rpcClient 
 	}
 
 	log.Printf("Successfully exported %d unsolved tasks to %s", totalExported, outputFilename)
+	return nil
+}
+
+type GasStat struct {
+	TotalGasUsed      uint64
+	TotalItems        int
+	TransactionCount  int
+	GasPerItemSamples []float64 // Store all gas/item values
+}
+
+// calculateGasStats analyzes bulk transaction gas usage within a block range using adaptive log filtering.
+func calculateGasStats(appQuit context.Context, services *Services, rpcClient *client.Client, fromBlock int64, endBlock int64, logger zerolog.Logger) error {
+	logger.Info().Int64("from", fromBlock).Int64("to", endBlock).Msg("Starting gas stats calculation (Adaptive FilterLogs)")
+
+	// Get ABIs
+	engineAbi, err := engine.EngineMetaData.GetAbi()
+	if err != nil {
+		return fmt.Errorf("failed to get engine ABI: %w", err)
+	}
+	bulkTasksAbi, err := bulktasks.BulkTasksMetaData.GetAbi()
+	if err != nil {
+		return fmt.Errorf("failed to get bulktasks ABI: %w", err)
+	}
+
+	// Method IDs
+	bulkSubmitTaskID := engineAbi.Methods["bulkSubmitTask"].ID
+	bulkSubmitSolutionID := engineAbi.Methods["bulkSubmitSolution"].ID
+	bulkSignalCommitmentID := bulkTasksAbi.Methods["bulkSignalCommitment"].ID
+	claimSolutionsID := bulkTasksAbi.Methods["claimSolutions"].ID
+
+	// Event Topics (for initial filtering)
+	taskSubmittedTopic := engineAbi.Events["TaskSubmitted"].ID
+	solutionSubmittedTopic := engineAbi.Events["SolutionSubmitted"].ID
+	signalCommitmentTopic := engineAbi.Events["SignalCommitment"].ID
+	solutionClaimedTopic := engineAbi.Events["SolutionClaimed"].ID
+
+	// BaseToken Transfer event details
+	baseTokenAbi, err := basetoken.BaseTokenMetaData.GetAbi()
+	if err != nil {
+		return fmt.Errorf("failed to get BaseToken ABI: %w", err)
+	}
+	transferTopicHash := baseTokenAbi.Events["Transfer"].ID
+
+	// Data structures to hold stats
+	stats := map[string]*GasStat{
+		"BulkSubmitTask":       {GasPerItemSamples: make([]float64, 0)},
+		"BulkSubmitSolution":   {GasPerItemSamples: make([]float64, 0)},
+		"BulkSignalCommitment": {GasPerItemSamples: make([]float64, 0)},
+		"ClaimSolutions":       {GasPerItemSamples: make([]float64, 0)},
+	}
+
+	// Data structures for recipient earnings
+	recipientEarningsTotal := make(map[common.Address]*big.Int)
+	hourlyEarnings := make(map[common.Address]map[time.Time]*big.Int)
+	// Note: Validator-specific filtering removed for now.
+	// We will track all transfers from Engine/BulkTasks contracts.
+
+	// Cache for block timestamps to reduce RPC calls
+	blockTimestamps := make(map[uint64]time.Time)
+
+	// Determine the end block if not provided or invalid
+	if endBlock <= 0 || endBlock < fromBlock {
+		currentBlockUint, err := rpcClient.Client.BlockNumber(context.Background())
+		if err != nil {
+			return fmt.Errorf("failed to get current block number: %w", err)
+		}
+		endBlock = int64(currentBlockUint)
+		logger.Info().Int64("block", endBlock).Msg("Scanning up to latest block")
+	}
+
+	// Fetch block timestamps for context
+	var startBlockTime, endBlockTime time.Time
+	startBlockBig := big.NewInt(fromBlock)
+	endBlockBig := big.NewInt(endBlock)
+	var captionRange string // Declare captionRange here
+
+	startBlockInfo, err := rpcClient.Client.BlockByNumber(context.Background(), startBlockBig)
+	if err != nil {
+		logger.Warn().Err(err).Int64("block", fromBlock).Msg("Could not get start block info for timestamp")
+	} else {
+		startBlockTime = time.Unix(int64(startBlockInfo.Time()), 0)
+	}
+
+	endBlockInfo, err := rpcClient.Client.BlockByNumber(context.Background(), endBlockBig)
+	if err != nil {
+		logger.Warn().Err(err).Int64("block", endBlock).Msg("Could not get end block info for timestamp")
+	} else {
+		endBlockTime = time.Unix(int64(endBlockInfo.Time()), 0)
+	}
+
+	// Format caption details
+	captionRange = fmt.Sprintf("Blocks %d-%d", fromBlock, endBlock)
+	if !startBlockTime.IsZero() && !endBlockTime.IsZero() {
+		startStr := startBlockTime.UTC().Format("Jan-02-2006 03:04:05 PM MST") // Use desired UTC format
+		endStr := endBlockTime.UTC().Format("Jan-02-2006 03:04:05 PM MST")     // Use desired UTC format
+		duration := endBlockTime.Sub(startBlockTime).Round(time.Minute)        // Round duration to nearest minute
+		captionRange = fmt.Sprintf("%s (%s - %s, ~%s)", captionRange, startStr, endStr, duration.String())
+	} else if !startBlockTime.IsZero() {
+		startStr := startBlockTime.UTC().Format("Jan-02-2006 03:04:05 PM MST") // Use desired UTC format
+		captionRange = fmt.Sprintf("%s (Starts: %s)", captionRange, startStr)
+	} else if !endBlockTime.IsZero() {
+		endStr := endBlockTime.UTC().Format("Jan-02-2006 03:04:05 PM MST") // Use desired UTC format
+		captionRange = fmt.Sprintf("%s (Ends: %s)", captionRange, endStr)
+	}
+
+	if fromBlock > endBlock {
+		logger.Warn().Int64("from", fromBlock).Int64("to", endBlock).Msg("From block is after end block, nothing to scan.")
+		return nil
+	}
+
+	engineAddr := services.Config.BaseConfig.EngineAddress
+	bulkTasksAddr := services.Config.BaseConfig.BulkTasksAddress
+	baseTokenAddr := services.Config.BaseConfig.BaseTokenAddress
+
+	// Adaptive step parameters
+	initialBlockSize := int64(10000) // Starting point, adjust as needed
+	currentBlockSize := initialBlockSize
+	minBlockSize := int64(100)
+	maxBlockSize := int64(50000)
+	increaseStep := int64(500)
+	if currentBlockSize < minBlockSize {
+		currentBlockSize = minBlockSize
+	}
+	if currentBlockSize > maxBlockSize {
+		currentBlockSize = maxBlockSize
+	}
+
+	s := spinner.New(spinner.CharSets[11], 500*time.Millisecond, spinner.WithWriter(os.Stderr))
+	s.Suffix = " filtering logs..."
+	s.FinalMSG = "log filtering completed!\n"
+	s.Start()
+
+	var allLogs []types.Log
+	loopFromBlock := fromBlock
+
+	// --- Adaptive Log Filtering Loop ---
+	for loopFromBlock <= endBlock {
+		select {
+		case <-appQuit.Done():
+			logger.Warn().Int64("block", loopFromBlock).Msg("Gas stats calculation cancelled during log filtering.")
+			return fmt.Errorf("scan aborted")
+		default:
+		}
+
+		loopToBlock := loopFromBlock + currentBlockSize - 1
+		if loopToBlock > endBlock {
+			loopToBlock = endBlock
+		}
+
+		s.Suffix = fmt.Sprintf(" filtering logs %d to %d (size %d)...", loopFromBlock, loopToBlock, currentBlockSize)
+
+		filterQuery := ethereum.FilterQuery{
+			FromBlock: big.NewInt(loopFromBlock),
+			ToBlock:   big.NewInt(loopToBlock),
+			Addresses: []common.Address{engineAddr, bulkTasksAddr, baseTokenAddr}, // Include BaseToken address
+			Topics: [][]common.Hash{{
+				taskSubmittedTopic, solutionSubmittedTopic, signalCommitmentTopic, solutionClaimedTopic,
+				transferTopicHash, // Add Transfer topic
+			}},
+		}
+
+		logs, err := rpcClient.FilterLogs(appQuit, filterQuery)
+		if err != nil {
+			errStr := strings.ToLower(err.Error())
+			isRangeError := strings.Contains(errStr, "block range") ||
+				strings.Contains(errStr, "limit") ||
+				strings.Contains(errStr, "response size") ||
+				strings.Contains(errStr, "timeout") ||
+				strings.Contains(errStr, "too many logs")
+
+			if isRangeError && currentBlockSize > minBlockSize {
+				logger.Warn().Err(err).Int64("size", currentBlockSize).Msg("FilterLogs range error, reducing size")
+				newSize := max(minBlockSize, currentBlockSize/2)
+				if newSize == currentBlockSize { // Ensure reduction if already near min
+					newSize = max(minBlockSize, newSize-increaseStep)
+				}
+				currentBlockSize = newSize
+				logger.Info().Int64("new_size", currentBlockSize).Msg("Retrying with smaller block size")
+				continue // Retry the same range with smaller size
+			} else {
+				s.Stop()
+				return fmt.Errorf("unrecoverable error filtering logs from %d to %d: %w", loopFromBlock, loopToBlock, err)
+			}
+		} else {
+			// Success
+			if len(logs) > 0 {
+				logger.Debug().Int("count", len(logs)).Int64("from", loopFromBlock).Int64("to", loopToBlock).Msg("Found logs in range")
+				allLogs = append(allLogs, logs...)
+			}
+
+			// Advance to the next block range
+			loopFromBlock = loopToBlock + 1
+
+			// Try increasing block size for the next iteration
+			currentBlockSize = min(maxBlockSize, currentBlockSize+increaseStep)
+		}
+	}
+	s.Stop()
+
+	logger.Info().Int("total_logs", len(allLogs)).Msg("Finished log filtering. Processing transactions...")
+
+	// Collect unique transaction hashes from the logs
+	uniqueTxHashes := make(map[common.Hash]struct{})
+	for _, logEntry := range allLogs {
+		uniqueTxHashes[logEntry.TxHash] = struct{}{} // Use map for easy uniqueness
+	}
+
+	if len(uniqueTxHashes) == 0 {
+		logger.Info().Msg("No relevant events found in the specified block range.")
+		// Display empty table (same as before)
+		table := tablewriter.NewWriter(os.Stdout)
+		table.SetHeader([]string{"Method", "Tx Count", "Total Items", "Avg Gas/Item", "StdDev", "Min", "P90", "P95", "P99", "Max"})
+		table.SetCaption(true, fmt.Sprintf("Gas Usage Statistics (%s)", captionRange))
+		for method := range stats {
+			table.Append([]string{method, "0", "0", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"})
+		}
+		// logger.Info().Msg("\n")
+		fmt.Println("") // Print newline using fmt
+		table.Render()  // Print the table
+		// logger.Info().Msg("")   // Add newline after table
+		fmt.Println("") // Print newline using fmt
+		return nil
+	}
+
+	s.Suffix = " processing transactions..."
+	s.Start()
+
+	// Process each unique transaction (same logic as previous FilterLogs-first version)
+	processedCount := 0
+	for txHash := range uniqueTxHashes {
+		processedCount++
+		s.Suffix = fmt.Sprintf(" processing transaction %d / %d...", processedCount, len(uniqueTxHashes))
+
+		select {
+		case <-appQuit.Done():
+			logger.Warn().Msg("Gas stats calculation cancelled during transaction processing.")
+			return fmt.Errorf("scan aborted")
+		default:
+		}
+
+		// Fetch the receipt
+		receipt, err := rpcClient.Client.TransactionReceipt(context.Background(), txHash)
+		if err != nil {
+			logger.Warn().Err(err).Str("tx", txHash.Hex()).Msg("Failed to get receipt, skipping tx stats")
+			continue
+		}
+
+		// --- Process Logs for Earnings (Moved inside tx loop) ---
+		blockTimestamp := time.Unix(0, 0) // Placeholder for potential future hourly breakdown
+		_ = blockTimestamp                // Avoid unused variable error for now
+
+		for _, logEntry := range receipt.Logs {
+			if logEntry.Address == baseTokenAddr && len(logEntry.Topics) > 0 && logEntry.Topics[0] == transferTopicHash {
+				// Correctly unpack Transfer event
+				var transferEvent basetoken.BaseTokenTransfer // Use generated struct
+				if len(logEntry.Topics) == 3 {                // Transfer event has 3 indexed topics (event sig, from, to)
+					transferEvent.From = common.BytesToAddress(logEntry.Topics[1].Bytes())
+					transferEvent.To = common.BytesToAddress(logEntry.Topics[2].Bytes())
+					// Unpack non-indexed amount from data
+					err := baseTokenAbi.UnpackIntoInterface(&transferEvent, "Transfer", logEntry.Data)
+					if err != nil {
+						logger.Warn().Err(err).Str("tx", txHash.Hex()).Msg("Failed to unpack BaseToken Transfer event data")
+						continue
+					}
+				} else {
+					logger.Warn().Str("tx", txHash.Hex()).Int("topics", len(logEntry.Topics)).Msg("Unexpected number of topics for BaseToken Transfer event")
+					continue
+				}
+
+				// Check if sender is Engine or BulkTasks contract
+				if transferEvent.From == engineAddr || transferEvent.From == bulkTasksAddr {
+
+					// --- Aggregate Total Earnings ---
+					if existingTotal, ok := recipientEarningsTotal[transferEvent.To]; ok {
+						recipientEarningsTotal[transferEvent.To] = new(big.Int).Add(existingTotal, transferEvent.Value)
+					} else {
+						// First time seeing this recipient
+						recipientEarningsTotal[transferEvent.To] = new(big.Int).Set(transferEvent.Value)
+					}
+
+					// --- Aggregate Hourly Earnings ---
+					blockNum := logEntry.BlockNumber
+					blockTime, exists := blockTimestamps[blockNum]
+					if !exists {
+						// Fetch block info if not cached
+						blockInfo, err := rpcClient.Client.BlockByNumber(context.Background(), big.NewInt(int64(blockNum)))
+						if err != nil {
+							logger.Warn().Err(err).Uint64("block", blockNum).Msg("Could not get block info for hourly timestamp")
+							// Cannot aggregate hourly if block fetch fails
+						} else {
+							blockTime = time.Unix(int64(blockInfo.Time()), 0)
+							blockTimestamps[blockNum] = blockTime // Cache it
+							exists = true                         // Mark as existing now
+						}
+					}
+
+					// Only aggregate if we have the timestamp
+					if exists {
+						hourKey := blockTime.Truncate(time.Hour).UTC() // Use UTC hour
+						recipientAddr := transferEvent.To
+
+						// Ensure nested map exists
+						if _, ok := hourlyEarnings[recipientAddr]; !ok {
+							hourlyEarnings[recipientAddr] = make(map[time.Time]*big.Int)
+						}
+
+						if existingHourlyTotal, ok := hourlyEarnings[recipientAddr][hourKey]; ok {
+							hourlyEarnings[recipientAddr][hourKey] = new(big.Int).Add(existingHourlyTotal, transferEvent.Value)
+						} else {
+							hourlyEarnings[recipientAddr][hourKey] = new(big.Int).Set(transferEvent.Value)
+						}
+					}
+				}
+			}
+		}
+		// --- End Process Logs for Earnings ---
+
+		// Now process Gas Stats for the *same* transaction hash
+		if receipt.Status != types.ReceiptStatusSuccessful {
+			continue // Skip failed transactions for gas stats calculation
+		}
+
+		// Fetch the transaction data (we already have receipt)
+		tx, isPending, err := rpcClient.Client.TransactionByHash(context.Background(), txHash)
+		if err != nil {
+			logger.Warn().Err(err).Str("tx", txHash.Hex()).Msg("Failed to get transaction data, skipping tx stats")
+			continue
+		}
+		if isPending {
+			logger.Warn().Str("tx", txHash.Hex()).Msg("Transaction is still pending, skipping tx stats")
+			continue // Should not happen if we have a receipt, but check anyway
+		}
+
+		// Basic transaction validation
+		if tx.To() == nil || len(tx.Data()) < 4 {
+			continue
+		}
+
+		methodIDBytes := tx.Data()[:4]
+		var targetAbi *abi.ABI
+		var method *abi.Method
+		var methodType string
+		var itemCount int
+
+		// Identify the contract and method based on tx.To() and methodID
+		if *tx.To() == engineAddr {
+			targetAbi = engineAbi
+			if bytes.Equal(methodIDBytes, bulkSubmitTaskID) {
+				methodType = "BulkSubmitTask"
+				method, _ = targetAbi.MethodById(methodIDBytes)
+			} else if bytes.Equal(methodIDBytes, bulkSubmitSolutionID) {
+				methodType = "BulkSubmitSolution"
+				method, _ = targetAbi.MethodById(methodIDBytes)
+			} else {
+				continue // Transaction to Engine, but not a target bulk method
+			}
+		} else if *tx.To() == bulkTasksAddr {
+			targetAbi = bulkTasksAbi
+			if bytes.Equal(methodIDBytes, bulkSignalCommitmentID) {
+				methodType = "BulkSignalCommitment"
+				method, _ = targetAbi.MethodById(methodIDBytes)
+			} else if bytes.Equal(methodIDBytes, claimSolutionsID) {
+				methodType = "ClaimSolutions"
+				method, _ = targetAbi.MethodById(methodIDBytes)
+			} else {
+				continue // Transaction to BulkTasks, but not a target bulk method
+			}
+		} else {
+			continue // Transaction not to either target contract
+		}
+
+		if method == nil {
+			// This indicates an ABI mismatch or an unexpected method ID for the target contract
+			logger.Warn().Str("tx", txHash.Hex()).Str("to", tx.To().Hex()).Str("methodID", hex.EncodeToString(methodIDBytes)).Msg("Could not find method in ABI for transaction")
+			continue
+		}
+
+		// Unpack arguments to get item count
+		args, err := method.Inputs.Unpack(tx.Data()[4:])
+		if err != nil {
+			logger.Warn().Err(err).Str("tx", txHash.Hex()).Str("method", methodType).Msg("Failed to unpack arguments, skipping tx stats")
+			continue
+		}
+
+		// Extract item count based on method type
+		switch methodType {
+		case "BulkSubmitTask":
+			if len(args) >= 6 {
+				if countBig, ok := args[5].(*big.Int); ok {
+					itemCount = int(countBig.Int64())
+				}
+			}
+		case "BulkSubmitSolution":
+			if len(args) >= 1 {
+				if tasksList, ok := args[0].([][32]byte); ok {
+					itemCount = len(tasksList)
+				}
+			}
+		case "BulkSignalCommitment":
+			if len(args) >= 1 {
+				if commitmentsList, ok := args[0].([][32]byte); ok {
+					itemCount = len(commitmentsList)
+				}
+			}
+		case "ClaimSolutions":
+			if len(args) >= 1 {
+				if tasksList, ok := args[0].([][32]byte); ok {
+					itemCount = len(tasksList)
+				}
+			}
+		default:
+			logger.Error().Str("tx", txHash.Hex()).Str("methodType", methodType).Msg("Internal error: Unknown method type in count extraction")
+			continue
+		}
+
+		if itemCount > 0 {
+			stat := stats[methodType]
+			stat.TotalGasUsed += receipt.GasUsed
+			stat.TotalItems += itemCount
+			stat.TransactionCount++
+			gasPerItem := float64(receipt.GasUsed) / float64(itemCount)
+			stat.GasPerItemSamples = append(stat.GasPerItemSamples, gasPerItem)
+		} else {
+			logger.Warn().Str("tx", txHash.Hex()).Str("method", methodType).Msg("Processed transaction but item count was zero or could not be extracted")
+		}
+	}
+	s.Stop()
+
+	// Calculate and print final stats using tablewriter
+	table := tablewriter.NewWriter(os.Stdout)
+	table.SetHeader([]string{"Method", "Tx Count", "Total Items", "Avg Gas/Item", "StdDev", "Min", "P90", "P95", "P99", "Max"})
+	table.SetAutoFormatHeaders(true)
+	table.SetHeaderAlignment(tablewriter.ALIGN_CENTER)
+	table.SetAlignment(tablewriter.ALIGN_RIGHT)
+	table.SetCaption(true, fmt.Sprintf("Gas Usage Statistics (%s)", captionRange))
+
+	for method, stat := range stats {
+		if stat.TransactionCount > 0 {
+			// Calculation logic remains the same...
+			sort.Float64s(stat.GasPerItemSamples)
+			minGas := stat.GasPerItemSamples[0]
+			maxGas := stat.GasPerItemSamples[len(stat.GasPerItemSamples)-1]
+
+			// Average (Mean)
+			sum := 0.0
+			for _, v := range stat.GasPerItemSamples {
+				sum += v
+			}
+			avgGas := sum / float64(len(stat.GasPerItemSamples))
+
+			// Standard Deviation
+			variance := 0.0
+			for _, v := range stat.GasPerItemSamples {
+				variance += math.Pow(v-avgGas, 2)
+			}
+			stdDev := math.Sqrt(variance / float64(len(stat.GasPerItemSamples)))
+
+			// Percentiles
+			percentile := func(p float64) float64 {
+				if len(stat.GasPerItemSamples) == 0 {
+					return 0
+				}
+				// Correct percentile calculation (Nearest Rank method)
+				index := int(math.Ceil(p*float64(len(stat.GasPerItemSamples)))) - 1
+				if index < 0 {
+					index = 0
+				}
+				if index >= len(stat.GasPerItemSamples) {
+					index = len(stat.GasPerItemSamples) - 1
+				}
+				return stat.GasPerItemSamples[index]
+			}
+
+			p90 := percentile(0.90)
+			p95 := percentile(0.95)
+			p99 := percentile(0.99)
+
+			row := []string{
+				method,
+				fmt.Sprintf("%d", stat.TransactionCount),
+				fmt.Sprintf("%d", stat.TotalItems),
+				fmt.Sprintf("%.0f", avgGas),
+				fmt.Sprintf("%.0f", stdDev),
+				fmt.Sprintf("%.0f", minGas),
+				fmt.Sprintf("%.0f", p90),
+				fmt.Sprintf("%.0f", p95),
+				fmt.Sprintf("%.0f", p99),
+				fmt.Sprintf("%.0f", maxGas),
+			}
+			table.Append(row)
+		} else {
+			table.Append([]string{method, "0", "0", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"})
+		}
+	}
+
+	// logger.Info().Msg("\n") // Add newline before table
+	fmt.Println("") // Print newline using fmt
+	table.Render()  // Print the table
+	// logger.Info().Msg("")   // Add newline after table
+	fmt.Println("") // Print newline using fmt
+
+	// --- Display Earnings Table ---
+	earningsTable := tablewriter.NewWriter(os.Stdout)
+	earningsTable.SetHeader([]string{"Recipient Address", "Total Received"})
+	earningsTable.SetCaption(true, fmt.Sprintf("Total BaseToken Received From Engine/BulkTasks (%s)", captionRange))
+	earningsTable.SetHeaderAlignment(tablewriter.ALIGN_CENTER)
+	earningsTable.SetAlignment(tablewriter.ALIGN_RIGHT)
+
+	// Sort recipients for consistent output
+	recipientAddrs := make([]common.Address, 0, len(recipientEarningsTotal))
+	for addr := range recipientEarningsTotal {
+		recipientAddrs = append(recipientAddrs, addr)
+	}
+	sort.Slice(recipientAddrs, func(i, j int) bool {
+		return recipientAddrs[i].Hex() < recipientAddrs[j].Hex()
+	})
+
+	tokenSymbol := services.Config.BaseConfig.BaseToken.Symbol
+	grandTotalReceived := big.NewInt(0)
+
+	for _, addr := range recipientAddrs {
+		total := recipientEarningsTotal[addr]
+		grandTotalReceived.Add(grandTotalReceived, total)
+		row := []string{
+			addr.Hex(),
+			fmt.Sprintf("%s %s", services.Config.BaseConfig.BaseToken.FormatFixed(total), tokenSymbol),
+		}
+		earningsTable.Append(row)
+	}
+
+	if len(recipientAddrs) > 0 {
+		// logger.Info().Msg("\n") // Add newline before table
+		fmt.Println("") // Print newline using fmt
+		earningsTable.SetFooter([]string{"GRAND TOTAL", fmt.Sprintf("%s %s", services.Config.BaseConfig.BaseToken.FormatFixed(grandTotalReceived), tokenSymbol)})
+		earningsTable.Render() // Print the earnings table
+		// logger.Info().Msg("")  // Add newline after table
+		fmt.Println("") // Print newline using fmt
+	} else {
+		// logger.Info().Msg("No relevant BaseToken transfers recorded in this range.")
+		fmt.Println("No relevant BaseToken transfers recorded in this range.")
+	}
+
+	// --- Display Hourly Earnings Table ---
+	if len(hourlyEarnings) > 0 {
+		hourlyTable := tablewriter.NewWriter(os.Stdout)
+		// Prepare header: "Hour" + sorted recipient addresses
+		hourlyHeader := []string{"Hour (UTC)"}
+		for _, addr := range recipientAddrs { // Use the already sorted list from total earnings
+			hourlyHeader = append(hourlyHeader, addr.Hex()) // Maybe truncate address later if too wide
+		}
+		hourlyTable.SetHeader(hourlyHeader)
+		hourlyTable.SetCaption(true, fmt.Sprintf("Hourly BaseToken Received From Engine/BulkTasks (%s)", captionRange))
+		hourlyTable.SetHeaderAlignment(tablewriter.ALIGN_CENTER)
+		hourlyTable.SetAlignment(tablewriter.ALIGN_RIGHT)
+
+		// Collect and sort all unique hours
+		allHoursMap := make(map[time.Time]bool)
+		for _, hourlyMap := range hourlyEarnings {
+			for hour := range hourlyMap {
+				allHoursMap[hour] = true
+			}
+		}
+		allHours := make([]time.Time, 0, len(allHoursMap))
+		for hour := range allHoursMap {
+			allHours = append(allHours, hour)
+		}
+		sort.Slice(allHours, func(i, j int) bool {
+			return allHours[i].Before(allHours[j])
+		})
+
+		// Build rows
+		for _, hour := range allHours {
+			row := make([]string, len(recipientAddrs)+1)
+			row[0] = hour.Format("Jan-02 3PM") // Format hour
+			for i, addr := range recipientAddrs {
+				if earningsMap, ok := hourlyEarnings[addr]; ok {
+					if amount, ok := earningsMap[hour]; ok {
+						row[i+1] = services.Config.BaseConfig.BaseToken.FormatFixed(amount)
+					} else {
+						row[i+1] = "0" // No earnings for this addr in this hour
+					}
+				} else {
+					row[i+1] = "0" // No earnings for this addr at all
+				}
+			}
+			hourlyTable.Append(row)
+		}
+
+		// Add footer with totals (already calculated)
+		footerRow := make([]string, len(recipientAddrs)+1)
+		footerRow[0] = "TOTAL"
+		for i, addr := range recipientAddrs {
+			total := recipientEarningsTotal[addr]
+			footerRow[i+1] = fmt.Sprintf("%s %s", services.Config.BaseConfig.BaseToken.FormatFixed(total), tokenSymbol)
+		}
+		hourlyTable.SetFooter(footerRow)
+
+		// logger.Info().Msg("\n--- Hourly Earnings ---") // Add newline and separator
+		fmt.Println("\n--- Hourly Earnings ---") // Print separator using fmt
+		hourlyTable.Render()
+		// logger.Info().Msg("")
+		fmt.Println("") // Print newline using fmt
+	}
+
+	return nil
+}
+
+// analyzeRewardRecovery scans historical blocks to analyze reward level recovery times.
+func analyzeRewardRecovery(appQuit context.Context, services *Services, rpcClient *client.Client, fromBlock int64, endBlock int64, threshold float64, sampleRate int64, logger zerolog.Logger) error {
+	logger.Info().Int64("from", fromBlock).Int64("to", endBlock).Float64("threshold", threshold).Int64("sampleRate", sampleRate).Msg("Starting reward recovery analysis")
+
+	// Ensure BaseToken is configured for float conversion
+	if services.Config.BaseConfig.BaseToken == nil {
+		return fmt.Errorf("BaseToken configuration not found in services")
+	}
+
+	// Determine the end block if not provided or invalid
+	if endBlock <= 0 || endBlock < fromBlock {
+		currentBlockUint, err := rpcClient.Client.BlockNumber(context.Background())
+		if err != nil {
+			return fmt.Errorf("failed to get current block number: %w", err)
+		}
+		endBlock = int64(currentBlockUint)
+		logger.Info().Int64("block", endBlock).Msg("Scanning up to latest block")
+	}
+
+	if fromBlock >= endBlock {
+		logger.Warn().Int64("from", fromBlock).Int64("to", endBlock).Msg("From block is after end block, nothing to scan.")
+		return nil
+	}
+
+	// State tracking
+	isBelowThreshold := false
+	var blockEnteredBelowThreshold int64
+	var timestampEnteredBelowThreshold time.Time
+	recoveryDurations := []time.Duration{}
+	blockTimestamps := make(map[int64]time.Time) // Cache block timestamps
+
+	// Helper to get block timestamp
+	getBlockTimestamp := func(blockNum int64) (time.Time, error) {
+		if ts, ok := blockTimestamps[blockNum]; ok {
+			return ts, nil
+		}
+		blockInfo, err := rpcClient.Client.BlockByNumber(context.Background(), big.NewInt(blockNum))
+		if err != nil {
+			return time.Time{}, fmt.Errorf("failed to get block info for %d: %w", blockNum, err)
+		}
+		ts := time.Unix(int64(blockInfo.Time()), 0)
+		blockTimestamps[blockNum] = ts // Cache it
+		return ts, nil
+	}
+
+	s := spinner.New(spinner.CharSets[11], 500*time.Millisecond, spinner.WithWriter(os.Stderr))
+	s.Suffix = " scanning blocks..."
+	s.FinalMSG = "block scan completed!\n"
+	s.Start()
+	defer s.Stop()
+
+	// Main scanning loop
+	for currentBlock := fromBlock; currentBlock <= endBlock; currentBlock += sampleRate {
+		select {
+		case <-appQuit.Done():
+			logger.Warn().Int64("block", currentBlock).Msg("Reward analysis cancelled.")
+			return fmt.Errorf("scan aborted")
+		default:
+		}
+
+		s.Suffix = fmt.Sprintf(" scanning block %d / %d...", currentBlock, endBlock)
+
+		callOpts := &bind.CallOpts{
+			Context:     context.Background(), // Use background context for calls
+			BlockNumber: big.NewInt(currentBlock),
+		}
+
+		rewardBigInt, err := services.Engine.Engine.GetReward(callOpts)
+		if err != nil {
+			// Log warning and continue, maybe RPC node was temporarily unavailable for that block
+			logger.Warn().Err(err).Int64("block", currentBlock).Msg("Failed to get reward for block, skipping")
+			continue
+		}
+
+		rewardFloat := services.Config.BaseConfig.BaseToken.ToFloat(rewardBigInt)
+
+		logger.Debug().Int64("block", currentBlock).Float64("reward", rewardFloat).Msg("Sampled reward")
+
+		if rewardFloat < threshold {
+			if !isBelowThreshold {
+				// Just dipped below threshold
+				isBelowThreshold = true
+				blockEnteredBelowThreshold = currentBlock
+				timestamp, err := getBlockTimestamp(currentBlock)
+				if err != nil {
+					logger.Warn().Err(err).Int64("block", currentBlock).Msg("Could not get timestamp when entering below threshold, time calculation might be inaccurate")
+					timestampEnteredBelowThreshold = time.Time{} // Mark as invalid
+				} else {
+					timestampEnteredBelowThreshold = timestamp
+					logger.Info().Int64("block", currentBlock).Float64("reward", rewardFloat).Time("time", timestamp).Msg("Reward dropped below threshold")
+				}
+			}
+			// Still below threshold, do nothing else
+		} else {
+			if isBelowThreshold {
+				// Just recovered above or equal to threshold
+				logger.Info().Int64("block", currentBlock).Float64("reward", rewardFloat).Msg("Reward recovered to threshold")
+				timestampRecovered, err := getBlockTimestamp(currentBlock)
+				if err != nil {
+					logger.Warn().Err(err).Int64("block", currentBlock).Msg("Could not get timestamp when recovering, cannot calculate duration")
+				} else if !timestampEnteredBelowThreshold.IsZero() {
+					duration := timestampRecovered.Sub(timestampEnteredBelowThreshold)
+					recoveryDurations = append(recoveryDurations, duration)
+					logger.Info().Dur("duration", duration.Round(time.Second)).Int64("from_block", blockEnteredBelowThreshold).Int64("to_block", currentBlock).Msg("Recovery duration recorded")
+				} else {
+					logger.Warn().Int64("from_block", blockEnteredBelowThreshold).Int64("to_block", currentBlock).Msg("Recovery detected but entry timestamp was missing, cannot calculate duration")
+				}
+				// Reset state regardless of timestamp success
+				isBelowThreshold = false
+			}
+			// Stayed above threshold, do nothing else
+		}
+	}
+
+	logger.Info().Int("recoveries", len(recoveryDurations)).Msg("Finished reward analysis scan.")
+
+	if len(recoveryDurations) > 0 {
+		var totalDuration time.Duration
+		minDuration := recoveryDurations[0]
+		maxDuration := recoveryDurations[0]
+
+		for _, d := range recoveryDurations {
+			totalDuration += d
+			if d < minDuration {
+				minDuration = d
+			}
+			if d > maxDuration {
+				maxDuration = d
+			}
+		}
+		avgDuration := totalDuration / time.Duration(len(recoveryDurations))
+
+		// logger.Info().
+		// 	Int("count", len(recoveryDurations)).
+		// 	Str("avg", avgDuration.Round(time.Second).String()).
+		// 	Str("min", minDuration.Round(time.Second).String()).
+		// 	Str("max", maxDuration.Round(time.Second).String()).
+		// 	Msg("Recovery Duration Summary")
+		fmt.Printf("Recovery Duration Summary: Count=%d, Avg=%s, Min=%s, Max=%s\n",
+			len(recoveryDurations),
+			avgDuration.Round(time.Second).String(),
+			minDuration.Round(time.Second).String(),
+			maxDuration.Round(time.Second).String(),
+		)
+	} else {
+		// logger.Info().Msg("No complete recovery periods observed within the scanned range.")
+		fmt.Println("No complete recovery periods observed within the scanned range.")
+	}
+
 	return nil
 }

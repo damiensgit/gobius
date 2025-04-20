@@ -387,7 +387,7 @@ func (account *Account) WaitForConfirmedTx(tx *types.Transaction) (receipt *type
 		account.logger.Error().
 			Str("reason", revertReason).
 			Str("txhash", tx.Hash().String()).
-			Str("	", tx.GasFeeCap().String()).
+			Str("gasfeecap", tx.GasFeeCap().String()).
 			Str("gasfeetip", tx.GasTipCap().String()).
 			Msg("❌ transaction was not successful")
 		return receipt, false, revertReason, nil
@@ -471,6 +471,13 @@ func (account *Account) SendEther(opts *bind.TransactOpts, toAddress common.Addr
 	if opts == nil {
 		// just use network defaults (estimate gas, etc)
 		opts = account.GetOpts(0, nil, nil, nil)
+	}
+	// Ensure value is set in the options
+	if opts.Value == nil {
+		opts.Value = value
+	} else if opts.Value.Cmp(value) != 0 {
+		account.logger.Warn().Str("opts_value", opts.Value.String()).Str("param_value", value.String()).Msg("opts.Value already set, overriding with parameter value")
+		opts.Value = value // Override if already set but different, log a warning
 	}
 
 	// Send the transaction
