@@ -70,7 +70,7 @@ func NewAccount(privateKeyHex string, client *client.Client, ctx context.Context
 		ctx:        ctx,
 		cacheNonce: cacheNonce,
 		nonce:      math.MaxUint64,
-		logger:     logger,
+		logger:     logger.With().Str("account", address.String()).Logger(),
 	}, nil
 }
 

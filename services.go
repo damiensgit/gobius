@@ -40,42 +40,36 @@ type SubmitTaskParams struct {
 }
 
 type Services struct {
-	Basetoken          *basetoken.BaseToken
-	Engine             *EngineWrapper
-	Voter              *voter.Voter
-	ArbiusRouter       ipfs.ArbiusRouterContract
-	BulkTasks          *bulktasks.BulkTasks
-	Eth                *erc20.TokenERC20
-	OwnerAccount       *account.Account
-	SenderOwnerAccount *account.Account
-	Clients            []*client.Client
-	Config             *config.AppConfig
-	Logger             zerolog.Logger
-	TaskStorage        *storage.TaskStorageDB
-	AutoMineParams     *SubmitTaskParams
-	Paraswap           *paraswap.ParaswapManager
-	OracleProvider     IPriceOracle
-	LeverOracle        ILeverOracle
-	TaskTracker        *metrics.TaskTracker
-	IpfsOracle         ipfs.OracleClient
+	Basetoken    *basetoken.BaseToken
+	Engine       *EngineWrapper
+	Voter        *voter.Voter
+	ArbiusRouter ipfs.ArbiusRouterContract
+	BulkTasks    *bulktasks.BulkTasks
+	//Eth            *erc20.TokenERC20
+	OwnerAccount   *account.Account
+	Config         *config.AppConfig
+	Logger         zerolog.Logger
+	TaskStorage    *storage.TaskStorageDB
+	AutoMineParams *SubmitTaskParams
+	Paraswap       *paraswap.ParaswapManager
+	OracleProvider IPriceOracle
+	LeverOracle    ILeverOracle
+	TaskTracker    *metrics.TaskTracker
+	IpfsOracle     ipfs.OracleClient
+	Validators     *Validators
 }
 
-func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients []*client.Client, sql *sql.DB, logger zerolog.Logger, cfg *config.AppConfig, ipfsOracle ipfs.OracleClient, appContext, appQuit context.Context) (context.Context, *Services, error) {
+func NewApplicationContext(rpc *client.Client, sql *sql.DB, logger zerolog.Logger, cfg *config.AppConfig, ipfsOracle ipfs.OracleClient, appContext, appQuit context.Context) (context.Context, *Services, error) {
 
 	ownerAccount, err := account.NewAccount(cfg.Blockchain.PrivateKey, rpc, appContext, cfg.Blockchain.CacheNonce, logger)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	senderOwnerAccount, err := account.NewAccount(cfg.Blockchain.PrivateKey, senderrpc, appContext, cfg.Blockchain.CacheNonce, logger)
-	if err != nil {
-		return nil, nil, err
-	}
-
 	// TODO: need a cleaner way to handle this nonce update on first use - maybe move to NewAccount
-	senderOwnerAccount.UpdateNonce()
+	ownerAccount.UpdateNonce()
 
-	baseTokenContract, err := basetoken.NewBaseToken(cfg.BaseConfig.BaseTokenAddress, senderrpc.Client)
+	baseTokenContract, err := basetoken.NewBaseToken(cfg.BaseConfig.BaseTokenAddress, rpc.Client)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -106,7 +100,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 
 	if cfg.BaseConfig.TestnetType > 0 {
 		// TODO: this is a hack to check if the contract exists on testnet
-		err := checkContractExists(cfg.BaseConfig.BulkTasksAddress, senderrpc.Client)
+		err := checkContractExists(cfg.BaseConfig.BulkTasksAddress, rpc.Client)
 
 		if err != nil {
 
@@ -128,14 +122,14 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 
 				logger.Info().Msg("deploying BulkTasks contract")
 
-				bulkTasksContractAddress, tx, bulkTasksContract, err = bulktasks.DeployBulkTasks(opts, senderrpc.Client, cfg.BaseConfig.BaseTokenAddress, cfg.BaseConfig.EngineAddress)
+				bulkTasksContractAddress, tx, bulkTasksContract, err = bulktasks.DeployBulkTasks(opts, rpc.Client, cfg.BaseConfig.BaseTokenAddress, cfg.BaseConfig.EngineAddress)
 				if err != nil {
 					return nil, nil, err
 				}
 
 				logger.Info().Msg("waiting for BulkTasks contract deployment")
 
-				receipt, err := bind.WaitMined(ctxTimeout, senderrpc.Client, tx)
+				receipt, err := bind.WaitMined(ctxTimeout, rpc.Client, tx)
 				if err != nil {
 					return nil, nil, err
 				}
@@ -155,7 +149,7 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 	}
 
 	if bulkTasksContract == nil {
-		bulkTasksContract, err = bulktasks.NewBulkTasks(cfg.BaseConfig.BulkTasksAddress, senderrpc.Client)
+		bulkTasksContract, err = bulktasks.NewBulkTasks(cfg.BaseConfig.BulkTasksAddress, rpc.Client)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -179,9 +173,25 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 
 	engineWrapper := NewEngineWrapper(engineContract, voterContract, logger)
 
+	ratelimitEth, err := engineWrapper.Engine.SolutionRateLimit(nil)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	ratelimit := eth.ToFloat(ratelimitEth)
+
+	var validators Validators
+	for _, pk := range cfg.ValidatorConfig.PrivateKeys {
+		va, err := NewValidator(cfg, engineWrapper, baseTokenContract, logger, appContext, pk, ownerAccount.Client, ratelimit)
+		if err != nil {
+			return nil, nil, err
+		}
+		validators.validators = append(validators.validators, va)
+	}
+
 	// required for auto sell, and optionally for price oracle
 	paraswapManager := paraswap.NewParaswapManager(
-		senderOwnerAccount,
+		ownerAccount,
 		baseTokenContract,
 		cfg.BaseConfig.BaseToken,
 		logger)
@@ -226,24 +236,23 @@ func NewApplicationContext(rpc *client.Client, senderrpc *client.Client, clients
 	}
 
 	services := &Services{
-		Basetoken:          baseTokenContract,
-		Engine:             engineWrapper,
-		Voter:              voterContract,
-		BulkTasks:          bulkTasksContract,
-		Eth:                eth,
-		OwnerAccount:       ownerAccount,
-		SenderOwnerAccount: senderOwnerAccount,
-		Clients:            clients,
-		Config:             cfg,
-		Logger:             logger,
-		TaskStorage:        ts,
-		AutoMineParams:     st,
-		Paraswap:           paraswapManager,
-		OracleProvider:     oracleProvider,
-		LeverOracle:        leverOracle,
-		TaskTracker:        taskMetrics,
-		IpfsOracle:         ipfsOracle,
-		ArbiusRouter:       arbiusRouter,
+		Basetoken: baseTokenContract,
+		Engine:    engineWrapper,
+		Voter:     voterContract,
+		BulkTasks: bulkTasksContract,
+		//Eth:            eth,
+		OwnerAccount:   ownerAccount,
+		Config:         cfg,
+		Logger:         logger,
+		TaskStorage:    ts,
+		AutoMineParams: st,
+		Paraswap:       paraswapManager,
+		OracleProvider: oracleProvider,
+		LeverOracle:    leverOracle,
+		TaskTracker:    taskMetrics,
+		IpfsOracle:     ipfsOracle,
+		ArbiusRouter:   arbiusRouter,
+		Validators:     &validators,
 	}
 
 	ctx := context.WithValue(appContext, servicesKey{}, services)

@@ -444,7 +444,7 @@ func getBatchPricingInfo(ctx context.Context) error {
 	}
 
 	// convert basefee to gwei
-	basefeeinEth := services.Eth.ToFloat(basefee)
+	basefeeinEth := Eth.ToFloat(basefee)
 
 	//rewardInAIUS := tm.cumulativeGasUsed.rewardEMA.Average()
 	reward, err := services.Engine.Engine.GetReward(nil)
@@ -1178,14 +1178,14 @@ func fundTaskWallets(ctx context.Context, amount float64, minbal float64) {
 	}
 
 	// convert ETH balance to float
-	balAsFloat := services.Eth.ToFloat(ethBalance)
+	balAsFloat := Eth.ToFloat(ethBalance)
 
 	if balAsFloat < amount*float64(len(services.Config.BatchTasks.PrivateKeys)) {
 		services.Logger.Err(err).Str("balance", fmt.Sprintf("%.4g", balAsFloat)).Msg("not enough eth balance to satisfy transfer")
 		return
 	}
 
-	amountAsBig := services.Eth.FromFloat(amount)
+	amountAsBig := Eth.FromFloat(amount)
 
 	// manually update the gas base fee
 	/*err = services.SenderOwnerAccount.Client.UpdateCurrentBasefee()
@@ -1196,7 +1196,7 @@ func fundTaskWallets(ctx context.Context, amount float64, minbal float64) {
 
 	for _, pk := range services.Config.BatchTasks.PrivateKeys {
 
-		account, err := account.NewAccount(pk, services.SenderOwnerAccount.Client, ctx, services.Config.Blockchain.CacheNonce, services.Logger)
+		account, err := account.NewAccount(pk, services.OwnerAccount.Client, ctx, services.Config.Blockchain.CacheNonce, services.Logger)
 		if err != nil {
 			services.Logger.Error().Err(err).Msg("error in new account")
 			return
@@ -1208,14 +1208,14 @@ func fundTaskWallets(ctx context.Context, amount float64, minbal float64) {
 		}
 
 		// convert ETH balance to float
-		balAsFloat := services.Eth.ToFloat(accountBal)
+		balAsFloat := Eth.ToFloat(accountBal)
 
 		if balAsFloat >= minbal {
 			services.Logger.Info().Msgf("%s balance of %.4g eth is at or greater than minbal %.4g eth", account.Address.String(), balAsFloat, minbal)
 			continue
 		}
 
-		services.SenderOwnerAccount.UpdateNonce()
+		services.OwnerAccount.UpdateNonce()
 		if err != nil {
 			services.Logger.Error().Err(err).Msg("error updating nonce")
 			return
@@ -1223,12 +1223,12 @@ func fundTaskWallets(ctx context.Context, amount float64, minbal float64) {
 
 		services.Logger.Info().Msgf("💼 transfering %.4g eth to address %s (with balance of %.4g eth)", amount, account.Address.String(), balAsFloat)
 
-		tx, err := services.SenderOwnerAccount.SendEther(nil, account.Address, amountAsBig)
+		tx, err := services.OwnerAccount.SendEther(nil, account.Address, amountAsBig)
 		if err != nil {
 			services.Logger.Error().Err(err).Msg("error sending transfer")
 			return
 		}
-		_, success, _, err := services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+		_, success, _, err := services.OwnerAccount.WaitForConfirmedTx(tx)
 
 		if err != nil {
 			services.Logger.Error().Err(err).Msg("error waiting for transfer")
@@ -1259,8 +1259,8 @@ func RunAutoTaskSubmit(appCtx context.Context, services *Services, interval time
 		return
 	}
 
-	feeFloat := services.Eth.ToFloat(autoParams.Fee) // Use ToFloat
-	feeFormatted := fmt.Sprintf("%.6f", feeFloat)    // Format to 6 decimal places
+	feeFloat := Eth.ToFloat(autoParams.Fee)       // Use ToFloat
+	feeFormatted := fmt.Sprintf("%.6f", feeFloat) // Format to 6 decimal places
 
 	logger.Info().
 		Str("sender", ownerAccount.Address.Hex()).

@@ -94,18 +94,18 @@ type BatchSolution struct {
 }
 
 type BatchTransactionManager struct {
-	services                      *Services
-	cumulativeGasUsed             *GasMetrics // tracks how much gas we've spent
-	signalCommitmentEvent         common.Hash
-	solutionSubmittedEvent        common.Hash
-	taskSubmittedEvent            common.Hash
-	batchMode                     int // 0 - single commitment/soution cycle with no batching, 1 - normal batch system, 2 - do not use this mode
-	commitments                   [][32]byte
-	solutions                     []BatchSolution
-	encodedTaskData               []byte
-	taskAccounts                  []*account.Account
-	validatorIndex                int
-	validators                    Validators
+	services               *Services
+	cumulativeGasUsed      *GasMetrics // tracks how much gas we've spent
+	signalCommitmentEvent  common.Hash
+	solutionSubmittedEvent common.Hash
+	taskSubmittedEvent     common.Hash
+	batchMode              int // 0 - single commitment/soution cycle with no batching, 1 - normal batch system, 2 - do not use this mode
+	commitments            [][32]byte
+	solutions              []BatchSolution
+	encodedTaskData        []byte
+	taskAccounts           []*account.Account
+	//validatorIndex                int
+	//validators                    Validators
 	minClaimSolutionTime          uint64
 	minContestationVotePeriodTime uint64
 	cache                         *Cache
@@ -114,20 +114,86 @@ type BatchTransactionManager struct {
 	sync.Mutex
 }
 
-type Validators []*Validator
+func NewBatchTransactionManager(services *Services, ctx context.Context, wg *sync.WaitGroup) (*BatchTransactionManager, error) {
 
-func (vl Validators) GetValidatorByAddress(addr common.Address) *Validator {
-	for _, v := range vl {
-		if v.ValidatorAddress() == addr {
-			return v
-		}
+	// TODO: move these out of here!
+	engineAbi, err := engine.EngineMetaData.GetAbi()
+	if err != nil {
+		panic("error getting engine abi")
 	}
-	return nil
+
+	// Get the event SolutionClaimed topic ID
+	signalCommitmentEvent := engineAbi.Events["SignalCommitment"].ID
+	solutionSubmittedEvent := engineAbi.Events["SolutionSubmitted"].ID
+	taskSubmittedEvent := engineAbi.Events["TaskSubmitted"].ID
+
+	minClaimSolutionTimeBig, err := services.Engine.Engine.MinClaimSolutionTime(nil)
+	if err != nil {
+		return nil, err
+	}
+
+	//fmt.Println("minClaimSolutionTimeBig", minClaimSolutionTimeBig.String())
+
+	minContestationVotePeriodTimeBig, err := services.Engine.Engine.MinContestationVotePeriodTime(nil)
+	if err != nil {
+		return nil, err
+	}
+
+	sampleRate, err := time.ParseDuration(services.Config.Miner.MetricsSampleRate)
+	if err != nil {
+		return nil, err
+	}
+
+	cumulativeGasUsed := NewMetricsManager(ctx, sampleRate)
+
+	var encodedData []byte
+
+	encodedData, err = engineAbi.Pack("submitTask", services.AutoMineParams.Version, services.AutoMineParams.Owner, services.AutoMineParams.Model, services.AutoMineParams.Fee, services.AutoMineParams.Input)
+	if err != nil {
+		return nil, err
+	}
+
+	var accounts []*account.Account
+
+	if len(services.Config.BatchTasks.PrivateKeys) > 0 {
+
+		for _, pk := range services.Config.BatchTasks.PrivateKeys {
+
+			account, err := account.NewAccount(pk, services.OwnerAccount.Client, ctx, services.Config.Blockchain.CacheNonce, services.Logger)
+			if err != nil {
+				return nil, err
+			}
+			account.UpdateNonce()
+
+			accounts = append(accounts, account)
+		}
+	} else {
+		accounts = append(accounts, services.OwnerAccount)
+	}
+
+	cache := NewCache(time.Duration(120) * time.Second)
+
+	btm := &BatchTransactionManager{
+		services:               services,
+		cache:                  cache,
+		cumulativeGasUsed:      cumulativeGasUsed,
+		signalCommitmentEvent:  signalCommitmentEvent,
+		solutionSubmittedEvent: solutionSubmittedEvent,
+		taskSubmittedEvent:     taskSubmittedEvent,
+		batchMode:              services.Config.Miner.BatchMode,
+		encodedTaskData:        encodedData,
+		taskAccounts:           accounts,
+		wg:                     wg,
+		//validatorIndex:                0,
+		//		validators:                    validators,
+		minClaimSolutionTime:          minClaimSolutionTimeBig.Uint64(),
+		minContestationVotePeriodTime: minContestationVotePeriodTimeBig.Uint64(),
+	}
+
+	return btm, nil
 }
 
-/*
-implementation for the metrics interface
-*/
+// implementation for the metrics interface (WIP/TODO fill out)
 func (tm *BatchTransactionManager) GetCurrentReward() float64 {
 	reward, found := tm.cache.Get("reward")
 
@@ -155,7 +221,7 @@ func (tm *BatchTransactionManager) GetCommitments() int64 {
 
 func (tm *BatchTransactionManager) GetValidatorInfo() string {
 	s := ""
-	for _, v := range tm.validators {
+	for _, v := range tm.services.Validators.validators {
 		s += v.ValidatorAddress().String() + ": 100Aius\n"
 	}
 
@@ -178,7 +244,7 @@ func (tm *BatchTransactionManager) calcProfit(basefee *big.Int) (float64, float6
 		}
 	}
 
-	basefeeinEth := tm.services.Eth.ToFloat(basefee)
+	basefeeinEth := Eth.ToFloat(basefee)
 	basefeeinGwei := basefeeinEth * 1000000000
 
 	// Use the PriceOracle interface to get prices
@@ -292,7 +358,7 @@ func (tm *BatchTransactionManager) batchClaimPoller(appQuit context.Context, wg 
 							continue
 						}
 						// convert basefee to gwei
-						basefeeinEth := tm.services.Eth.ToFloat(basefeeBig)
+						basefeeinEth := Eth.ToFloat(basefeeBig)
 						basefeeinGwei := basefeeinEth * 1000000000
 
 						if basefeeinGwei > tm.services.Config.Claim.MaxGas {
@@ -301,7 +367,7 @@ func (tm *BatchTransactionManager) batchClaimPoller(appQuit context.Context, wg 
 						}
 					}
 
-					tm.processBulkClaim(tm.services.SenderOwnerAccount, claims, tm.services.Config.Claim.MinClaims, claimBatchSize)
+					tm.processBulkClaim(tm.services.OwnerAccount, claims, tm.services.Config.Claim.MinClaims, claimBatchSize)
 				}
 			}
 		}
@@ -973,7 +1039,7 @@ func (tm *BatchTransactionManager) processBatch(
 
 		var validator *Validator = nil
 		validatorHighestMin := int64(-1)
-		for _, v := range tm.validators {
+		for _, v := range tm.services.Validators.validators {
 			lastSubmission, maxSols, err := v.MaxSubmissions(blockTime)
 			if err != nil {
 				tm.services.Logger.Error().Err(err).Str("validator", v.ValidatorAddress().String()).Msg("failed to get max submissions for validator, skipping")
@@ -1514,7 +1580,7 @@ func (tm *BatchTransactionManager) processBulkClaim(account *account.Account, ta
 
 	// Get the CooldownTime for each validator we might be claiming for
 	var validatorCooldownTimesMap = make(map[common.Address]uint64)
-	for _, v := range tm.validators {
+	for _, v := range tm.services.Validators.validators {
 		cooldownTime, err := v.CooldownTime(tm.minClaimSolutionTime, tm.minContestationVotePeriodTime)
 		if err != nil {
 			tm.services.Logger.Error().Err(err).Msg("error calling MinContestationVotePeriodTime")
@@ -1693,7 +1759,7 @@ func (tm *BatchTransactionManager) BatchCommitments() error {
 
 	tm.services.Logger.Info().Msgf("bulk submitting %d commitment(s)", len(copyCommitments))
 
-	tx, err := tm.services.SenderOwnerAccount.NonceManagerWrapper(5, 425, 1.5, false, func(opts *bind.TransactOpts) (interface{}, error) {
+	tx, err := tm.services.OwnerAccount.NonceManagerWrapper(5, 425, 1.5, false, func(opts *bind.TransactOpts) (interface{}, error) {
 		opts.GasLimit = uint64(27_900*len(copyCommitments) + 1_500_000)
 		return tm.services.BulkTasks.BulkSignalCommitment(opts, copyCommitments)
 	})
@@ -1703,7 +1769,7 @@ func (tm *BatchTransactionManager) BatchCommitments() error {
 		return err
 	}
 
-	receipt, success, _, _ := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+	receipt, success, _, _ := tm.services.OwnerAccount.WaitForConfirmedTx(tx)
 
 	if receipt != nil {
 		txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
@@ -1758,7 +1824,7 @@ func (tm *BatchTransactionManager) BatchSolutions() error {
 
 	if len(solutionsToSubmit) > 0 {
 
-		tx, err := tm.services.SenderOwnerAccount.NonceManagerWrapper(5, 425, 1.5, false, func(opts *bind.TransactOpts) (interface{}, error) {
+		tx, err := tm.services.OwnerAccount.NonceManagerWrapper(5, 425, 1.5, false, func(opts *bind.TransactOpts) (interface{}, error) {
 			opts.GasLimit = 0
 			return tm.services.Engine.Engine.BulkSubmitSolution(opts, tasksToSubmit, solutionsToSubmit)
 		})
@@ -1768,7 +1834,7 @@ func (tm *BatchTransactionManager) BatchSolutions() error {
 			return err
 		}
 
-		receipt, success, _, _ := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+		receipt, success, _, _ := tm.services.OwnerAccount.WaitForConfirmedTx(tx)
 
 		if receipt != nil {
 			txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
@@ -1873,7 +1939,7 @@ func (tm *BatchTransactionManager) singleSignalCommitment(taskId task.TaskId, co
 
 	start := time.Now()
 
-	tx, err := tm.services.SenderOwnerAccount.NonceManagerWrapper(5, 425, 1.5, false, func(opts *bind.TransactOpts) (interface{}, error) {
+	tx, err := tm.services.OwnerAccount.NonceManagerWrapper(5, 425, 1.5, false, func(opts *bind.TransactOpts) (interface{}, error) {
 		opts.GasLimit = signalCommitmentGasPerItem * 2
 
 		return tm.services.Engine.Engine.SignalCommitment(opts, commitment)
@@ -1888,7 +1954,7 @@ func (tm *BatchTransactionManager) singleSignalCommitment(taskId task.TaskId, co
 	tm.services.Logger.Info().Str("taskid", taskIdStr).Uint64("nonce", tx.Nonce()).Str("txhash", tx.Hash().String()).Str("elapsed", elapsed.String()).Msg("signal commitment tx sent")
 
 	go func() {
-		receipt, success, _, err := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+		receipt, success, _, err := tm.services.OwnerAccount.WaitForConfirmedTx(tx)
 		if err != nil {
 			tm.services.Logger.Error().Err(err).Msg("error waiting for commitment confirmation")
 			return
@@ -1930,7 +1996,7 @@ func (tm *BatchTransactionManager) singleSignalCommitment(taskId task.TaskId, co
 
 func (tm *BatchTransactionManager) singleSubmitSolution(validator common.Address, taskId task.TaskId, cid []byte) error {
 
-	val := tm.validators.GetValidatorByAddress(validator)
+	val := tm.services.Validators.GetValidatorByAddress(validator)
 	if val == nil {
 		return errors.New("validator not found")
 	}
@@ -1971,7 +2037,7 @@ func (tm *BatchTransactionManager) singleSubmitSolution(validator common.Address
 
 			if res.Blocktime > 0 {
 
-				if tm.IsAddressValidator(res.Validator) {
+				if tm.services.Validators.IsAddressValidator(res.Validator) {
 					tm.services.TaskTracker.TaskSucceeded()
 				} else {
 					tm.services.TaskTracker.TaskFailed()
@@ -1993,7 +2059,7 @@ func (tm *BatchTransactionManager) singleSubmitSolution(validator common.Address
 
 		}()
 
-		receipt, success, _, _ := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+		receipt, success, _, _ := tm.services.OwnerAccount.WaitForConfirmedTx(tx)
 
 		if receipt != nil {
 			txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
@@ -2019,40 +2085,8 @@ func (tm *BatchTransactionManager) singleSubmitSolution(validator common.Address
 	return nil
 }
 
-// func (tm *BatchTransactionManagerV3) ValidatorDeposit(depositAmount *big.Int) (*types.Transaction, error) {
-// 	return tm.services.SenderOwnerAccount.NonceManagerWrapper(3, 425, 1.5, true, func(opts *bind.TransactOpts) (interface{}, error) {
-// 		return tm.services.Engine.Engine.ValidatorDeposit(opts, tm.ValidatorAddress(), depositAmount)
-// 	})
-// }
-
-func (tm *BatchTransactionManager) IsAddressValidator(address common.Address) bool {
-	tm.Lock()
-	defer tm.Unlock()
-
-	for _, v := range tm.validators {
-		if v.ValidatorAddress() == address {
-			return true
-		}
-	}
-
-	return false
-}
-
-func (tm *BatchTransactionManager) GetNextValidatorAddress() common.Address {
-	tm.Lock()
-	defer tm.Unlock()
-
-	validator := tm.validators[tm.validatorIndex]
-	tm.validatorIndex++
-	if tm.validatorIndex >= len(tm.validators) {
-		tm.validatorIndex = 0
-	}
-
-	return validator.ValidatorAddress()
-}
-
 func (tm *BatchTransactionManager) BulkClaim(taskIds [][32]byte) (*types.Receipt, error) {
-	return tm.BulkClaimWithAccount(tm.services.SenderOwnerAccount, taskIds)
+	return tm.BulkClaimWithAccount(tm.services.OwnerAccount, taskIds)
 }
 
 func (tm *BatchTransactionManager) BulkClaimWithAccount(account *account.Account, taskIds [][32]byte) (*types.Receipt, error) {
@@ -2202,68 +2236,8 @@ func (tm *BatchTransactionManager) BulkTasks(account *account.Account, count int
 		return receipt, nil
 	} // End sendTx inner function
 
-	// --- Multi-client logic ---
-	// This part remains largely the same, calling the refactored sendTx
-	type clientSendResult struct {
-		Receipt *types.Receipt
-		Err     error
-	}
-
-	if len(tm.services.Clients) > 0 {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		results := make(chan clientSendResult, len(tm.services.Clients))
-
-		for _, c := range tm.services.Clients {
-			go func(client *client.Client) {
-				receipt, err := sendTx(ctx, client, nil)
-				select {
-				case results <- clientSendResult{receipt, err}:
-				case <-ctx.Done():
-				}
-			}(c)
-		}
-
-		var firstError error
-		var firstReceipt *types.Receipt
-		processedCount := 0
-
-		for i := 0; i < len(tm.services.Clients); i++ {
-			result := <-results
-			processedCount++
-			if result.Err == nil {
-				if result.Receipt != nil { // Mined successfully by this client
-					cancel()    // Stop others
-					go func() { // Drain channel
-						for j := processedCount; j < len(tm.services.Clients); j++ {
-							<-results
-						}
-					}()
-					return result.Receipt, nil
-				} else if firstReceipt == nil {
-					// Store potential nil receipt from estimation or revert if it's the first non-error
-					firstReceipt = result.Receipt
-				}
-			} else { // Error occurred
-				tm.services.Logger.Error().Err(result.Err).Msg("error sending transaction via one client")
-				if firstError == nil {
-					firstError = result.Err
-				}
-			}
-		}
-
-		// If loop completes:
-		if firstReceipt != nil || (firstError == nil && firstReceipt == nil) {
-			return firstReceipt, nil
-		} else if firstError != nil {
-			return nil, fmt.Errorf("all clients failed to send transaction: %w", firstError)
-		} else {
-			return nil, errors.New("multi-client logic failed without specific error or success")
-		}
-	} else {
-		receipt, err := sendTx(context.Background(), nil, nil)
-		return receipt, err
-	}
+	receipt, err := sendTx(context.Background(), nil, nil)
+	return receipt, err
 }
 
 func (m *BatchTransactionManager) ProcessValidatorsStakes() {
@@ -2275,14 +2249,14 @@ func (m *BatchTransactionManager) ProcessValidatorsStakes() {
 		return
 	}
 
-	balAsFloat := m.services.Eth.ToFloat(bal)
+	balAsFloat := Eth.ToFloat(bal)
 
 	// check if the Ether balance is less than configured threshold
 	if balAsFloat < m.services.Config.ValidatorConfig.EthLowThreshold {
 		m.services.Logger.Warn().Float64("threshold", m.services.Config.ValidatorConfig.EthLowThreshold).Msg("⚠️ balance is below threshold")
 	}
 
-	for _, v := range m.validators {
+	for _, v := range m.services.Validators.validators {
 
 		// get the baseTokenBalance on owner account as balance may change between checks
 		baseTokenBalance, err := m.services.Basetoken.BalanceOf(nil, m.services.OwnerAccount.Address)
@@ -2298,22 +2272,6 @@ func (m *BatchTransactionManager) ProcessValidatorsStakes() {
 		v.ProcessValidatorStake(baseTokenBalance)
 	}
 
-}
-
-func (m *BatchTransactionManager) InitiateValidatorWithdraw(validator common.Address, amount float64) error {
-	val := m.validators.GetValidatorByAddress(validator)
-	if val != nil {
-		return val.InitiateValidatorWithdraw(amount)
-	}
-	return errors.New("validator not found")
-}
-
-func (m *BatchTransactionManager) ValidatorWithdraw(validator common.Address) error {
-	val := m.validators.GetValidatorByAddress(validator)
-	if val != nil {
-		return val.ValidatorWithdraw()
-	}
-	return errors.New("validator not found")
 }
 
 func (m *BatchTransactionManager) TotalStaked(validator common.Address) error {
@@ -2354,30 +2312,6 @@ func (m *BatchTransactionManager) TotalStaked(validator common.Address) error {
 	valAsFromat := m.services.Config.BaseConfig.BaseToken.FormatFixed(totalStaked)
 	m.services.Logger.Info().Msgf("Total staked for validator %s: %s", validator.String(), valAsFromat)
 	return nil
-}
-
-func (m *BatchTransactionManager) CancelValidatorWithdraw(validator common.Address, count int64) error {
-	val := m.validators.GetValidatorByAddress(validator)
-	if val != nil {
-		return val.CancelValidatorWithdraw(count)
-	}
-	return errors.New("validator not found")
-}
-
-func (m *BatchTransactionManager) VoteOnContestation(validator common.Address, taskId task.TaskId, yeah bool) error {
-	val := m.validators.GetValidatorByAddress(validator)
-	if val != nil {
-		return val.VoteOnContestation(taskId, yeah)
-	}
-	return errors.New("validator not found")
-}
-
-func (m *BatchTransactionManager) SubmitContestation(validator common.Address, taskId task.TaskId) error {
-	val := m.validators.GetValidatorByAddress(validator)
-	if val != nil {
-		return val.SubmitContestation(taskId)
-	}
-	return errors.New("validator not found")
 }
 
 func (tm *BatchTransactionManager) Start(appQuit context.Context) error {
@@ -2436,101 +2370,6 @@ func (tm *BatchTransactionManager) Start(appQuit context.Context) error {
 	}
 
 	return nil
-}
-
-func NewBatchTransactionManager(services *Services, ctx context.Context, wg *sync.WaitGroup) (*BatchTransactionManager, error) {
-
-	// TODO: move these out of here!
-	engineAbi, err := engine.EngineMetaData.GetAbi()
-	if err != nil {
-		panic("error getting engine abi")
-	}
-
-	// Get the event SolutionClaimed topic ID
-	signalCommitmentEvent := engineAbi.Events["SignalCommitment"].ID
-	solutionSubmittedEvent := engineAbi.Events["SolutionSubmitted"].ID
-	taskSubmittedEvent := engineAbi.Events["TaskSubmitted"].ID
-
-	minClaimSolutionTimeBig, err := services.Engine.Engine.MinClaimSolutionTime(nil)
-	if err != nil {
-		return nil, err
-	}
-
-	//fmt.Println("minClaimSolutionTimeBig", minClaimSolutionTimeBig.String())
-
-	minContestationVotePeriodTimeBig, err := services.Engine.Engine.MinContestationVotePeriodTime(nil)
-	if err != nil {
-		return nil, err
-	}
-
-	sampleRate, err := time.ParseDuration(services.Config.Miner.MetricsSampleRate)
-	if err != nil {
-		return nil, err
-	}
-
-	cumulativeGasUsed := NewMetricsManager(ctx, sampleRate)
-
-	var encodedData []byte
-
-	encodedData, err = engineAbi.Pack("submitTask", services.AutoMineParams.Version, services.AutoMineParams.Owner, services.AutoMineParams.Model, services.AutoMineParams.Fee, services.AutoMineParams.Input)
-	if err != nil {
-		return nil, err
-	}
-
-	var accounts []*account.Account
-
-	if len(services.Config.BatchTasks.PrivateKeys) > 0 {
-
-		for _, pk := range services.Config.BatchTasks.PrivateKeys {
-
-			account, err := account.NewAccount(pk, services.SenderOwnerAccount.Client, ctx, services.Config.Blockchain.CacheNonce, services.Logger)
-			if err != nil {
-				return nil, err
-			}
-			account.UpdateNonce()
-
-			accounts = append(accounts, account)
-		}
-	} else {
-		accounts = append(accounts, services.SenderOwnerAccount)
-	}
-
-	ratelimitEth, err := services.Engine.Engine.SolutionRateLimit(nil)
-	if err != nil {
-		return nil, err
-	}
-
-	ratelimit := services.Eth.ToFloat(ratelimitEth)
-
-	var validators []*Validator
-	for _, pk := range services.Config.ValidatorConfig.PrivateKeys {
-		va, err := NewValidator(services, ctx, pk, services.SenderOwnerAccount.Client, ratelimit)
-		if err != nil {
-			return nil, err
-		}
-		validators = append(validators, va)
-	}
-
-	cache := NewCache(time.Duration(120) * time.Second)
-
-	btm := &BatchTransactionManager{
-		services:                      services,
-		cache:                         cache,
-		cumulativeGasUsed:             cumulativeGasUsed,
-		signalCommitmentEvent:         signalCommitmentEvent,
-		solutionSubmittedEvent:        solutionSubmittedEvent,
-		taskSubmittedEvent:            taskSubmittedEvent,
-		batchMode:                     services.Config.Miner.BatchMode,
-		encodedTaskData:               encodedData,
-		taskAccounts:                  accounts,
-		wg:                            wg,
-		validatorIndex:                0,
-		validators:                    validators,
-		minClaimSolutionTime:          minClaimSolutionTimeBig.Uint64(),
-		minContestationVotePeriodTime: minContestationVotePeriodTimeBig.Uint64(),
-	}
-
-	return btm, nil
 }
 
 // Add after the existing metrics interface implementation:
@@ -2786,7 +2625,7 @@ func (tm *BatchTransactionManager) startIpfsClaimProcessor(appQuit context.Conte
 			return
 		case <-ticker.C:
 			// TODO: make this use task accounts instead of sender account
-			if err := tm.processIpfsClaimsWithAccount(tm.services.SenderOwnerAccount, appQuit); err != nil {
+			if err := tm.processIpfsClaimsWithAccount(tm.services.OwnerAccount, appQuit); err != nil {
 				if err != context.Canceled {
 					tm.services.Logger.Error().Err(err).Msg("error processing ipfs claims")
 				}

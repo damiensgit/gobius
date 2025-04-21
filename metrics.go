@@ -139,7 +139,7 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration, appQuit context.C
 
 			// convert basefee to gwei
 
-			basefeeingwei := gm.services.Eth.ToFloat(new(big.Int).Mul(basefee, big.NewInt(1e9)))
+			basefeeingwei := Eth.ToFloat(new(big.Int).Mul(basefee, big.NewInt(1e9)))
 
 			if basefeeingwei < 10 {
 				gm.AddBasefee(basefeeingwei)
@@ -269,7 +269,7 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration, appQuit context.C
 							continue
 						}
 						// convert ETH balance to float
-						balAsFloat := gm.services.Eth.ToFloat(ethBalance)
+						balAsFloat := Eth.ToFloat(ethBalance)
 
 						// we want to hit this target so only sell enough to get us there
 						if balAsFloat < gm.services.Config.ValidatorConfig.SellEthBalanceTarget {
@@ -354,7 +354,7 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration, appQuit context.C
 					if tx != nil {
 						gm.services.Logger.Info().Msg("approving AIUS to be sold")
 
-						_, success, _, _ := gm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+						_, success, _, _ := gm.services.OwnerAccount.WaitForConfirmedTx(tx)
 
 						if !success {
 							continue
@@ -370,7 +370,7 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration, appQuit context.C
 						continue
 					}
 
-					_, success, _, _ := gm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+					_, success, _, _ := gm.services.OwnerAccount.WaitForConfirmedTx(tx)
 					if !success {
 						continue
 					}
@@ -395,7 +395,7 @@ func (tm *GasMetrics) transferBasetokens(to common.Address, amount float64) bool
 
 	amountAsBig := tm.services.Config.BaseConfig.BaseToken.FromFloat(amount)
 
-	tx, err := tm.services.SenderOwnerAccount.NonceManagerWrapper(5, 425, 1.5, true, func(opts *bind.TransactOpts) (interface{}, error) {
+	tx, err := tm.services.OwnerAccount.NonceManagerWrapper(5, 425, 1.5, true, func(opts *bind.TransactOpts) (interface{}, error) {
 		opts.GasLimit = 0
 		return tm.services.Basetoken.Transfer(opts, to, amountAsBig)
 	})
@@ -405,7 +405,7 @@ func (tm *GasMetrics) transferBasetokens(to common.Address, amount float64) bool
 		return false
 	}
 
-	_, success, _, err := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+	_, success, _, err := tm.services.OwnerAccount.WaitForConfirmedTx(tx)
 
 	if err != nil {
 		tm.services.Logger.Error().Err(err).Msg("error waiting for transfer")

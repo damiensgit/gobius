@@ -5,12 +5,9 @@ import (
 	"context"
 	"database/sql"
 	"embed"
-	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
-	enginewrapper "gobius/bindings/engine"
 	cmn "gobius/common"
 	"runtime"
 	"runtime/pprof"
@@ -33,7 +30,6 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum"
-	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/pressly/goose/v3"
@@ -68,13 +64,13 @@ const (
 var minerEngineVersion = big.NewInt(5)
 
 // Types section
-type Miner struct {
-	services         *Services
-	validator        IValidator
-	engineAbi        *abi.ABI
-	submitMethod     *abi.Method
-	bulkSubmitMethod *abi.Method
-}
+// type Miner struct {
+// 	services         *Services
+// 	validator        IValidator
+// 	engineAbi        *abi.ABI
+// 	submitMethod     *abi.Method
+// 	bulkSubmitMethod *abi.Method
+// }
 
 // zerologAdapter adapts a zerolog.Logger to satisfy goose.Logger interface
 type zerologAdapter struct {
@@ -135,248 +131,6 @@ func setupCloseHandler(logger *zerolog.Logger) (ctx context.Context, cancel cont
 	return ctx, cancel
 }
 
-// connects miner account to the engine contract
-func NewMinerEngine(services *Services, validator IValidator, wg *sync.WaitGroup) (*Miner, error) {
-	// Get the parsed ABI once at startup
-	parsed, err := enginewrapper.EngineMetaData.GetAbi()
-	if err != nil {
-		return nil, fmt.Errorf("failed to get engine ABI: %w", err)
-	}
-
-	// Get the submitTask method once at startup
-	submitMethod, exists := parsed.Methods["submitTask"]
-	if !exists {
-		return nil, fmt.Errorf("submitTask method not found in ABI")
-	}
-
-	// Get the bulkSubmitTask method once at startup
-	bulkSubmitMethod, exists := parsed.Methods["bulkSubmitTask"]
-	if !exists {
-		return nil, fmt.Errorf("bulkSubmitTask method not found in ABI")
-	}
-
-	miner := &Miner{
-		services:         services,
-		validator:        validator,
-		engineAbi:        parsed,
-		submitMethod:     &submitMethod,
-		bulkSubmitMethod: &bulkSubmitMethod,
-	}
-
-	return miner, nil
-}
-
-// DecodeTaskTransaction decodes either a submitTask or bulkSubmitTask transaction
-// and returns the relevant parameters.
-func (m *Miner) DecodeTaskTransaction(tx *types.Transaction) (*SubmitTaskParams, error) {
-	// First verify this is a transaction to the Engine contract
-	if tx.To() == nil || *tx.To() != m.services.Config.BaseConfig.EngineAddress {
-		return nil, fmt.Errorf("transaction not sent to Engine contract")
-	}
-
-	// Get the method signature (first 4 bytes)
-	methodSig := tx.Data()[:4]
-	var params []interface{}
-	var err error
-
-	// Verify method signature and unpack
-	if bytes.Equal(m.submitMethod.ID, methodSig) {
-		params, err = m.submitMethod.Inputs.Unpack(tx.Data()[4:])
-		if err != nil {
-			return nil, fmt.Errorf("failed to unpack submitTask: %w", err)
-		}
-	} else if bytes.Equal(m.bulkSubmitMethod.ID, methodSig) {
-		params, err = m.bulkSubmitMethod.Inputs.Unpack(tx.Data()[4:])
-		if err != nil {
-			return nil, fmt.Errorf("failed to unpack bulkSubmitTask: %w", err)
-		}
-		// Note: bulkSubmitTask has an extra 'numTasks' param at the end, which we ignore here.
-	} else {
-		return nil, fmt.Errorf("transaction is not submitTask or bulkSubmitTask")
-	}
-
-	// Check if enough parameters were unpacked
-	if len(params) < 5 {
-		return nil, fmt.Errorf("unpacked fewer parameters than expected")
-	}
-
-	// Extract parameters (common to both methods up to this point)
-	version, okV := params[0].(uint8)
-	owner, okO := params[1].(common.Address)
-	model, okM := params[2].([32]byte)
-	fee, okF := params[3].(*big.Int)
-	input, okI := params[4].([]byte)
-
-	if !okV || !okO || !okM || !okF || !okI {
-		return nil, fmt.Errorf("type assertion failed for one or more parameters")
-	}
-
-	submitTaskParams := &SubmitTaskParams{
-		Version: version,
-		Owner:   owner,
-		Model:   model,
-		Fee:     fee,
-		Input:   input,
-	}
-
-	return submitTaskParams, nil
-}
-
-// DecodeSubmitTask decodes a submitTask transaction and returns the parameters
-// This is a helper function to decode the parameters from a submitTask transaction to the engine contract only
-// Deprecated: Use DecodeTaskTransaction instead which handles both single and bulk submit.
-func (m *Miner) DecodeSubmitTask(tx *types.Transaction, taskId task.TaskId) (*SubmitTaskParams, error) {
-	// First verify this is a transaction to the Engine contract
-	if tx.To() == nil || *tx.To() != m.services.Config.BaseConfig.EngineAddress {
-		return nil, fmt.Errorf("transaction not sent to Engine contract")
-	}
-
-	// Get the method signature (first 4 bytes)
-	methodSig := tx.Data()[:4]
-
-	// Verify this is a submitTask call by checking method signature
-	if !bytes.Equal(m.submitMethod.ID, methodSig) {
-		return nil, fmt.Errorf("not a submitTask transaction")
-	}
-
-	// Now we can safely decode the parameters using cached method
-	params, err := m.submitMethod.Inputs.Unpack(tx.Data()[4:])
-	if err != nil {
-		return nil, err
-	}
-
-	// Now params contains your decoded parameters in order
-	version := params[0].(uint8)
-	owner := params[1].(common.Address)
-	model := params[2].([32]byte)
-	fee := params[3].(*big.Int)
-	input := params[4].([]byte)
-
-	submitTaskParams := &SubmitTaskParams{
-		Version: version,
-		Owner:   owner,
-		Model:   model,
-		Fee:     fee,
-		Input:   input,
-	}
-
-	return submitTaskParams, nil
-}
-
-// SolveTask takes decoded task parameters and attempts to solve the task.
-func (m *Miner) SolveTask(ctx context.Context, taskId task.TaskId, params *SubmitTaskParams, gpu *task.GPU, validateOnly bool) ([]byte, error) {
-
-	taskIdStr := taskId.String()
-
-	inputRaw := string(params.Input) // Use input from params
-
-	var result map[string]interface{}
-	err := json.Unmarshal(params.Input, &result) // Use input from params
-
-	if err != nil {
-		m.services.Logger.Error().Err(err).Str("task", taskIdStr).Msg("could not unmarshal input from transaction parameters")
-		return nil, err
-	}
-
-	m.services.Logger.Debug().Str("input", inputRaw).Str("task", taskIdStr).Msg("decoded task input")
-
-	// taskInfo, err := m.services.Engine.LookupTask(taskId)
-	// if err != nil {
-	// 	m.services.Logger.Error().Err(err).Msg("could not lookup task")
-	// 	return nil, err
-	// }
-
-	modelId := common.Bytes2Hex(params.Model[:]) // Use model from params
-	model := models.ModelRegistry.GetModel(modelId)
-	if model == nil {
-		m.services.Logger.Error().Str("model", modelId).Str("task", taskIdStr).Msg("could not find model specified in task parameters")
-		// Consider returning a specific error type here
-		return nil, fmt.Errorf("model %s not found or enabled", modelId)
-	}
-
-	hydrated, err := model.HydrateInput(result, taskId.TaskId2Seed())
-
-	if err != nil {
-		m.services.Logger.Error().Err(err).Msg("could not hydrate input")
-		return nil, err
-	}
-
-	output, err := json.Marshal(hydrated)
-	if err != nil {
-		m.services.Logger.Error().Err(err).Msg("could not marshal output")
-		return nil, err
-	}
-
-	m.services.Logger.Debug().Str("output", string(output)).Msg("sending task to gpu")
-
-	var cid []byte
-	if m.services.Config.EvilMode {
-		cid, _ = hex.DecodeString("12206666666666666666666666666666666666666666666666666666666666666666")
-		m.services.Logger.Warn().Str("cid", "0x"+hex.EncodeToString(cid)).Msg("evil mode enabled")
-		duration := time.Duration(m.services.Config.EvilModeMinTime+rand.Intn(m.services.Config.EvilModeRandInt)) * time.Millisecond
-		time.Sleep(duration)
-	} else {
-		//start := time.Now()
-		if gpu.Mock {
-			var data []byte
-			data, err = gpu.GetMockCid(taskIdStr, hydrated)
-			if err == nil {
-				cid, err = ipfs.GetIPFSHashFast(data)
-			}
-		} else {
-			cid, err = model.GetCID(ctx, gpu, taskIdStr, hydrated)
-		}
-		//elapsed := time.Since(start)
-		//m.gpura.Add(elapsed)
-		if err != nil {
-			// Check if the error is due to context cancellation (timeout or explicit cancel)
-			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-				// Log concise message for expected context cancellation
-				m.services.Logger.Info().Str("task", taskIdStr).Msg("context cancelled or timed out during inference")
-				return nil, err // Propagate the context error
-			}
-
-			// Handle other errors (GPU busy, actual inference errors, etc.)
-			m.services.Logger.Error().Err(err).Str("task", taskIdStr).Msg("error on gpu during inference, incrementing error counter")
-			gpu.IncrementErrorCount()
-			return nil, err
-		}
-		//m.services.Logger.Debug().Str("cid", "0x"+hex.EncodeToString(cid)).Str("elapsed", elapsed.String()).Str("average", m.gpura.Average().String()).Msg("gpu finished & returned result")
-	}
-
-	if validateOnly {
-		return cid, nil
-	}
-
-	validator := m.validator.GetNextValidatorAddress()
-
-	commitment, err := utils.GenerateCommitment(validator, taskId, cid)
-	if err != nil {
-		m.services.Logger.Error().Err(err).Msg("error generating commitment hash")
-		return nil, err
-	}
-
-	err = m.validator.SignalCommitment(validator, taskId, commitment)
-	if err != nil {
-		m.services.Logger.Error().Err(err).Msg("error signalling commitment to validator, skipping submitsolution")
-		return nil, err
-	}
-
-	// we wont consider this a failure
-	err = m.validator.SubmitIpfsCid(validator, taskId, cid)
-	if err != nil {
-		m.services.Logger.Warn().Err(err).Msg("ipfs cid submission failed")
-	}
-
-	// Use a separate goroutine without WaitGroup tracking for solution submission
-	err = m.validator.SubmitSolution(validator, taskId, cid)
-	if err != nil {
-		m.services.Logger.Error().Err(err).Msg("solution submission failed")
-	}
-
-	return cid, err
-}
-
 func main() {
 	var appQuitWG sync.WaitGroup
 
@@ -428,26 +182,6 @@ func main() {
 		logger.Fatal().Err(err).Msgf("error connecting to RPC: %s", cfg.Blockchain.RPCURL)
 	}
 
-	txRpcClient := rpcClient
-	if cfg.Blockchain.SenderRPCURL != "" {
-		txRpcClient, err = client.NewClient(cfg.Blockchain.SenderRPCURL, appQuit, cfg.Blockchain.EthersGas, cfg.Blockchain.BasefeeX, cfg.Blockchain.ForceGas, cfg.Blockchain.GasOverride)
-
-		if err != nil {
-			logger.Fatal().Err(err).Msgf("error connecting to sender RPC: %s", cfg.Blockchain.SenderRPCURL)
-		}
-	}
-
-	var clients []*client.Client
-	for _, curl := range cfg.Blockchain.ClientRPCURLs {
-		c, err := client.NewClient(curl, appQuit, cfg.Blockchain.EthersGas, cfg.Blockchain.BasefeeX, cfg.Blockchain.ForceGas, cfg.Blockchain.GasOverride)
-
-		if err != nil {
-			logger.Fatal().Err(err).Msgf("error connecting to client RPC: %s", curl)
-		}
-
-		clients = append(clients, c)
-	}
-
 	logger.Info().Str("database", cfg.DBPath).Msg("using database")
 
 	sqlite, err := sql.Open("sqlite3", cfg.DBPath)
@@ -483,7 +217,7 @@ func main() {
 		ipfsOracle = ipfs.NewMockOracleClient()
 	}
 
-	appContext, appServices, err := NewApplicationContext(rpcClient, txRpcClient, clients, sqlite, logger, cfg, ipfsOracle, context.Background(), appQuit)
+	appContext, appServices, err := NewApplicationContext(rpcClient, sqlite, logger, cfg, ipfsOracle, context.Background(), appQuit)
 
 	if err != nil {
 		logger.Fatal().Err(err).Msg("could not create application context")
@@ -668,9 +402,9 @@ func main() {
 
 			switch command {
 			case "initiatewithdrawall":
-				manager.InitiateValidatorWithdraw(validator, amount)
+				appServices.Validators.InitiateValidatorWithdraw(validator, amount)
 			case "completewithdrawall":
-				manager.ValidatorWithdraw(validator)
+				appServices.Validators.ValidatorWithdraw(validator)
 			}
 		case "totalstaked":
 			var validator common.Address
@@ -693,7 +427,7 @@ func main() {
 			} else {
 				logger.Fatal().Msgf("cancelwithdraw requires index and validator address")
 			}
-			manager.CancelValidatorWithdraw(validator, index)
+			appServices.Validators.CancelValidatorWithdraw(validator, index)
 		case "voteoncontestation":
 			var taskid task.TaskId
 			var yea bool
@@ -716,7 +450,7 @@ func main() {
 				log.Fatalf("voteoncontestation requires taskid and true/false")
 			}
 
-			manager.VoteOnContestation(validator, taskid, yea)
+			appServices.Validators.VoteOnContestation(validator, taskid, yea)
 		case "depositmonitor":
 			var endBlock, startBlock int64 = 0, -1
 			if len(args) == 2 {
@@ -848,10 +582,10 @@ func main() {
 	rewardInAIUS := appServices.Config.BaseConfig.BaseToken.ToFloat(totalReward)
 	logger.Info().Str("model", cfg.Strategies.Model).Str("reward", fmt.Sprintf("%.8g", rewardInAIUS)).Msg("selected strategy model reward")
 
-	miner, err := NewMinerEngine(appServices, manager, &appQuitWG)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("could not create miner engine")
-	}
+	// miner, err := NewMinerEngine(appServices, manager, &appQuitWG)
+	// if err != nil {
+	// 	logger.Fatal().Err(err).Msg("could not create miner engine")
+	// }
 
 	logger.Info().Str("strategy", cfg.Strategies.Strategy).Msg("⛏️ GOBIUS MINER STARTED! ⛏️")
 	//	logger.Info().Str("validator", miner.validator.ValidatorAddress().String()).Str("strategy", cfg.Strategies.Strategy).Msg("⛏️ GOBIUS MINER STARTED! ⛏️")
@@ -869,7 +603,7 @@ func main() {
 			// For now, treat validation failure as fatal if not skipped.
 			logger.Fatal().Err(err).Msg("GPU validation failed")
 		}
-		if !miner.services.Engine.VersionCheck(minerEngineVersion) {
+		if !appServices.Engine.VersionCheck(minerEngineVersion) {
 			logger.Fatal().Int("minerversion", int(minerEngineVersion.Int64())).Msg("miner is out of date, please update!")
 		}
 		logger.Info().Msg("GPU validation and engine version check passed")
@@ -904,19 +638,19 @@ func main() {
 	// Initial connection attempt
 	newHeadSub, connectErr = connectToHeaders()
 
-	// --- Select and Start Mining Strategy ---
+	// Select and start mining strategy
 	var strategy MiningStrategy
-	var strategyErr error // Variable to hold error from constructor
+	var strategyErr error
 	switch cfg.Strategies.Strategy {
 	case "bulkmine":
-		strategy, strategyErr = NewBulkMineStrategy(appContext, appServices, miner, gpuPool)
+		strategy, strategyErr = NewBulkMineStrategy(appContext, appServices, manager, gpuPool)
 	case "solutionsampler":
 		// Need to connect to solution events *before* starting the strategy
-		strategy, strategyErr = NewSolutionSamplerStrategy(appContext, appServices, miner, gpuPool)
+		strategy, strategyErr = NewSolutionSamplerStrategy(appContext, appServices, manager, gpuPool)
 	case "listen":
-		strategy, strategyErr = NewListenStrategy(appContext, appServices, miner, gpuPool)
+		strategy, strategyErr = NewListenStrategy(appContext, appServices, manager, gpuPool)
 	case "automine":
-		strategy, strategyErr = NewAutoMineStrategy(appContext, appServices, miner, gpuPool)
+		strategy, strategyErr = NewAutoMineStrategy(appContext, appServices, manager, gpuPool)
 	default:
 		// Use strategyErr to signal failure, consistent with other cases
 		strategyErr = fmt.Errorf("unknown or unsupported mining strategy specified in config: %s", cfg.Strategies.Strategy)
