@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"gobius/account"
+	"gobius/bindings/arbiusrouterv1"
 	"gobius/bindings/engine"
 	task "gobius/common" // Renamed import to avoid conflict
 	"gobius/ipfs"
@@ -299,7 +300,7 @@ type baseStrategy struct {
 	stopOnce     sync.Once
 	strategyName string
 	// TODO: refactor this, a bit ugly to have it here and then pass it to the producer
-	txParamCache *lru.Cache // Keep cache for decodeTransaction in base
+	txTasktoTxHashCache *lru.Cache // Keep cache for decodeTransaction in base
 
 	// Embed goroutineRunner for managing worker goroutines
 	goroutineRunner
@@ -313,8 +314,9 @@ type baseStrategy struct {
 	verifySink        chan *engine.EngineSolutionSubmitted // Sink for SolutionSubmitted events
 	sampledVerifyChan chan *TaskSubmitted                  // Channel for sampled verification tasks to workers
 
-	submitMethod     *abi.Method
-	bulkSubmitMethod *abi.Method
+	submitMethod         *abi.Method
+	bulkSubmitMethod     *abi.Method
+	submitMethodOnRouter *abi.Method
 }
 
 func (b *baseStrategy) Go(f func()) {
@@ -340,11 +342,11 @@ func newBaseStrategy(appCtx context.Context, services *Services, submitter Solut
 
 	// TODO: Add VerificationSampleRate to Config struct
 	sampleRate := uint64(1000) // Default sample rate (1 in 1000)
-	logger.Warn().Uint64("rate", sampleRate).Msg("Using default verification sample rate (1 in N) - TODO: Add VerificationSampleRate to config")
+	logger.Warn().Uint64("rate", sampleRate).Msg("using default verification sample rate (1 in N) - TODO: Add VerificationSampleRate to config")
 	// if services.Config.VerificationSampleRate > 0 { ... }
 
 	if sampleRate == 0 {
-		logger.Error().Msg("VerificationSampleRate cannot be zero, disabling sampling verification")
+		logger.Error().Msg("verification sample rate cannot be zero, disabling sampling verification")
 		// Set sampleRate extremely high to effectively disable? Or handle differently?
 		sampleRate = ^uint64(0) // Max uint64
 	}
@@ -367,22 +369,35 @@ func newBaseStrategy(appCtx context.Context, services *Services, submitter Solut
 		return nil, fmt.Errorf("bulkSubmitTask method not found in ABI")
 	}
 
+	// Get the parsed ABI once at startup
+	parsed, err = arbiusrouterv1.ArbiusRouterV1MetaData.GetAbi()
+	if err != nil {
+		return nil, fmt.Errorf("failed to get engine ABI: %w", err)
+	}
+
+	// Get the submitTask method once at startup
+	submitMethodOnRouter, exists := parsed.Methods["submitTask"]
+	if !exists {
+		return nil, fmt.Errorf("submitTask method not found in ABI")
+	}
+
 	bs := baseStrategy{
-		ctx:               ctx,
-		cancelFunc:        cancel,
-		services:          services,
-		submitter:         submitter,
-		gpuPool:           gpuPool,
-		logger:            logger,
-		numWorkers:        numWorkers,
-		strategyName:      strategyName,
-		txParamCache:      paramCache,
-		goroutineRunner:   goroutineRunner{},
-		taskSubmittedSink: make(chan *engine.EngineTaskSubmitted, numWorkers*2),     // Buffer sink
-		verifySink:        make(chan *engine.EngineSolutionSubmitted, numWorkers*2), // Buffer sink
-		sampledVerifyChan: make(chan *TaskSubmitted, numWorkers),                    // Buffer channel to workers
-		submitMethod:      &submitMethod,
-		bulkSubmitMethod:  &bulkSubmitMethod,
+		ctx:                  ctx,
+		cancelFunc:           cancel,
+		services:             services,
+		submitter:            submitter,
+		gpuPool:              gpuPool,
+		logger:               logger,
+		numWorkers:           numWorkers,
+		strategyName:         strategyName,
+		txTasktoTxHashCache:  paramCache,
+		goroutineRunner:      goroutineRunner{},
+		taskSubmittedSink:    make(chan *engine.EngineTaskSubmitted, numWorkers*2),     // Buffer sink
+		verifySink:           make(chan *engine.EngineSolutionSubmitted, numWorkers*2), // Buffer sink
+		sampledVerifyChan:    make(chan *TaskSubmitted, numWorkers),                    // Buffer channel to workers
+		submitMethod:         &submitMethod,
+		bulkSubmitMethod:     &bulkSubmitMethod,
+		submitMethodOnRouter: &submitMethodOnRouter,
 	}
 
 	// Setup TaskSubmitted Subscription
@@ -409,10 +424,7 @@ func newBaseStrategy(appCtx context.Context, services *Services, submitter Solut
 		if client == nil {
 			return nil, errors.New("ethereum client is nil for SolutionSubmitted subscription")
 		}
-		engineContract, err := engine.NewEngine(bs.services.Config.BaseConfig.EngineAddress, client)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create engine contract instance for SolutionSubmitted: %w", err)
-		}
+		engineContract := bs.services.Engine.Engine
 		blockNo, err := client.BlockNumber(connectCtx)
 		if err != nil {
 			return nil, fmt.Errorf("failed to get block number for SolutionSubmitted subscription: %w", err)
@@ -592,6 +604,11 @@ func (bs *baseStrategy) decodeTaskTransaction(tx *types.Transaction) (*SubmitTas
 			return nil, fmt.Errorf("failed to unpack bulkSubmitTask: %w", err)
 		}
 		// Note: bulkSubmitTask has an extra 'numTasks' param at the end, which we ignore here.
+	} else if bytes.Equal(bs.submitMethodOnRouter.ID, methodSig) {
+		params, err = bs.submitMethodOnRouter.Inputs.Unpack(tx.Data()[4:])
+		if err != nil {
+			return nil, fmt.Errorf("failed to unpack submitTaskOnRouter: %w", err)
+		}
 	} else {
 		return nil, fmt.Errorf("transaction is not submitTask or bulkSubmitTask")
 	}
@@ -667,7 +684,7 @@ func (bs *baseStrategy) decodeSubmitTask(tx *types.Transaction, taskId task.Task
 // decodeTransaction remains in baseStrategy as workers might need it via handleTask.
 func (bs *baseStrategy) decodeTransaction(txHash common.Hash) (*SubmitTaskParams, error) {
 	// 1. Check cache
-	if cachedParams, found := bs.txParamCache.Get(txHash.String()); found {
+	if cachedParams, found := bs.txTasktoTxHashCache.Get(txHash.String()); found {
 		if params, ok := cachedParams.(*SubmitTaskParams); ok {
 			bs.logger.Debug().Str("txHash", txHash.String()).Msg("using cached task parameters")
 			return params, nil
@@ -713,7 +730,7 @@ func (bs *baseStrategy) decodeTransaction(txHash common.Hash) (*SubmitTaskParams
 	}
 
 	// 4. Store in cache
-	bs.txParamCache.Add(txHash.String(), params)
+	bs.txTasktoTxHashCache.Add(txHash.String(), params)
 	bs.logger.Debug().Str("txHash", txHash.String()).Msg("cached decoded task parameters")
 
 	return params, nil
@@ -735,12 +752,6 @@ func (bs *baseStrategy) solveTask(ctx context.Context, taskId task.TaskId, param
 	}
 
 	bs.logger.Debug().Str("input", inputRaw).Str("task", taskIdStr).Msg("decoded task input")
-
-	// taskInfo, err := m.services.Engine.LookupTask(taskId)
-	// if err != nil {
-	// 	m.services.Logger.Error().Err(err).Msg("could not lookup task")
-	// 	return nil, err
-	// }
 
 	modelId := common.Bytes2Hex(params.Model[:]) // Use model from params
 	model := models.ModelRegistry.GetModel(modelId)
@@ -772,7 +783,6 @@ func (bs *baseStrategy) solveTask(ctx context.Context, taskId task.TaskId, param
 		duration := time.Duration(bs.services.Config.EvilModeMinTime+rand.Intn(bs.services.Config.EvilModeRandInt)) * time.Millisecond
 		time.Sleep(duration)
 	} else {
-		//start := time.Now()
 		if gpu.Mock {
 			var data []byte
 			data, err = gpu.GetMockCid(taskIdStr, hydrated)
@@ -782,8 +792,6 @@ func (bs *baseStrategy) solveTask(ctx context.Context, taskId task.TaskId, param
 		} else {
 			cid, err = model.GetCID(ctx, gpu, taskIdStr, hydrated)
 		}
-		//elapsed := time.Since(start)
-		//m.gpura.Add(elapsed)
 		if err != nil {
 			// Check if the error is due to context cancellation (timeout or explicit cancel)
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
@@ -797,7 +805,6 @@ func (bs *baseStrategy) solveTask(ctx context.Context, taskId task.TaskId, param
 			gpu.IncrementErrorCount()
 			return nil, err
 		}
-		//m.services.Logger.Debug().Str("cid", "0x"+hex.EncodeToString(cid)).Str("elapsed", elapsed.String()).Str("average", m.gpura.Average().String()).Msg("gpu finished & returned result")
 	}
 
 	if validateOnly {
@@ -1707,7 +1714,7 @@ func NewSolutionSamplerStrategy(appCtx context.Context, services *Services, subm
 	// TODO: Make dispatch interval configurable
 	dispatchInterval := 1 * time.Minute
 
-	producer := NewSolutionEventProducer(base.ctx, services, base.txParamCache, bufferSize, sampleSize, dispatchInterval)
+	producer := NewSolutionEventProducer(base.ctx, services, base.txTasktoTxHashCache, bufferSize, sampleSize, dispatchInterval)
 
 	return &SolutionSamplerStrategy{
 		baseStrategy: base, // Use the pointer directly
@@ -1732,25 +1739,17 @@ func (s *SolutionSamplerStrategy) handleValidationTask(workerId int, gpu *task.G
 	// Set status immediately, might be changed on error
 	gpu.SetStatus("Validating")
 
-	// Decode the transaction (uses base cache or producer cache)
 	params, err := s.decodeTransaction(ts.TxHash)
 	if err != nil {
-		// Check if the error is permanent
-		if errors.Is(err, ErrTxDecodePermanent) || errors.Is(err, ethereum.NotFound) {
-			workerLogger.Error().Err(err).Msg("permanent decode failure for solution task, skipping validation")
-		} else {
-			workerLogger.Warn().Err(err).Msg("transient error decoding solution task transaction, skipping validation")
-		}
-		gpu.SetStatus("Error") // Set status even for decode failure
+		workerLogger.Warn().Err(err).Msg("error decoding solution task transaction, skipping validation")
+		gpu.SetStatus("Error")
 		return
 	}
 
 	solveStart := time.Now()
-	// Assign to ourCidBytes, handle error
 	ourCidBytes, err := s.solveTask(taskCtx, ts.TaskId, params, gpu, true)
 	solveElapsed := time.Since(solveStart)
 
-	// Original error handling for SolveTask in validation (NO requeue)
 	if err != nil {
 		workerLogger.Error().Err(err).Msg("validation: solve task failed")
 		if gpu.IsEnabled() {
@@ -1795,8 +1794,7 @@ func (s *SolutionSamplerStrategy) handleValidationTask(workerId int, gpu *task.G
 	}
 
 	if res.Blocktime == 0 {
-		workerLogger.Warn().Msg("validation: no solution found on-chain (or call failed silently?), cannot compare")
-		gpu.SetStatus("Idle") // Reset status
+		workerLogger.Warn().Msg("verification: no solution found on-chain (res.Blocktime is 0), cannot compare")
 		return
 	}
 
@@ -1805,20 +1803,80 @@ func (s *SolutionSamplerStrategy) handleValidationTask(workerId int, gpu *task.G
 
 	workerLogger.Info().Str("our_cid", ourCid).Str("solver_cid", solversCid).Msg("comparing CIDs")
 
+	// Fetch current contestation status
+	contestData, err := s.services.Engine.Engine.Contestations(callOpts, ts.TaskId)
+	if err != nil {
+		// Handle error fetching contestation status, maybe log and return
+		workerLogger.Error().Err(err).Msg("verification: failed to get contestation status")
+		return
+	}
+	contestationExists := contestData.Validator != (common.Address{}) // Re-added correct declaration
+
+	if contestationExists {
+		workerLogger.Info().Str("contestation", contestData.Validator.Hex()).Msg("contestation exists, skipping validation")
+		return
+	}
+
+	// Validator Selection & Eligibility Check
+	var selectedValidator *account.Account
+	var bestStake = big.NewInt(0)
+	eligibleFound := false
+
+	for _, validator := range s.services.Validators.validators {
+		validatorAddr := validator.ValidatorAddress()
+		workerLogger.Debug().Str("validator", validatorAddr.Hex()).Msg("Checking eligibility...")
+
+		isEligible, _, err := validator.IsEligibleToVote(taskCtx, ts.TaskId)
+		if err != nil {
+			workerLogger.Warn().Err(err).Str("validator", validatorAddr.Hex()).Msg("error checking validator eligibility")
+			continue
+		}
+
+		if !isEligible {
+			continue // Skip this validator
+		}
+
+		// Validator IS eligible, now check their stake
+		workerLogger.Debug().Str("validator", validatorAddr.Hex()).Msg("validator is eligible to vote/contest. Fetching stake...")
+		validatorInfo, err := s.services.Engine.Engine.Validators(callOpts, validatorAddr) // callOpts defined earlier
+		if err != nil {
+			workerLogger.Warn().Err(err).Str("validator", validatorAddr.Hex()).Msg("failed to fetch validator info for stake comparison")
+			continue // Skip if we can't get stake info
+		}
+
+		if validatorInfo.Staked == nil { // Defensive check
+			workerLogger.Warn().Str("validator", validatorAddr.Hex()).Msg("validator info returned nil stake")
+			continue
+		}
+
+		// Compare this eligible validator's actual stake
+		if validatorInfo.Staked.Cmp(bestStake) > 0 {
+			workerLogger.Debug().Str("validator", validatorAddr.Hex()).Str("actualStake", validatorInfo.Staked.String()).Msg("found potentially better eligible validator based on stake")
+			bestStake = validatorInfo.Staked
+			selectedValidator = validator.Account
+			eligibleFound = true
+		}
+	}
+
+	if !eligibleFound {
+		workerLogger.Warn().Msg("no eligible validator found with sufficient stake to vote/contest this task.")
+		return // Cannot proceed
+	}
+
+	workerLogger.Info().Str("selectedValidator", selectedValidator.Address.Hex()).Str("effectiveStake", bestStake.String()).Msg("selected best eligible validator for action")
+
 	if ourCid != solversCid {
-		workerLogger.Warn().Msg("==================== CID MISMATCH DETECTED =====================")
+		// CID MISMATCH
+		workerLogger.Warn().Msg("==================== CID MISMATCH DETECTED (Verification) ====================")
 		workerLogger.Warn().Msgf("  Task ID  : %s", task.TaskId(ts.TaskId).String())
 		workerLogger.Warn().Msgf("  Our CID  : %s", ourCid)
 		workerLogger.Warn().Msgf("  Their CID: %s", solversCid)
-		workerLogger.Warn().Msgf("  Solver   : %s", res.Validator.String())
+		workerLogger.Warn().Msgf("  Solver   : %s", res.Validator.String()) // Validator field holds the solver addr
 		workerLogger.Warn().Msgf("  Block    : %d", res.Blocktime)
-		workerLogger.Warn().Msg("================================================================")
-	} else {
-		workerLogger.Info().Msg("validation: CID matches on-chain solution")
+		workerLogger.Warn().Msg("===========================================================================")
 	}
 
-	// Set status back to Idle after successful validation/comparison
-	gpu.SetStatus("Idle")
+	// Add voting/constation logic
 }
 
 // Stop stops the producer and the base workers.
@@ -1831,22 +1889,29 @@ func (s *SolutionSamplerStrategy) Stop() {
 
 // processSampledSolutionsLoop listens for SolutionSubmitted events, samples them based on a hash, and sends them for verification.
 func (bs *baseStrategy) processSampledSolutionsLoop(sampleRate uint64) {
-	bs.logger.Info().Uint64("sampleRate", sampleRate).Msg("starting sampled SolutionSubmitted processing loop")
+	bs.logger.Info().Uint64("sampleRate", sampleRate).Msg("starting sampled solutions processing loop")
 	if sampleRate == 0 || sampleRate == ^uint64(0) { // Check if sampling is effectively disabled
-		bs.logger.Warn().Msg("Sampling rate is zero or max uint64, verification sampling loop will not process events.")
-		// Exit loop if disabled?
-		// return
+		bs.logger.Warn().Msg("sampling rate is zero or max uint64, verification sampling loop will not process events.")
 		// Or let it run but just log skip? Let's keep it running for now, but log verbosely.
+	}
+
+	// Pre-fetch own validator addresses for quick lookup
+	ownValidatorAddresses := make(map[common.Address]struct{})
+	if bs.services.Validators != nil {
+		for _, v := range bs.services.Validators.validators {
+			ownValidatorAddresses[v.ValidatorAddress()] = struct{}{}
+		}
+		bs.logger.Debug().Int("count", len(ownValidatorAddresses)).Msg("loaded own validator addresses for self-skip in sampling")
 	}
 
 	for {
 		select {
 		case <-bs.ctx.Done():
-			bs.logger.Info().Msg("shutting down sampled SolutionSubmitted processing loop")
+			bs.logger.Info().Msg("shutting down sampled solutions processing loop")
 			return
 		case event, ok := <-bs.verifySink:
 			if !ok {
-				bs.logger.Info().Msg("SolutionSubmitted sink channel closed, exiting sampling loop")
+				bs.logger.Info().Msg("solution submitted sink channel closed, exiting sampling loop")
 				return
 			}
 			if event == nil {
@@ -1854,22 +1919,29 @@ func (bs *baseStrategy) processSampledSolutionsLoop(sampleRate uint64) {
 			}
 
 			taskIdStr := task.TaskId(event.Task).String()
-			solverAddrStr := event.Addr.Hex()
-			bs.logger.Debug().Str("task", taskIdStr).Str("solver", solverAddrStr).Msg("received SolutionSubmitted event")
+			solverAddr := event.Addr
+			solverAddrStr := solverAddr.Hex()
+			bs.logger.Debug().Str("task", taskIdStr).Str("solver", solverAddrStr).Msg("received solution submitted event")
+
+			if _, isOwn := ownValidatorAddresses[solverAddr]; isOwn {
+				bs.logger.Debug().Str("task", taskIdStr).Str("solver", solverAddrStr).Msg("Skipping own solution from sampling")
+				continue // Skip our own solutions
+			}
 
 			// Predictable Sampling Logic
 			shouldSample := false
 			if sampleRate > 0 && sampleRate != ^uint64(0) {
-				hashData := append(event.Task[:], event.Addr.Bytes()...)
+				// Use Solution TxHash for unpredictability (and uniqueness) at solve time
+				hashData := append(event.Task[:], event.Raw.BlockHash.Bytes()...)
 				hash := sha256.Sum256(hashData)
 				// Use first 8 bytes of hash as uint64 for modulo operation
 				sampleValue := binary.BigEndian.Uint64(hash[:8])
 				if (sampleValue % sampleRate) == 0 {
 					shouldSample = true
-					bs.logger.Info().Str("task", taskIdStr).Str("solver", solverAddrStr).Uint64("hashValue", sampleValue).Msg("sampling solution for verification")
+					bs.logger.Info().Str("task", taskIdStr).Str("solver", solverAddrStr).Uint64("hash_value", sampleValue).Str("solution_txhash", event.Raw.TxHash.Hex()).Msg("sampling solution for verification")
 				}
 			} else {
-				bs.logger.Debug().Str("task", taskIdStr).Msg("Verification sampling disabled, skipping solution.")
+				bs.logger.Debug().Str("task", taskIdStr).Msg("verification sampling disabled, skipping solution.")
 				continue // Don't process if sampling disabled
 			}
 
@@ -1882,9 +1954,8 @@ func (bs *baseStrategy) processSampledSolutionsLoop(sampleRate uint64) {
 			var txHash common.Hash
 			found := false
 
-			// --- TxHash Lookup: ONLY check txParamCache (Part 1) ---
-			if bs.txParamCache != nil {
-				if val, cacheFound := bs.txParamCache.Get(taskIdStr); cacheFound {
+			if bs.txTasktoTxHashCache != nil {
+				if val, cacheFound := bs.txTasktoTxHashCache.Get(taskIdStr); cacheFound {
 					if hashVal, ok := val.(common.Hash); ok {
 						txHash = hashVal
 						found = true
@@ -1897,7 +1968,7 @@ func (bs *baseStrategy) processSampledSolutionsLoop(sampleRate uint64) {
 				bs.logger.Error().Str("task", taskIdStr).Msg("txParamCache is nil, cannot look up TxHash")
 			}
 
-			// --- DB Lookup REMOVED for Part 1 ---
+			// TODO: Implement DB lookup for TxHash
 			/*
 				if !found { // If not found in cache, check DB (Part 2 logic)
 					bs.logger.Debug().Str("task", taskIdStr).Msg("TxHash not found in cache, checking persistent storage...")
@@ -1912,7 +1983,7 @@ func (bs *baseStrategy) processSampledSolutionsLoop(sampleRate uint64) {
 			*/
 
 			if !found {
-				bs.logger.Warn().Str("task", taskIdStr).Msg("TxHash not found in txParamCache for sampled task, skipping verification")
+				bs.logger.Debug().Str("task", taskIdStr).Msg("taskid not found in cache for sampled task, skipping verification")
 				continue
 			}
 
@@ -1929,7 +2000,7 @@ func (bs *baseStrategy) processSampledSolutionsLoop(sampleRate uint64) {
 				bs.logger.Warn().Str("task", taskIdStr).Msg("context cancelled while queueing sampled verification task")
 			default:
 				// Log clearly that a sampled task is being dropped
-				bs.logger.Error().Str("task", taskIdStr).Int("q_len", len(bs.sampledVerifyChan)).Int("q_cap", cap(bs.sampledVerifyChan)).Msg("SAMPLED verification task dropped, channel full!")
+				bs.logger.Error().Str("task", taskIdStr).Int("q_len", len(bs.sampledVerifyChan)).Int("q_cap", cap(bs.sampledVerifyChan)).Msg("sampled verification task dropped, channel full!")
 			}
 		}
 	}
@@ -1937,19 +2008,16 @@ func (bs *baseStrategy) processSampledSolutionsLoop(sampleRate uint64) {
 
 // handleVerificationTask performs the validation logic for a sampled task.
 func (bs *baseStrategy) handleVerificationTask(workerId int, gpu *task.GPU, ts *TaskSubmitted, taskCtx context.Context) {
-	workerLogger := bs.logger.With().Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task.TaskId(ts.TaskId).String()).Logger()
+	workerLogger := bs.logger.With().Str("strategy", "verification").Int("worker", workerId).Int("GPU", gpu.ID).Str("task", task.TaskId(ts.TaskId).String()).Logger()
 	workerLogger.Info().Msg("starting verification for sampled task")
-
-	gpu.SetStatus("Verifying")
-	defer gpu.SetStatus("Idle") // Ensure status is reset
 
 	// Decode the transaction (uses base cache)
 	params, err := bs.decodeTransaction(ts.TxHash)
 	if err != nil {
 		if errors.Is(err, ErrTxDecodePermanent) || errors.Is(err, ethereum.NotFound) {
-			workerLogger.Error().Err(err).Msg("verification: permanent decode failure, skipping")
+			workerLogger.Error().Err(err).Msg("permanent decode failure, skipping")
 		} else {
-			workerLogger.Warn().Err(err).Msg("verification: transient error decoding transaction, skipping")
+			workerLogger.Warn().Err(err).Msg("transient error decoding transaction, skipping")
 		}
 		return // Don't proceed with verification if decode fails
 	}
@@ -1959,43 +2027,30 @@ func (bs *baseStrategy) handleVerificationTask(workerId int, gpu *task.GPU, ts *
 	solveElapsed := time.Since(solveStart)
 
 	if err != nil {
-		workerLogger.Error().Err(err).Msg("verification: local solve failed")
+		workerLogger.Error().Err(err).Msg("local solve failed")
 		if !(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) && gpu.IsEnabled() {
 			gpu.SetStatus("Error") // Mark GPU error only if not cancelled and GPU enabled
 		}
 		return // Exit verification on solve error
 	}
 	if ourCidBytes == nil {
-		workerLogger.Error().Msg("verification: local solve did not return a CID")
+		workerLogger.Error().Msg("local solve did not return a CID")
 		if gpu.IsEnabled() {
 			gpu.SetStatus("Error")
 		}
 		return // Exit validation if no CID
 	}
 
-	workerLogger.Info().Str("elapsed", solveElapsed.String()).Msg("verification: task solved locally")
+	workerLogger.Info().Str("elapsed", solveElapsed.String()).Msg("task solved locally")
 
-	// Fetch on-chain solution for comparison
-	engineContract, err := engine.NewEngine(bs.services.Config.BaseConfig.EngineAddress, bs.services.OwnerAccount.Client.Client)
+	res, err := bs.services.Engine.GetSolution(ts.TaskId)
 	if err != nil {
-		workerLogger.Error().Err(err).Msg("verification: failed to create engine contract instance")
-		return
-	}
-
-	// Use taskCtx for RPC calls related to this specific verification
-	callOpts := &bind.CallOpts{Context: taskCtx}
-	res, err := engineContract.Solutions(callOpts, ts.TaskId)
-	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			workerLogger.Warn().Err(err).Msg("verification: context cancelled during Solutions call")
-		} else {
-			workerLogger.Warn().Err(err).Msg("verification: error getting on-chain solution info (may not exist yet)")
-		}
+		workerLogger.Warn().Err(err).Msg("error getting on-chain solution info")
 		return
 	}
 
 	if res.Blocktime == 0 {
-		workerLogger.Warn().Msg("verification: no solution found on-chain (res.Blocktime is 0), cannot compare")
+		workerLogger.Warn().Msg("no solution found on-chain, cannot compare")
 		return
 	}
 
@@ -2004,111 +2059,123 @@ func (bs *baseStrategy) handleVerificationTask(workerId int, gpu *task.GPU, ts *
 
 	workerLogger.Info().Str("our_cid", ourCid).Str("solver_cid", solversCid).Msg("comparing CIDs")
 
-	// --- Validator Selection & Eligibility Check ---
-	var selectedValidator *account.Account
+	// Fetch current contestation status
+	contestData, err := bs.services.Engine.GetContestation(ts.TaskId)
+	if err != nil {
+		workerLogger.Error().Err(err).Msg("failed to get contestation status")
+		return
+	}
+	contestationExists := contestData.Validator != (common.Address{}) // Re-added correct declaration
+
+	var selectedValidator *Validator
 	var bestStake = big.NewInt(0)
 	eligibleFound := false
 
+	// basic validator selection logic for now; select validator with highest stake
 	for _, validator := range bs.services.Validators.validators {
 		validatorAddr := validator.ValidatorAddress()
-		workerLogger.Debug().Str("validator", validatorAddr.Hex()).Msg("Checking eligibility...")
+		workerLogger.Debug().Str("validator", validatorAddr.Hex()).Msg("checking eligibility...")
 
-		// Check if the validator can vote on this specific task
-		votableStake, err := bs.services.Engine.Engine.ValidatorCanVote(callOpts, validatorAddr, ts.TaskId)
+		isEligible, _, err := validator.IsEligibleToVote(taskCtx, ts.TaskId)
 		if err != nil {
-			workerLogger.Warn().Err(err).Str("validator", validatorAddr.Hex()).Msg("Failed to check ValidatorCanVote")
-			continue // Skip this validator if check fails
+			workerLogger.Warn().Err(err).Str("validator", validatorAddr.Hex()).Msg("error checking validator eligibility")
+			continue
 		}
 
-		if votableStake == nil || votableStake.Cmp(big.NewInt(0)) <= 0 {
-			workerLogger.Debug().Str("validator", validatorAddr.Hex()).Msg("Validator not eligible or has insufficient stake to vote/contest this task")
-			continue // Skip this validator
+		if !isEligible {
+			continue
 		}
 
-		// Found an eligible validator, check if it has the best stake so far
-		// For simplicity, using votableStake as the metric. Could also check total stake.
-		if votableStake.Cmp(bestStake) > 0 {
-			workerLogger.Debug().Str("validator", validatorAddr.Hex()).Str("votableStake", votableStake.String()).Msg("Found potentially better eligible validator")
-			bestStake = votableStake
-			selectedValidator = validator.Account
+		// Validator IS eligible, now check their stake
+		workerLogger.Debug().Str("validator", validatorAddr.Hex()).Msg("validator is eligible to vote/contest, verifying stake...")
+		staked, err := bs.services.Engine.GetValidatorStaked(validatorAddr) // callOpts defined earlier
+		if err != nil {
+			workerLogger.Warn().Err(err).Str("validator", validatorAddr.Hex()).Msg("failed to fetch validator info for stake comparison")
+			continue
+		}
+
+		// Compare this eligible validator's actual stake
+		if staked.Cmp(bestStake) > 0 {
+			bal := bs.services.Config.BaseConfig.BaseToken.ToFloat(staked)
+			workerLogger.Debug().Str("validator", validatorAddr.Hex()).Float64("stake", bal).Msg("found potentially better eligible validator based on stake")
+			bestStake = staked
+			selectedValidator = validator
 			eligibleFound = true
 		}
 	}
 
 	if !eligibleFound {
-		workerLogger.Warn().Msg("No eligible validator found with sufficient stake to vote/contest this task.")
+		workerLogger.Warn().Msg("no eligible validator found with sufficient stake to vote/contest this task.")
 		return // Cannot proceed
 	}
 
-	workerLogger.Info().Str("selectedValidator", selectedValidator.Address.Hex()).Str("effectiveStake", bestStake.String()).Msg("Selected best eligible validator for action")
+	workerLogger.Info().Str("validator", selectedValidator.Account.Address.Hex()).Str("stake", bestStake.String()).Msg("selected best eligible validator for action")
 
-	// --- Perform Action using Selected Validator ---
+	// --- Perform Action using Selected Validator based on CID match and contestation status ---
 	if ourCid != solversCid {
+		// CID MISMATCH
 		workerLogger.Warn().Msg("==================== CID MISMATCH DETECTED (Verification) ====================")
 		workerLogger.Warn().Msgf("  Task ID  : %s", task.TaskId(ts.TaskId).String())
 		workerLogger.Warn().Msgf("  Our CID  : %s", ourCid)
 		workerLogger.Warn().Msgf("  Their CID: %s", solversCid)
-		workerLogger.Warn().Msgf("  Solver   : %s", res.Validator.String()) // Validator field holds the solver addr
+		workerLogger.Warn().Msgf("  Solver   : %s", res.Validator.String())
 		workerLogger.Warn().Msgf("  Block    : %d", res.Blocktime)
 		workerLogger.Warn().Msg("===========================================================================")
 
-		// <<< CONTESTATION >>>
-		workerLogger.Warn().Str("validator", selectedValidator.Address.Hex()).Msg("Initiating contestation...")
-		// Use NonceManagerWrapper with the SELECTED validator account
-		_, err = selectedValidator.NonceManagerWrapper(1, 425, 1.5, true, func(opts *bind.TransactOpts) (interface{}, error) {
-			// Call SubmitContestation via the EngineTransactor
-			return bs.services.Engine.Engine.EngineTransactor.SubmitContestation(opts, ts.TaskId)
-		})
-		if err != nil {
-			workerLogger.Error().Err(err).Str("validator", selectedValidator.Address.Hex()).Msg("Failed to submit contestation transaction via NonceManagerWrapper")
-			// txHash is not available here if the wrapper handles logging
+		if contestationExists {
+			// Mismatch + existing contestation -> Vote YEA
+			workerLogger.Warn().Str("validator", selectedValidator.Account.Address.Hex()).Str("existing_contestor", contestData.Validator.Hex()).Msg("initiating vote (YEA) for existing contestation...")
+			err = selectedValidator.VoteOnContestation(ts.TaskId, true)
+			if err != nil {
+				workerLogger.Error().Err(err).Str("validator", selectedValidator.Account.Address.Hex()).Msg("failed to submit vote (YEA) transaction")
+			} else {
+				workerLogger.Info().Str("validator", selectedValidator.Account.Address.Hex()).Msg("vote (YEA) transaction completed")
+			}
 		} else {
-			// NonceManagerWrapper likely logs the hash, just log success indicator
-			workerLogger.Info().Str("validator", selectedValidator.Address.Hex()).Msg("Contestation transaction submitted via NonceManagerWrapper (check wrapper logs for hash)")
+			// Mismatch + no existing contestation -> submit NEW contestation
+			workerLogger.Warn().Str("validator", selectedValidator.Account.Address.Hex()).Msg("initiating NEW contestation...")
+			err = selectedValidator.SubmitContestation(ts.TaskId)
+			if err != nil {
+				workerLogger.Error().Err(err).Str("validator", selectedValidator.Account.Address.Hex()).Msg("failed to submit NEW contestation")
+			} else {
+				workerLogger.Info().Str("validator", selectedValidator.Account.Address.Hex()).Msg("new contestation completed")
+			}
 		}
 	} else {
-		workerLogger.Info().Msg("verification: CID matches on-chain solution")
-
-		// <<< VOTING >>>
-		workerLogger.Info().Str("validator", selectedValidator.Address.Hex()).Msg("Initiating vote...")
-		// Use NonceManagerWrapper with the SELECTED validator account
-		_, err = selectedValidator.NonceManagerWrapper(1, 425, 1.5, true, func(opts *bind.TransactOpts) (interface{}, error) {
-			// Call VoteOnContestation via the EngineTransactor
-			return bs.services.Engine.Engine.EngineTransactor.VoteOnContestation(opts, ts.TaskId, true) // true for yea vote
-		})
+		workerLogger.Info().Str("validator", selectedValidator.Account.Address.Hex()).Msg("CID matches on-chain solution. voting NAY...")
+		// vote nay if CID matches
+		err = selectedValidator.VoteOnContestation(ts.TaskId, false)
 		if err != nil {
-			workerLogger.Error().Err(err).Str("validator", selectedValidator.Address.Hex()).Msg("Failed to submit vote transaction via NonceManagerWrapper")
-			// txHash is not available here
+			workerLogger.Error().Err(err).Str("validator", selectedValidator.Account.Address.Hex()).Msg("failed to submit vote (NAY)")
 		} else {
-			// NonceManagerWrapper likely logs the hash
-			workerLogger.Info().Str("validator", selectedValidator.Address.Hex()).Msg("Vote (yea) transaction submitted via NonceManagerWrapper (check wrapper logs for hash)")
+			workerLogger.Info().Str("validator", selectedValidator.Account.Address.Hex()).Msg("vote (NAY) transaction completed")
 		}
 	}
 }
 
 // processTaskSubmittedLoop listens to the task submission event sink and populates the txParamCache.
 func (bs *baseStrategy) processTaskSubmittedLoop() {
-	bs.logger.Info().Msg("starting TaskSubmitted processing loop (for cache)")
+	bs.logger.Info().Msg("starting task submitted processing loop (for cache)")
 	for {
 		select {
 		case <-bs.ctx.Done():
-			bs.logger.Info().Msg("shutting down TaskSubmitted processing loop")
+			bs.logger.Info().Msg("shutting down task submitted processing loop")
 			return
 		case event, ok := <-bs.taskSubmittedSink:
 			if !ok {
-				bs.logger.Info().Msg("TaskSubmitted sink channel closed, exiting loop")
+				bs.logger.Info().Msg("task submitted sink channel closed, exiting loop")
 				return
 			}
 			if event == nil {
 				continue
 			}
 			taskIdStr := task.TaskId(event.Id).String()
-			bs.logger.Debug().Str("task", taskIdStr).Str("txHash", event.Raw.TxHash.Hex()).Msg("received TaskSubmitted event, adding/updating txParamCache")
+			bs.logger.Debug().Str("task", taskIdStr).Str("txhash", event.Raw.TxHash.Hex()).Msg("received task submitted event, adding to task->txhash cache")
 
 			// Add/Update the cache. If the task ID was already present, this updates its TxHash
 			// and makes it the most recently used entry.
-			if bs.txParamCache != nil {
-				bs.txParamCache.Add(taskIdStr, event.Raw.TxHash)
+			if bs.txTasktoTxHashCache != nil {
+				bs.txTasktoTxHashCache.Add(taskIdStr, event.Raw.TxHash)
 			}
 		}
 	}

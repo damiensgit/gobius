@@ -37,7 +37,7 @@ import (
 type Validators struct {
 	validators []*Validator
 	index      int
-	mu         sync.Mutex // Protects index and potentially the slice
+	mu         sync.Mutex
 }
 
 var (
@@ -80,6 +80,77 @@ func NewValidator(config *config.AppConfig, engine *EngineWrapper, baseToken *ba
 
 func (v *Validator) ValidatorAddress() common.Address {
 	return v.Account.Address
+}
+
+// VoteOnContestation
+func (v *Validator) VoteOnContestation(taskId task.TaskId, yea bool) error {
+	tx, err := v.Account.NonceManagerWrapper(v.config.Miner.ErrorMaxRetries, v.config.Miner.ErrorBackoffTime, v.config.Miner.ErrorBackofMultiplier, false, func(opts *bind.TransactOpts) (interface{}, error) {
+		opts.NoSend = true // Prepare transaction but do not send automatically via wrapper
+		txToSign, err := v.engine.Engine.VoteOnContestation(opts, taskId, yea)
+		if err != nil {
+			return nil, err
+		}
+		return v.Account.SendSignedTransaction(txToSign)
+	})
+
+	if err != nil {
+		v.logger.Error().Err(err).Msg("error sending contestation vote")
+		return err
+	}
+
+	if tx == nil {
+		err = errors.New("assertion: transaction is nil but no error reported from NonceManagerWrapper")
+		v.logger.Error().Err(err).Msg("error sending contestation vote")
+		return err
+	}
+
+	// Wait for the transaction to be mined
+	_, success, _, err := v.Account.WaitForConfirmedTx(tx)
+
+	if err != nil {
+		v.logger.Error().Err(err).Msg("error waiting for contestation vote to be mined")
+		return err
+	}
+
+	if success {
+		v.logger.Info().Str("txhash", tx.Hash().String()).Msg("✅ contestation vote successful")
+	} else {
+		v.logger.Error().Msg("❌ contestation vote failed")
+	}
+
+	return nil
+}
+
+func (v *Validator) SubmitContestation(taskId task.TaskId) error {
+	tx, err := v.Account.NonceManagerWrapper(v.config.Miner.ErrorMaxRetries, v.config.Miner.ErrorBackoffTime, v.config.Miner.ErrorBackofMultiplier, false, func(opts *bind.TransactOpts) (interface{}, error) {
+		opts.NoSend = true // Prepare transaction but do not send automatically via wrapper
+		txToSign, err := v.engine.Engine.SubmitContestation(opts, taskId)
+		if err != nil {
+			return nil, err
+		}
+		return v.Account.SendSignedTransaction(txToSign)
+	})
+
+	if err != nil {
+		v.logger.Error().Err(err).Msg("error sending contestation")
+		return err
+	}
+
+	// Wait for the transaction to be mined
+	_, success, _, err := v.Account.WaitForConfirmedTx(tx)
+
+	if err != nil {
+		v.logger.Error().Err(err).Msg("error waiting for contestation to be mined")
+		return err
+	}
+
+	if success {
+		v.logger.Info().Str("txhash", tx.Hash().String()).Msg("✅ contestation successful")
+	} else {
+		v.logger.Error().Msg("❌ contestation failed")
+	}
+
+	return nil
 }
 
 func (v *Validator) InitiateValidatorWithdraw(amount float64) error {
@@ -125,46 +196,6 @@ func (v *Validator) InitiateValidatorWithdraw(amount float64) error {
 
 	completeTimein24hrs := time.Now().Add(secondsToUnlock * time.Second)
 	v.logger.Info().Str("txhash", tx.Hash().String()).Msgf("initated validator withdraw of %s. complete on or after: %s", validatorBal.String(), completeTimein24hrs.Format(time.DateTime))
-	return nil
-}
-
-func (v *Validator) VoteOnContestation(taskId task.TaskId, yea bool) error {
-	gp, gasFeeCap, gasFeeTip, _ := v.Account.Client.GasPriceOracle(true)
-	opts := v.Account.GetOpts(0, gp, gasFeeCap, gasFeeTip)
-
-	tx, err := v.engine.Engine.VoteOnContestation(opts, taskId, yea)
-	if err != nil {
-		v.logger.Err(err).Msg("failed to vote on contestation")
-		return err
-	}
-
-	// Wait for the transaction to be mined
-	_, success, _, _ := v.Account.WaitForConfirmedTx(tx)
-	if !success {
-		return err
-	}
-
-	v.logger.Info().Str("txhash", tx.Hash().String()).Msg("voted on contestation")
-	return nil
-}
-
-func (v *Validator) SubmitContestation(taskId task.TaskId) error {
-	gp, gasFeeCap, gasFeeTip, _ := v.Account.Client.GasPriceOracle(true)
-	opts := v.Account.GetOpts(0, gp, gasFeeCap, gasFeeTip)
-
-	tx, err := v.engine.Engine.SubmitContestation(opts, taskId)
-	if err != nil {
-		v.logger.Err(err).Msg("failed to submit contestation")
-		return err
-	}
-
-	// Wait for the transaction to be mined
-	_, success, _, _ := v.Account.WaitForConfirmedTx(tx)
-	if !success {
-		return err
-	}
-
-	v.logger.Info().Str("txhash", tx.Hash().String()).Msg("submitted contestation")
 	return nil
 }
 
@@ -498,6 +529,16 @@ func (v *Validator) MaxSubmissions(blockTime time.Time) (time.Time, int64, error
 	return lastSubmission, maxSubmissions, nil
 }
 
+// IsEligibleToVote checks if the validator is eligible to vote on a given task's contestation.
+func (v *Validator) IsEligibleToVote(ctx context.Context, taskId task.TaskId) (bool, uint64, error) {
+	// Note: The context passed here isn't directly used in the EngineWrapper's callOpts for ValidatorCanVote,
+	// as it's a view function, but kept for potential future use or consistency.
+	if v.engine == nil {
+		return false, 99, errors.New("validator has nil engine wrapper")
+	}
+	return v.engine.IsValidatorEligibleToVote(v.ValidatorAddress(), taskId)
+}
+
 // Methods for Validators slice
 
 func (v *Validators) GetValidatorByAddress(addr common.Address) *Validator {
@@ -578,4 +619,3 @@ func (v *Validators) GetNextValidatorAddress() common.Address {
 
 	return validator.ValidatorAddress()
 }
-

@@ -370,7 +370,6 @@ func (account *Account) UpdateNonce() error {
 	return nil
 }
 
-// TODO: move logger to account type
 // TODO: use app context
 func (account *Account) WaitForConfirmedTx(tx *types.Transaction) (receipt *types.Receipt, success bool, revertReason string, err error) {
 	ctxTimeout, cancel := context.WithTimeout(context.Background(), 60*time.Second)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"gobius/bindings/engine"
 	"gobius/bindings/voter"
 	task "gobius/common"
@@ -10,9 +11,13 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/rs/zerolog"
 )
+
+// engine wrapper for the engine contract for view functions only
+// do not add transaction functions to this wrapper
 
 var (
 	// as per the engine contract V5_1, calculation is (reward * modelRate * gaugeMultiplier) / (2 * 1e18 * 1e18);
@@ -139,6 +144,10 @@ func (m *EngineWrapper) GetValidatorStaked(validator common.Address) (*big.Int, 
 	})
 	if !ok {
 		return nil, errors.New("result is not the expected type")
+	}
+
+	if validators.Staked == nil {
+		return nil, errors.New("validator stake is nil")
 	}
 
 	return validators.Staked, nil
@@ -273,6 +282,63 @@ func (m *EngineWrapper) CanTaskIdBeClaimed(claim storage.ClaimTask, cooldownTime
 		}
 	}
 	return true, nil
+}
+
+// IsValidatorEligibleToVote checks if a validator can vote on a specific task contestation.
+// It returns true if eligible, false otherwise, along with the status code from the contract and any error.
+func (ew *EngineWrapper) IsValidatorEligibleToVote(validatorAddr common.Address, taskId task.TaskId) (bool, uint64, error) {
+	callOpts := &bind.CallOpts{} // Use default CallOpts
+
+	logger := ew.logger.With().Str("validator", validatorAddr.Hex()).Str("task", taskId.String()).Logger()
+
+	check := func() (interface{}, error) {
+		return ew.Engine.ValidatorCanVote(callOpts, validatorAddr, taskId)
+	}
+	result, err := utils.ExpRetry(logger, check, 3, 1000)
+	if err != nil {
+		logger.Warn().Err(err).Msg("failed to check ValidatorCanVote during eligibility check")
+		return false, 99, err // Indicate error with a distinct code
+	}
+
+	voteStatusCode, ok := result.(*big.Int)
+	if !ok {
+		err := errors.New("ValidatorCanVote returned unexpected type")
+		logger.Error().Err(err).Msgf("type was %T", result)
+		return false, 98, err // Indicate type error
+	}
+
+	if voteStatusCode == nil {
+		err := errors.New("ValidatorCanVote returned nil status code")
+		logger.Error().Err(err).Msg("ValidatorCanVote returned nil status code")
+		return false, 97, err // Indicate nil return
+	}
+
+	statusCode := voteStatusCode.Uint64()
+	if statusCode == 0 {
+		// Validator is eligible
+		return true, 0, nil
+	}
+
+	// Validator is not eligible, log the reason
+	var reason string
+	switch statusCode {
+	case 1:
+		reason = "contestation doesn't exist"
+	case 2:
+		reason = "voting period ended"
+	case 3:
+		reason = "already voted"
+	case 4:
+		reason = "validator never staked"
+	case 5:
+		reason = "validator staked too long ago"
+	case 6:
+		reason = "validator staked too recently"
+	default:
+		reason = fmt.Sprintf("unknown status code: %d", statusCode)
+	}
+	logger.Debug().Str("reason", reason).Uint64("statusCode", statusCode).Msg("validator cannot vote")
+	return false, statusCode, nil
 }
 
 // V5:

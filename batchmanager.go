@@ -1095,7 +1095,7 @@ func (tm *BatchTransactionManager) processBatch(
 		var claimsToDelete []task.TaskId
 
 		for _, t := range tasks {
-			res, err := tm.services.Engine.Engine.Solutions(nil, t.TaskId)
+			res, err := tm.services.Engine.GetSolution(t.TaskId)
 			if err != nil {
 				tm.services.Logger.Err(err).Str("taskid", t.TaskId.String()).Msg("error getting on-chain solution information, skipping task in batch prep")
 				continue
@@ -1371,7 +1371,7 @@ func (tm *BatchTransactionManager) processBatch(
 			} else {
 				tm.services.TaskTracker.TaskFailed()
 
-				res, chainErr := tm.services.Engine.Engine.Solutions(nil, taskid)
+				res, chainErr := tm.services.Engine.GetSolution(taskid)
 				if chainErr != nil {
 					tm.services.Logger.Err(chainErr).Str("taskid", taskIdStr).Msg("error getting solution information for task onchain")
 					continue
@@ -1802,7 +1802,7 @@ func (tm *BatchTransactionManager) BatchSolutions() error {
 
 	for _, solution := range copySolutions {
 
-		soluitionInfo, err := tm.services.Engine.Engine.Solutions(nil, solution.taskID)
+		soluitionInfo, err := tm.services.Engine.GetSolution(solution.taskID)
 
 		if err != nil {
 			tm.services.Logger.Err(err).Msg("error getting solution information")
@@ -2166,7 +2166,6 @@ func (tm *BatchTransactionManager) BulkTasks(account *account.Account, count int
 			return account.SendSignedTransaction(txToSign)
 		})
 
-		// --- Log Gas Limit Info ---
 		logCtx := map[string]interface{}{"batch_size": count, "account": account.Address.String()}
 		logGasLimitDetails(tm.services.Logger, tx, isEstimationMode, hardcodedGasLimit, "BulkTasks", logCtx)
 
@@ -2182,21 +2181,19 @@ func (tm *BatchTransactionManager) BulkTasks(account *account.Account, count int
 
 		receipt, success, _, waitErr := account.WaitForConfirmedTx(tx)
 
-		// --- Process Receipt and Metrics ---
+		// Process receipt and metrics
 		txCost := tm.processReceiptAndMetrics(receipt, tm.cumulativeGasUsed.AddTasks, count, "task")
 
 		if waitErr != nil {
 			// Error logged in WaitForConfirmedTx
-			return receipt, waitErr // Return receipt (potentially nil) and error
+			return receipt, waitErr
 		}
 		if !success {
-			// Revert logged in WaitForConfirmedTx
-			// Return receipt and nil error, caller checks status
 			return receipt, nil
 		}
 
-		// --- Success Case: Process Logs and Update Storage ---
-		if receipt != nil { // Should be non-nil here
+		// Process logs and update storage
+		if receipt != nil {
 			tm.services.Logger.Info().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("bulk tasks transaction succeeded")
 
 			var submittedTasks []task.TaskId
@@ -2234,7 +2231,7 @@ func (tm *BatchTransactionManager) BulkTasks(account *account.Account, count int
 		}
 
 		return receipt, nil
-	} // End sendTx inner function
+	}
 
 	receipt, err := sendTx(context.Background(), nil, nil)
 	return receipt, err
