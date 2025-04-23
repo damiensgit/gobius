@@ -20,17 +20,18 @@ const (
 )
 
 type AppConfig struct {
-	DBPath              string            `json:"db_path"`
-	LogPath             string            `json:"log_path"`
-	LogLevel            int               `json:"log_level"`
-	CachePath           string            `json:"cache_path"`
-	CheckCommitment     bool              `json:"check_commitment"`
-	EvilMode            bool              `json:"evil_mode"`     // for testing purposes
-	EvilModeMinTime     int               `json:"evil_mode_min"` // for testing purposes
-	EvilModeRandInt     int               `json:"evil_mode_int"` // for testing purposes
-	NumWorkersPerGPU    int               `json:"num_workers_per_gpu"`
-	PriceOracleContract ethcommon.Address `json:"price_oracle_contract"`
-	PopTaskRandom       bool              `json:"pop_task_random"`
+	DBPath                 string            `json:"db_path"`
+	LogPath                string            `json:"log_path"`
+	LogLevel               int               `json:"log_level"`
+	CachePath              string            `json:"cache_path"`
+	CheckCommitment        bool              `json:"check_commitment"`
+	EvilMode               bool              `json:"evil_mode"`     // for testing purposes
+	EvilModeMinTime        int               `json:"evil_mode_min"` // for testing purposes
+	EvilModeRandInt        int               `json:"evil_mode_int"` // for testing purposes
+	NumWorkersPerGPU       int               `json:"num_workers_per_gpu"`
+	PriceOracleContract    ethcommon.Address `json:"price_oracle_contract"`
+	PopTaskRandom          bool              `json:"pop_task_random"`
+	VerificationSampleRate int               `json:"verification_sample_rate"`
 
 	Miner SolverConfig `json:"solver"`
 
@@ -299,16 +300,17 @@ func NewAppConfig(testnetType int) AppConfig {
 
 	// TODO: fill with more sensible defaults
 	cfg := AppConfig{
-		DBPath:           "storage.db",
-		LogPath:          "log.txt",
-		LogLevel:         0,
-		CachePath:        "cache",
-		CheckCommitment:  true,
-		NumWorkersPerGPU: 1,
-		EvilMode:         false,
-		EvilModeMinTime:  2000,
-		EvilModeRandInt:  1000,
-		PopTaskRandom:    false,
+		DBPath:                 "storage.db",
+		LogPath:                "log.txt",
+		LogLevel:               0,
+		CachePath:              "cache",
+		CheckCommitment:        true,
+		NumWorkersPerGPU:       1,
+		EvilMode:               false,
+		EvilModeMinTime:        2000,
+		EvilModeRandInt:        1000,
+		PopTaskRandom:          false,
+		VerificationSampleRate: 1000,
 
 		ValidatorConfig: ValidatorConfig{
 			InitialStake:            0,

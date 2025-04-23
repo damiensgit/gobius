@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"gobius/account"
+	"gobius/bindings/arbiusrouterv1"
 	"gobius/bindings/basetoken" // Added for BaseToken ABI
 	"gobius/bindings/engine"
 	"gobius/client"
@@ -1153,6 +1154,82 @@ func depositMonitor(ctx context.Context, rpcClient *client.Client, startBlock, e
 	bm := metrics.NewBlockMetrics(rpcClient, services.Config, services.Engine.Engine)
 
 	bm.ProcessDepositWithdrawLogs(rpcClient, startBlock, endBlock, services.Engine.Engine)
+
+}
+
+func sendTestPlaygroundTask(ctx context.Context) {
+	// Get the services from the context
+	services, ok := ctx.Value(servicesKey{}).(*Services)
+	if !ok {
+		log.Fatal("Could not get services from context")
+	}
+
+	ctr, err := arbiusrouterv1.NewArbiusRouterV1(services.Config.BaseConfig.ArbiusRouterAddress, services.OwnerAccount.Client.Client)
+	if err != nil {
+		services.Logger.Err(err).Msg("error creating arbius router")
+		return
+	}
+
+	// get the baseTokenBalance on owner account as balance may change between checks
+	baseTokenBalance, err := services.Basetoken.BalanceOf(nil, services.OwnerAccount.Address)
+	if err != nil {
+		services.Logger.Err(err).Msg("failed to get balance")
+		return
+	}
+
+	allowanceAddress := services.Config.BaseConfig.ArbiusRouterAddress
+
+	allowance, err := services.Basetoken.Allowance(nil, services.OwnerAccount.Address, allowanceAddress)
+	if err != nil {
+		services.Logger.Err(err).Msg("failed to get allowance")
+		return
+	}
+
+	services.Logger.Debug().Msgf("allowance amount: %s", services.Config.BaseConfig.BaseToken.FormatFixed(allowance))
+
+	// check if the allowance is less than the balance
+	if allowance.Cmp(baseTokenBalance) < 0 {
+		services.Logger.Info().Msgf("will need to increase allowance")
+
+		allowanceAmount := new(big.Int).Sub(abi.MaxUint256, allowance)
+
+		opts := services.OwnerAccount.GetOpts(0, nil, nil, nil)
+		// increase the allowance
+		tx, err := services.Basetoken.Approve(opts, allowanceAddress, allowanceAmount)
+		if err != nil {
+			services.Logger.Err(err).Msg("failed to approve allowance")
+			return
+		}
+		// Wait for the transaction to be mined
+		_, success, _, _ := services.OwnerAccount.WaitForConfirmedTx(tx)
+		if !success {
+			return
+		}
+
+		services.Logger.Info().Str("txhash", tx.Hash().String()).Msgf("allowance increased")
+	}
+
+	services.Logger.Info().Msgf("submitting task")
+
+	opts := services.OwnerAccount.GetOpts(0, nil, nil, nil)
+
+	tx, err := ctr.SubmitTask(opts, services.AutoMineParams.Version, services.AutoMineParams.Owner, services.AutoMineParams.Model, services.AutoMineParams.Fee, services.AutoMineParams.Input, big.NewInt(111), big.NewInt(1_000_000))
+	if err != nil {
+		services.Logger.Err(err).Msg("error submitting task")
+		return
+	}
+
+	_, success, _, err := services.OwnerAccount.WaitForConfirmedTx(tx)
+	if err != nil {
+		services.Logger.Err(err).Msg("error waiting for task submission")
+		return
+	}
+
+	if success {
+		services.Logger.Info().Str("tx", tx.Hash().String()).Msg("submitted task")
+	} else {
+		services.Logger.Err(err).Msg("task submission failed")
+	}
 
 }
 

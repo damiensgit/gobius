@@ -340,10 +340,7 @@ func newBaseStrategy(appCtx context.Context, services *Services, submitter Solut
 
 	logger := services.Logger.With().Str("strategy", strategyName).Logger()
 
-	// TODO: Add VerificationSampleRate to Config struct
-	sampleRate := uint64(1000) // Default sample rate (1 in 1000)
-	logger.Warn().Uint64("rate", sampleRate).Msg("using default verification sample rate (1 in N) - TODO: Add VerificationSampleRate to config")
-	// if services.Config.VerificationSampleRate > 0 { ... }
+	sampleRate := uint64(services.Config.VerificationSampleRate)
 
 	if sampleRate == 0 {
 		logger.Error().Msg("verification sample rate cannot be zero, disabling sampling verification")
@@ -582,9 +579,9 @@ func (bs *baseStrategy) start(producer TaskProducer, taskHandler taskHandlerFunc
 // DecodeTaskTransaction decodes either a submitTask or bulkSubmitTask transaction
 // and returns the relevant parameters.
 func (bs *baseStrategy) decodeTaskTransaction(tx *types.Transaction) (*SubmitTaskParams, error) {
-	// First verify this is a transaction to the Engine contract
-	if tx.To() == nil || *tx.To() != bs.services.Config.BaseConfig.EngineAddress {
-		return nil, fmt.Errorf("transaction not sent to Engine contract")
+	// First verify this is a transaction to the Engine contract or arbius router contract
+	if tx.To() == nil || (*tx.To() != bs.services.Config.BaseConfig.EngineAddress && *tx.To() != bs.services.Config.BaseConfig.ArbiusRouterAddress) {
+		return nil, fmt.Errorf("transaction not sent to engine contract or arbius router contract")
 	}
 
 	// Get the method signature (first 4 bytes)
@@ -628,47 +625,6 @@ func (bs *baseStrategy) decodeTaskTransaction(tx *types.Transaction) (*SubmitTas
 	if !okV || !okO || !okM || !okF || !okI {
 		return nil, fmt.Errorf("type assertion failed for one or more parameters")
 	}
-
-	submitTaskParams := &SubmitTaskParams{
-		Version: version,
-		Owner:   owner,
-		Model:   model,
-		Fee:     fee,
-		Input:   input,
-	}
-
-	return submitTaskParams, nil
-}
-
-// DecodeSubmitTask decodes a submitTask transaction and returns the parameters
-// This is a helper function to decode the parameters from a submitTask transaction to the engine contract only
-// Deprecated: Use DecodeTaskTransaction instead which handles both single and bulk submit.
-func (bs *baseStrategy) decodeSubmitTask(tx *types.Transaction, taskId task.TaskId) (*SubmitTaskParams, error) {
-	// First verify this is a transaction to the Engine contract
-	if tx.To() == nil || *tx.To() != bs.services.Config.BaseConfig.EngineAddress {
-		return nil, fmt.Errorf("transaction not sent to Engine contract")
-	}
-
-	// Get the method signature (first 4 bytes)
-	methodSig := tx.Data()[:4]
-
-	// Verify this is a submitTask call by checking method signature
-	if !bytes.Equal(bs.submitMethod.ID, methodSig) {
-		return nil, fmt.Errorf("not a submitTask transaction")
-	}
-
-	// Now we can safely decode the parameters using cached method
-	params, err := bs.submitMethod.Inputs.Unpack(tx.Data()[4:])
-	if err != nil {
-		return nil, err
-	}
-
-	// Now params contains your decoded parameters in order
-	version := params[0].(uint8)
-	owner := params[1].(common.Address)
-	model := params[2].([32]byte)
-	fee := params[3].(*big.Int)
-	input := params[4].([]byte)
 
 	submitTaskParams := &SubmitTaskParams{
 		Version: version,
@@ -753,7 +709,14 @@ func (bs *baseStrategy) solveTask(ctx context.Context, taskId task.TaskId, param
 
 	bs.logger.Debug().Str("input", inputRaw).Str("task", taskIdStr).Msg("decoded task input")
 
-	modelId := common.Bytes2Hex(params.Model[:]) // Use model from params
+	modelId := "0x" + common.Bytes2Hex(params.Model[:]) // Use model from params
+
+	// Check if the task model matches the configured model for this miner
+	if modelId != bs.services.Config.Strategies.Model {
+		bs.logger.Info().Str("task", taskIdStr).Str("task_model", modelId).Str("configured_model", bs.services.Config.Strategies.Model).Msg("skipping task, model does not match configured model")
+		return nil, nil // Return nil, nil to indicate skipped without error
+	}
+
 	model := models.ModelRegistry.GetModel(modelId)
 	if model == nil {
 		bs.logger.Error().Str("model", modelId).Str("task", taskIdStr).Msg("could not find model specified in task parameters")
@@ -825,13 +788,12 @@ func (bs *baseStrategy) solveTask(ctx context.Context, taskId task.TaskId, param
 		return nil, err
 	}
 
-	// we wont consider this a failure
 	err = bs.submitter.SubmitIpfsCid(validator, taskId, cid)
 	if err != nil {
+		// we wont consider this a failure
 		bs.logger.Warn().Err(err).Msg("ipfs cid submission failed")
 	}
 
-	// Use a separate goroutine without WaitGroup tracking for solution submission
 	err = bs.submitter.SubmitSolution(validator, taskId, cid)
 	if err != nil {
 		bs.logger.Error().Err(err).Msg("solution submission failed")
@@ -1001,8 +963,8 @@ func (p *StorageProducer) GetTask(ctx context.Context) (*TaskSubmitted, error) {
 	}
 }
 
-// EventProducer listens for on-chain TaskSubmitted events and provides them via a channel.
-type EventProducer struct {
+// TaskSubmittedEventProducer listens for on-chain TaskSubmitted events and provides them via a channel.
+type TaskSubmittedEventProducer struct {
 	services      *Services
 	logger        zerolog.Logger
 	ctx           context.Context    // Context managed by the strategy
@@ -1019,13 +981,13 @@ type EventProducer struct {
 	goroutineRunner
 }
 
-// NewEventProducer creates a producer that listens for on-chain events.
-func NewEventProducer(appCtx context.Context, services *Services, bufferSize int) *EventProducer {
+// NewTaskSubmittedEventProducer creates a producer that listens for on-chain events.
+func NewTaskSubmittedEventProducer(appCtx context.Context, services *Services, bufferSize int) *TaskSubmittedEventProducer {
 	ctx, cancel := context.WithCancel(appCtx)
 	if bufferSize <= 0 {
 		bufferSize = 100 // Default buffer size
 	}
-	p := &EventProducer{
+	p := &TaskSubmittedEventProducer{
 		services:        services,
 		logger:          services.Logger.With().Str("producer", "event").Logger(),
 		ctx:             ctx,
@@ -1065,10 +1027,10 @@ func NewEventProducer(appCtx context.Context, services *Services, bufferSize int
 	return p
 }
 
-func (p *EventProducer) Name() string { return "event" }
+func (p *TaskSubmittedEventProducer) Name() string { return "task_submitted_event" }
 
 // Start begins the event listener loop.
-func (p *EventProducer) Start(ctx context.Context) error {
+func (p *TaskSubmittedEventProducer) Start(ctx context.Context) error {
 	// Start the subscription manager (manages connection/reconnection)
 	p.subManager.Start()
 	// Start the loop to process events received in the sink
@@ -1077,7 +1039,7 @@ func (p *EventProducer) Start(ctx context.Context) error {
 }
 
 // Stop signals the listener loop to stop and closes the task channel.
-func (p *EventProducer) Stop() {
+func (p *TaskSubmittedEventProducer) Stop() {
 	p.stopOnce.Do(func() {
 		p.logger.Info().Msg("stopping")
 		// Stop the subscription manager first (cancels context, unsubscribes)
@@ -1092,7 +1054,7 @@ func (p *EventProducer) Stop() {
 }
 
 // GetTask waits for a task from the internal channel or context cancellation.
-func (p *EventProducer) GetTask(ctx context.Context) (*TaskSubmitted, error) {
+func (p *TaskSubmittedEventProducer) GetTask(ctx context.Context) (*TaskSubmitted, error) {
 	p.logger.Debug().Int("chan_len", len(p.taskChan)).Msg("worker requesting task")
 	select {
 	case <-p.ctx.Done(): // Producer context stopping
@@ -1110,13 +1072,13 @@ func (p *EventProducer) GetTask(ctx context.Context) (*TaskSubmitted, error) {
 }
 
 // processEventsLoop waits for events from the sink channel and pushes them to the task channel.
-func (p *EventProducer) processEventsLoop() {
-	p.logger.Info().Msg("starting event processing loop")
+func (p *TaskSubmittedEventProducer) processEventsLoop() {
+	p.logger.Info().Msg("starting task submitted event processing loop")
 
 	for {
 		select {
 		case <-p.ctx.Done():
-			p.logger.Info().Msg("shutting down event processing loop")
+			p.logger.Info().Msg("shutting down task submitted event processing loop")
 			return
 
 		case event := <-p.sinkEvents:
@@ -1130,16 +1092,16 @@ func (p *EventProducer) processEventsLoop() {
 			}
 			taskIdStr := task.TaskId(ts.TaskId).String()
 
-			p.logger.Info().Str("task", taskIdStr).Int("chan_len", len(p.taskChan)).Msg("received TaskSubmitted event")
+			p.logger.Info().Str("task", taskIdStr).Int("chan_len", len(p.taskChan)).Msg("received task submitted event")
 
 			select {
 			case p.taskChan <- ts:
-				p.logger.Debug().Str("task", taskIdStr).Int("chan_len", len(p.taskChan)).Msg("event task buffered for worker")
+				p.logger.Debug().Str("task", taskIdStr).Int("chan_len", len(p.taskChan)).Msg("task submitted event buffered for worker")
 			case <-p.ctx.Done():
-				p.logger.Warn().Str("task", taskIdStr).Msg("context cancelled during event processing, discarding event")
+				p.logger.Warn().Str("task", taskIdStr).Msg("context cancelled during task submitted event processing, discarding event")
 				// Do not return here, allow loop to continue checking context
 			default:
-				p.logger.Warn().Str("task", taskIdStr).Int("buffer_size", p.maxBufferSize).Msg("event task channel full, discarding new event")
+				p.logger.Warn().Str("task", taskIdStr).Int("buffer_size", p.maxBufferSize).Msg("task submitted event channel full, discarding new event")
 			}
 		}
 	}
@@ -1217,15 +1179,14 @@ func (s *BulkMineStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmi
 		// Check if the error is specifically context cancellation or deadline exceeded
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			workerLogger.Info().Msg("task context cancelled, requeueing task")
-			requeueTask(taskId)
 			// Do not mark GPU as error, as it was context cancellation, not a GPU fault
 			gpu.SetStatus("Idle") // Reset status as the task is being abandoned due to cancellation
 		} else {
 			// Handle other errors (genuine task processing failures)
 			workerLogger.Error().Err(err).Msg("solve task failed, requeueing task")
-			requeueTask(taskId)
 			gpu.SetStatus("Error") // Mark GPU as having encountered an error
 		}
+		requeueTask(taskId)
 	} else {
 		workerLogger.Info().Str("elapsed", solveElapsed.String()).Msg("task solved successfully")
 		s.gpuPool.AddSolveTime(solveElapsed)
@@ -1285,7 +1246,7 @@ func NewListenStrategy(appContext context.Context, services *Services, submitter
 		return nil, err
 	}
 	// Size the producer buffer - needs config? Let's use numWorkers*2 for now.
-	producer := NewEventProducer(base.ctx, services, base.numWorkers*2) // Use strategy's context
+	producer := NewTaskSubmittedEventProducer(base.ctx, services, base.numWorkers*2) // Use strategy's context
 
 	return &ListenStrategy{
 		baseStrategy: base, // Use the pointer directly
@@ -1308,22 +1269,25 @@ func (s *ListenStrategy) handleTask(workerId int, gpu *task.GPU, ts *TaskSubmitt
 
 	params, err := s.decodeTransaction(ts.TxHash)
 	if err != nil {
-		workerLogger.Error().Err(err).Msg("decode transaction failed (event task)")
+		workerLogger.Error().Err(err).Msg("decode transaction failed")
 		gpu.SetStatus("Error")
 		return
 	}
 
 	solveStart := time.Now()
-	_, err = s.solveTask(taskCtx, ts.TaskId, params, gpu, false)
+	cid, err := s.solveTask(taskCtx, ts.TaskId, params, gpu, false)
 	solveElapsed := time.Since(solveStart)
 
 	if err != nil {
-		workerLogger.Error().Err(err).Msg("solve task failed (event task - not requeued)")
+		workerLogger.Error().Err(err).Msg("solve task failed")
 		// Event tasks are ephemeral, not requeued
 		gpu.SetStatus("Error")
 	} else {
-		workerLogger.Info().Str("elapsed", solveElapsed.String()).Msg("task solved successfully (event task)")
-		s.gpuPool.AddSolveTime(solveElapsed)
+		// Check if the CID is not nil. If it is, the task was skipped and we should not count it/report it as this means we have no model for it
+		if cid != nil {
+			workerLogger.Info().Str("elapsed", solveElapsed.String()).Msg("task solved successfully")
+			s.gpuPool.AddSolveTime(solveElapsed)
+		}
 		gpu.SetStatus("Idle")
 	}
 }
@@ -1928,7 +1892,7 @@ func (bs *baseStrategy) processSampledSolutionsLoop(sampleRate uint64) {
 				continue // Skip our own solutions
 			}
 
-			// Predictable Sampling Logic
+			// Predictable sampling logic
 			shouldSample := false
 			if sampleRate > 0 && sampleRate != ^uint64(0) {
 				// Use Solution TxHash for unpredictability (and uniqueness) at solve time

@@ -27,7 +27,8 @@ func Test_Http_Client_PinFilesToIPFS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cid, err := ipfsClient.PinFilesToIPFS("taskid", []IPFSFile{
+	ctx := context.Background()
+	cid, err := ipfsClient.PinFilesToIPFS(ctx, "taskid", []IPFSFile{
 		{
 			Name: "ipfs_a.bin",
 			Path: filepath.Join(appConfig.CachePath, "ipfs_a.bin"),
@@ -133,7 +134,8 @@ func Test_Mock_PinFilesToIPFS(t *testing.T) {
 		files[i].Buffer = &buffer
 	}
 
-	cid, err := ipfsClient.PinFilesToIPFS("taskid", files)
+	ctx := context.Background()
+	cid, err := ipfsClient.PinFilesToIPFS(ctx, "taskid", files)
 
 	if err != nil {
 		t.Fatal(err)

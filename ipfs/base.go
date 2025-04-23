@@ -44,10 +44,10 @@ func (ic *BaseIPFSClient) PinFileToIPFS(data []byte, filename string) string {
 	file := files.NewBytesFile(data)
 	test, err := ic.api.Unixfs().Add(ctx, file, ic.ipfsOptions...)
 	if err != nil {
-		fmt.Println(err.Error())
+		//fmt.Println(err.Error())
 		return ""
 	}
-	fmt.Println(test.RootCid().String())
+	//fmt.Println(test.RootCid().String())
 	return test.RootCid().String()
 }
 

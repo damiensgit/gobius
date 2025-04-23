@@ -1,7 +1,6 @@
 package ipfs
 
 import (
-	"fmt"
 	"gobius/config"
 
 	//blocks "github.com/ipfs/go-block-format"
@@ -23,14 +22,12 @@ func NewHttpIPFSClient(appConfig config.AppConfig, hashOnly bool) (*HttpIPFSClie
 
 	ma, err := ma.NewMultiaddr(appConfig.IPFS.HTTPClient.URL)
 	if err != nil {
-		fmt.Println(err.Error())
 		return nil, err
 	}
 
 	//api, err := rpc.NewLocalApi()
 	api, err := rpc.NewApi(ma)
 	if err != nil {
-		fmt.Println(err.Error())
 		return nil, err
 	}
 

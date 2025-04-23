@@ -485,6 +485,8 @@ func main() {
 			}
 			// Assuming RunAutoTaskSubmit is defined in commands.go (in the same package)
 			RunAutoTaskSubmit(appQuit, appServices, interval)
+		case "testplaygroundtask":
+			sendTestPlaygroundTask(appContext)
 		case "gas-stats":
 			var fromBlock, endBlock int64
 			if len(args) < 2 {

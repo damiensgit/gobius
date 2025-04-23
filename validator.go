@@ -386,7 +386,7 @@ func (v *Validator) ProcessValidatorStake(baseTokenBalance *big.Int) {
 
 		allowanceAmount := new(big.Int).Sub(abi.MaxUint256, allowance)
 
-		opts := v.Account.GetOpts(0, big.NewInt(1000000000), nil, nil)
+		opts := v.Account.GetOpts(0, nil, nil, nil)
 		// increase the allowance
 		tx, err := v.basetoken.Approve(opts, allowanceAddress, allowanceAmount)
 		if err != nil {

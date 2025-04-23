@@ -26,6 +26,8 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ipfs/go-cid"
+	mh "github.com/multiformats/go-multihash"
 	"github.com/rs/zerolog"
 )
 
@@ -2526,13 +2528,25 @@ func (tm *BatchTransactionManager) processIpfsClaimsWithAccount(account *account
 			Str("cid", "0x"+cidHex).
 			Msg("getting signatures for cid")
 
+			// Cast it into a multihash
+		multihash, err := mh.Cast(entry.Cid)
+
+		if err != nil {
+			tm.services.Logger.Error().Err(err).Str("taskId", taskIdStr).Str("cid", "0x"+cidHex).Msg("failed to cast cid to multihash")
+			continue
+		}
+
+		cidAsStr := cid.NewCidV0(multihash).String()
+
+		tm.services.Logger.Warn().Str("cid", cidAsStr).Msg("cid as string")
+
 		// Get signatures from oracle
-		signatures, err := oracleClient.GetSignaturesForCID(ctx, cidHex)
+		signatures, err := oracleClient.GetSignaturesForCID(ctx, cidAsStr)
 		if err != nil {
 			tm.services.Logger.Error().
 				Err(err).
 				Str("taskId", taskIdStr).
-				Str("cid", "0x"+cidHex).
+				Str("cid", cidAsStr).
 				Msg("failed to get signatures for cid")
 			continue
 		}
@@ -2563,7 +2577,7 @@ func (tm *BatchTransactionManager) processIpfsClaimsWithAccount(account *account
 			}
 		}
 
-		opts := account.GetOptsWithoutNonceInc(0, gasPrice, gasFeeCap, gasFeeTip)
+		opts := account.GetOpts(0, gasPrice, gasFeeCap, gasFeeTip)
 		tx, err := tm.services.ArbiusRouter.ClaimIncentive(opts, entry.TaskId, arbiusSignatures)
 		if err != nil {
 			tm.services.Logger.Error().Err(err).Str("taskId", taskIdStr).Msg("failed to submit ipfs claim on-chain")
