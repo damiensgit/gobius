@@ -380,14 +380,12 @@ func (m *QwenMainnetModel) GetCID(ctx context.Context, gpu *common.GPU, taskid s
 	// Use ExpRetryWithContext
 	cid58, err := utils.ExpRetryWithContext(ipfsCtx, m.logger, func() (any, error) {
 		// Pass the ipfsCtx to PinFilesToIPFS
-		// TODO: Update ipfs.PinFilesToIPFS interface to accept context
 		return m.ipfs.PinFilesToIPFS(ipfsCtx, taskid, paths.([]ipfs.IPFSFile))
 	}, 3, 1000)
 
 	if err != nil {
 		return nil, errors.New("cannot pin files to retrieve cid")
 	}
-
 	cidBytes, err := base58.Decode(cid58.(string))
 	if err != nil {
 		return nil, err

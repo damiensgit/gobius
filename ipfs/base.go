@@ -28,6 +28,7 @@ type BaseIPFSClient struct {
 var defaultIPFSOptions = []options.UnixfsAddOption{
 	options.Unixfs.CidVersion(0),
 	options.Unixfs.RawLeaves(false),
+	options.Unixfs.Pin(true),
 }
 
 type IPFSFile struct {
@@ -66,6 +67,7 @@ func (ic *BaseIPFSClient) PinFilesToIPFS(ctx context.Context, taskid string, fil
 		mapOfFiles[file.Name] = files.NewReaderFile(file.Buffer)
 	}
 	mapDirectory := files.NewMapDirectory(mapOfFiles)
+
 	test, err := ic.api.Unixfs().Add(ctx, mapDirectory, ic.ipfsOptions...)
 	if err != nil {
 		return "", err

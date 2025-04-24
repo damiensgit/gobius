@@ -4,7 +4,7 @@
     "bulkTasksAddress": "0x75879250b1d43F8860Bd30C628E8606782a02a87",
     "voterAddress": "0x80E9B3dA81258705eC7C3DC89a799b78f2c68968",
     "veStakingAddress": "0x1c0a14cAC52ebDe9c724e5627162a90A26B85E15",
-    "arbiusRouterAddress": "0x6caF23DC6dAe5EdCc53e4F330B61c420e6c71565",
+    "arbiusRouterAddress": "0xecAba4E6a4bC1E3DE3e996a8B2c89e8B0626C9a1",
     "models": {
       "qwen-qwq-32b": {
         "id": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",

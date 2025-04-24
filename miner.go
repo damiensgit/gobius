@@ -560,7 +560,7 @@ func main() {
 	case "mock":
 		ipfsClient, err = ipfs.NewMockIPFSClient(*cfg, true)
 	case "http_client":
-		ipfsClient, err = ipfs.NewHttpIPFSClient(*cfg, true)
+		ipfsClient, err = ipfs.NewHttpIPFSClient(*cfg, false)
 	default:
 		logger.Fatal().Str("strategy", cfg.IPFS.Strategy).Msg("invalid IPFS strategy")
 	}

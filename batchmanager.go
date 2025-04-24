@@ -2538,8 +2538,6 @@ func (tm *BatchTransactionManager) processIpfsClaimsWithAccount(account *account
 
 		cidAsStr := cid.NewCidV0(multihash).String()
 
-		tm.services.Logger.Warn().Str("cid", cidAsStr).Msg("cid as string")
-
 		// Get signatures from oracle
 		signatures, err := oracleClient.GetSignaturesForCID(ctx, cidAsStr)
 		if err != nil {

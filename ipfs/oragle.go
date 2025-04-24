@@ -21,6 +21,7 @@ type SignRequest struct {
 type SignatureResponse struct {
 	Signer    common.Address `json:"signer"`
 	Signature string         `json:"signature"`
+	Hash      string         `json:"hash"`
 }
 
 // OracleClient defines the interface for interacting with the IPFS oracle
@@ -66,19 +67,32 @@ func (c *HTTPOracleClient) GetSignaturesForCID(ctx context.Context, cid string) 
 	}
 	defer resp.Body.Close()
 
-	// Check response status
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("oracle API returned non-OK status: %d, body: %s", resp.StatusCode, string(body))
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	// Parse response
-	var signatures []SignatureResponse
-	if err := json.NewDecoder(resp.Body).Decode(&signatures); err != nil {
+	// Check response status
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("oracle API returned non-OK status: %d, body: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// Attempt to parse response into the intermediate struct
+	var signResp SignatureResponse
+	if err := json.Unmarshal(bodyBytes, &signResp); err != nil {
 		return nil, fmt.Errorf("failed to decode response: %w", err)
 	}
 
-	return signatures, nil
+	// Convert the single response object into the expected slice format
+	result := []SignatureResponse{
+		{
+			Signer:    signResp.Signer,
+			Signature: signResp.Signature,
+			Hash:      signResp.Hash,
+		},
+	}
+
+	return result, nil
 }
 
 // MockOracleClient implements the OracleClient interface for testing

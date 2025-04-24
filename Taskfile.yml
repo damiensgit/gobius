@@ -12,11 +12,18 @@ vars:
   LOCAL_CONTRACTS: ./contracts
 
 tasks:
-  build:dir:
+  _mkdir:
+    internal: true
     cmds:
-      - mkdir -p {{.BUILD_DIR}}
-    status:
-      - test -d {{.BUILD_DIR}}
+      - cmd: powershell -Command "New-Item -ItemType Directory -Force -Path '{{.DIR}}' | Out-Null"
+        platforms: [windows]
+        silent: true
+      - cmd: mkdir -p "{{.DIR}}"
+        platforms: [linux, darwin]
+        silent: true
+
+  # --- Public Tasks ---
+
 
   _build:interface:
     internal: true
@@ -28,13 +35,14 @@ tasks:
       SRC_DIR: '{{.SRC_DIR | default .INTERFACES_DIR}}'
       BASE_PATH: '{{.BASE_PATH | default .CONTRACT_ROOT}}/contract'
     cmds:
-      - mkdir -p {{.OUT_DIR}}
+      - task: _mkdir
+        vars: { DIR: '{{.OUT_DIR}}' }
       - |
         {{.SOLC}} --base-path '{{.BASE_PATH}}' \
           --include-path '{{.NODE_MODULES}}' \
           --bin --abi {{.SRC_DIR}}/I{{.NAME}}.sol \
           -o {{.BUILD_DIR}} --overwrite \
-          --evm-version london
+          --evm-version london --via-ir --optimize --optimize-runs 10
       - |
         {{.ABIGEN}} \
           --bin={{.BUILD_DIR}}/I{{.NAME}}.bin \
@@ -59,13 +67,14 @@ tasks:
       BASE_PATH: '{{.BASE_PATH | default .CONTRACTS_DIR}}'
       CONTRACT_NAME: '{{.CONTRACT_NAME | default .NAME}}'
     cmds:
-      - mkdir -p {{.OUT_DIR}}
+      - task: _mkdir
+        vars: { DIR: '{{.OUT_DIR}}' }
       - |
         {{.SOLC}} --base-path '{{.BASE_PATH}}' \
           --include-path '{{.NODE_MODULES}}' \
           --bin --abi {{.SRC_DIR}}/{{.NAME}}.sol \
           -o {{.BUILD_DIR}} --overwrite \
-          --evm-version london
+          --evm-version london --via-ir --optimize --optimize-runs 10
       - |
         {{.ABIGEN}} \
           --bin={{.BUILD_DIR}}/{{.CONTRACT_NAME}}.bin \
@@ -89,13 +98,14 @@ tasks:
       SRC_DIR: '{{.SRC_DIR | default .CONTRACTS_DIR}}'
       BASE_PATH: '{{.BASE_PATH | default .CONTRACT_ROOT}}/contract'
     cmds:
-      - mkdir -p {{.OUT_DIR}}
+      - task: _mkdir
+        vars: { DIR: '{{.OUT_DIR}}' }
       - |
         {{.SOLC}} --base-path '{{.BASE_PATH}}' \
           --include-path '{{.NODE_MODULES}}' \
           --abi {{.SRC_DIR}}/{{.NAME}}.sol \
           -o {{.BUILD_DIR}} --overwrite \
-          --evm-version london
+          --evm-version london --via-ir --optimize --optimize-runs 10
       - |
         {{.ABIGEN}} \
           --abi={{.BUILD_DIR}}/{{.NAME}}.abi \
@@ -109,7 +119,6 @@ tasks:
 
   build:voter:
     desc: Build Voter interface
-    deps: [build:dir]
     cmds:
       - task: _build:interface
         vars:
@@ -120,7 +129,6 @@ tasks:
 
   build:arbiusrouterv1:
     desc: Build ArbiusRouterV1 contract
-    deps: [build:dir]
     cmds:
       - task: _build:contract
         vars:
@@ -133,7 +141,6 @@ tasks:
 
   build:vestaking:
     desc: Build VeStaking interface
-    deps: [build:dir]
     cmds:
       - task: _build:interface
         vars:
@@ -144,7 +151,6 @@ tasks:
 
   build:votingescrow:
     desc: Build VotingEscrow interface
-    deps: [build:dir]
     cmds:
       - task: _build:interface
         vars:
@@ -155,7 +161,6 @@ tasks:
 
   build:enginev5:
     desc: Build V2_EngineV5 contract (ABI only)
-    deps: [build:dir]
     cmds:
       - task: _build:abi_only
         vars:
@@ -166,7 +171,6 @@ tasks:
 
   build:bulktasks:
     desc: Build BulkTasks contract
-    deps: [build:dir]
     cmds:
       - task: _build:contract
         vars:
@@ -180,7 +184,6 @@ tasks:
 
   build:basetoken:
     desc: Build BaseToken interface
-    deps: [build:dir]
     cmds:
       - task: _build:interface
         vars:
@@ -191,7 +194,6 @@ tasks:
   
   build:quoter:
     desc: Build Quoter interface
-    deps: [build:dir]
     cmds:
       - task: _build:contract
         vars:
