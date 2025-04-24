@@ -1,0 +1,87 @@
+{
+    "db_path": "playground.db",
+    "log_path": "playground.log",
+    "log_level": 1,
+    "cache_path": "cache",
+    "solver": {
+        "enabled": true,
+        "commitments_and_solutions": "doboth",
+        "wait_for_tasks_on_shutdown": true,
+        "use_polling": true,
+        "polling_time": "2s",
+        "batch_mode": 0,
+        "error_max_retries": 5,
+        "error_backoff": 425,
+        "error_backoff_multiplier": 1.5,
+        "metrics_sample_rate": "30s",
+        "enable_gas_estimation_mode": true,
+        "gas_estimation_margin": 100
+    },
+    "validator_config": {
+        "initial_stake": 0,
+        "stake_buffer_amount": 0,
+        "stake_buffer_topup_amount": 0,
+        "stake_buffer_percent": 2,
+        "stake_buffer_topup_percent": 1,
+        "stake_check": true,
+        "stake_check_interval": "120s",
+        "eth_low_threshold": 0.01,
+        "min_basetoken_threshold": 10,
+        "sell_interval": 0,
+        "sell_buffer": 0.01,
+        "sell_profit_in_eth": 0.01,
+        "sell_all_over_threshold": false,
+        "sell_min_amount": 0.1,
+        "sell_max_amount": 1,
+        "sell_eth_bal_target": 0,
+        "private_keys": [""]
+    },    
+    "strategies": {
+        "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
+        "strategy": "listen",
+        "automine": {
+            "owner": "0x5E33e2CeAd338b1224DDd34636DaC7563f97C300",
+            "version": 0,
+            "model": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
+            "fee": 7000000000000000,
+            "input": {
+                "prompt": "1+1=?"
+            }
+        }
+    },
+    "blockchain": {
+        "private_key": "",
+        "rpc_url": "",
+        "sender_rpc_url": "",
+        "client_rpc_urls": [],
+        "cache_nonce": false,
+        "basefee_x": 2
+    },
+    "claim": {
+        "enabled": true,
+        "max_claims_per_batch": 10,
+        "min_claims_per_batch": 10,
+        "delay": 60,
+        "validate_claims": true,
+        "claim_min_reward": 0
+    },
+    "ml": {
+        "strategy": "cog",
+        "cog": {
+          "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc": {
+              "http_timeout": "10m",
+              "url": [""]
+          }
+        }
+    },
+    "ipfs": {
+        "strategy": "http_client",
+        "http_client": {
+            "url": "/ip4/127.0.0.1/tcp/5001"
+        },
+          "incentive_claim": true,
+          "claim_interval": "10s",
+          "oracle_url": "http://45.63.37.71:8444",
+          "timeout": "120s"
+    }
+  }

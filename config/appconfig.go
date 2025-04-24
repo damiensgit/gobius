@@ -310,7 +310,7 @@ func NewAppConfig(testnetType int) AppConfig {
 		EvilModeMinTime:        2000,
 		EvilModeRandInt:        1000,
 		PopTaskRandom:          false,
-		VerificationSampleRate: 1000,
+		VerificationSampleRate: 0,
 
 		ValidatorConfig: ValidatorConfig{
 			InitialStake:            0,
