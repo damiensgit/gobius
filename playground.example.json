@@ -85,9 +85,9 @@
         "timeout": "120s",
         "pinata": {
             "enabled": false,
-            "api_key": "8751a404722c04c39ffe",
-            "api_secret": "33cde1fa9ccc54581c20ad18021ae58e416f96d0befe4e909e23e19ec15c4bc6",
-            "jwt": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VySW5mb3JtYXRpb24iOnsiaWQiOiIxODQzODQ3MC1lNGU5LTRiMWEtYjA1Ny0wZWZlYTA5Njc2ZjgiLCJlbWFpbCI6ImdpZ2FudGlwYXVsQGdtYWlsLmNvbSIsImVtYWlsX3ZlcmlmaWVkIjp0cnVlLCJwaW5fcG9saWN5Ijp7InJlZ2lvbnMiOlt7ImRlc2lyZWRSZXBsaWNhdGlvbkNvdW50IjoxLCJpZCI6IkZSQTEifV0sInZlcnNpb24iOjF9LCJtZmFfZW5hYmxlZCI6ZmFsc2UsInN0YXR1cyI6IkFDVElWRSJ9LCJhdXRoZW50aWNhdGlvblR5cGUiOiJzY29wZWRLZXkiLCJzY29wZWRLZXlLZXkiOiI4NzUxYTQwNDcyMmMwNGMzOWZmZSIsInNjb3BlZEtleVNlY3JldCI6IjMzY2RlMWZhOWNjYzU0NTgxYzIwYWQxODAyMWFlNThlNDE2Zjk2ZDBiZWZlNGU5MDllMjNlMTllYzE1YzRiYzYiLCJleHAiOjE3NzcxMjgxOTB9.NEjSvwCvDozWV_XfIJ5L57z7zytPVLVHH1YJXlOFSm0",
+            "api_key": "api_key",
+            "api_secret": "api_secret",
+            "jwt": "jwt",
             "base_url": "https://arbius.mypinata.cloud"
         }
     }
