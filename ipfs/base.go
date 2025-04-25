@@ -92,11 +92,10 @@ func (ic *BaseIPFSClient) PinFileToIPFS(data []byte, filename string) string {
 // note: taskid is not used in this function until pinata support is added
 func (ic *BaseIPFSClient) PinFilesToIPFS(ctx context.Context, taskid string, filesToAdd []IPFSFile) (string, error) {
 	var pinataCID string
-	var pinataErr error
 	
 	// Try Pinata if enabled
 	if ic.config.IPFS.Pinata.Enabled && ic.pinata != nil {
-		pinataCID, pinataErr = ic.pinata.PinFilesToIPFS(ctx, taskid, filesToAdd)
+		pinataCID, _ = ic.pinata.PinFilesToIPFS(ctx, taskid, filesToAdd)
 	}
 
 	// Always pin to local IPFS

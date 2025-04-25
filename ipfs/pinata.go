@@ -8,9 +8,6 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http"
-	"os"
-	"path/filepath"
-	"strings"
 )
 
 type PinataClient struct {
