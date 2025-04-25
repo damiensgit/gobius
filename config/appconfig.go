@@ -244,6 +244,15 @@ type IPFS struct {
 	ClaimInterval  string     `json:"claim_interval"`  // how often to claim the incentive for pinning ipfs content
 	OracleURL      string     `json:"oracle_url"`
 	Timeout        string     `json:"timeout"`
+	Pinata         Pinata     `json:"pinata"`
+}
+
+type Pinata struct {
+	Enabled   bool   `json:"enabled"`
+	APIKey    string `json:"api_key"`
+	APISecret string `json:"api_secret"`
+	JWT       string `json:"jwt"`
+	BaseURL   string `json:"base_url"`
 }
 
 type HTTPClient struct {

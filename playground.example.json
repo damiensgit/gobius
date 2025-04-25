@@ -79,9 +79,16 @@
         "http_client": {
             "url": "/ip4/127.0.0.1/tcp/5001"
         },
-          "incentive_claim": true,
-          "claim_interval": "10s",
-          "oracle_url": "http://45.63.37.71:8444",
-          "timeout": "120s"
+        "incentive_claim": true,
+        "claim_interval": "10s",
+        "oracle_url": "http://45.63.37.71:8444",
+        "timeout": "120s",
+        "pinata": {
+            "enabled": false,
+            "api_key": "api_key",
+            "api_secret": "api_secret",
+            "jwt": "jwt",
+            "base_url": "https://arbius.mypinata.cloud"
+        }
     }
   }
