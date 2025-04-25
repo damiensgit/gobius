@@ -58,39 +58,53 @@ func NewBaseIPFSClient(cfg config.AppConfig) (*BaseIPFSClient, error) {
 
 // Note: filename is not used in this function until pinata support is added
 func (ic *BaseIPFSClient) PinFileToIPFS(data []byte, filename string) string {
-	// Try Pinata first if enabled in config
+	var pinataCID string
+	
+	// Try Pinata if enabled
 	if ic.config.IPFS.Pinata.Enabled && ic.pinata != nil {
-		cid := ic.pinata.PinFileToIPFS(data, filename)
-		if cid != "" {
-			return cid
-		}
+		pinataCID = ic.pinata.PinFileToIPFS(data, filename)
 	}
 
-	// Fall back to local IPFS
+	// Always pin to local IPFS
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	file := files.NewBytesFile(data)
 	test, err := ic.api.Unixfs().Add(ctx, file, ic.ipfsOptions...)
 	if err != nil {
+		// If local pinning fails, return Pinata CID if available
+		if pinataCID != "" {
+			return pinataCID
+		}
 		return ""
 	}
-	return test.RootCid().String()
+	
+	localCID := test.RootCid().String()
+	
+	// Return Pinata CID if available, otherwise return local CID
+	if pinataCID != "" {
+		return pinataCID
+	}
+	return localCID
 }
 
 // PinFilesToIPFS adds the files to IPFS
 // note: taskid is not used in this function until pinata support is added
 func (ic *BaseIPFSClient) PinFilesToIPFS(ctx context.Context, taskid string, filesToAdd []IPFSFile) (string, error) {
-	// Try Pinata first if enabled in config
+	var pinataCID string
+	var pinataErr error
+	
+	// Try Pinata if enabled
 	if ic.config.IPFS.Pinata.Enabled && ic.pinata != nil {
-		cid, err := ic.pinata.PinFilesToIPFS(ctx, taskid, filesToAdd)
-		if err == nil && cid != "" {
-			return cid, nil
-		}
+		pinataCID, pinataErr = ic.pinata.PinFilesToIPFS(ctx, taskid, filesToAdd)
 	}
 
-	// Fall back to local IPFS
+	// Always pin to local IPFS
 	if err := ctx.Err(); err != nil {
+		// If context is canceled, return Pinata CID if available
+		if pinataCID != "" {
+			return pinataCID, nil
+		}
 		return "", err
 	}
 
@@ -102,9 +116,20 @@ func (ic *BaseIPFSClient) PinFilesToIPFS(ctx context.Context, taskid string, fil
 
 	test, err := ic.api.Unixfs().Add(ctx, mapDirectory, ic.ipfsOptions...)
 	if err != nil {
+		// If local pinning fails, return Pinata CID if available
+		if pinataCID != "" {
+			return pinataCID, nil
+		}
 		return "", err
 	}
-	return test.RootCid().String(), nil
+	
+	localCID := test.RootCid().String()
+	
+	// Return Pinata CID if available, otherwise return local CID
+	if pinataCID != "" {
+		return pinataCID, nil
+	}
+	return localCID, nil
 }
 
 func encodeVarint(n uint64) []byte {
