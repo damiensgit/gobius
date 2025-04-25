@@ -23,6 +23,7 @@ type BaseIPFSClient struct {
 	config      config.AppConfig
 	api         iface.CoreAPI
 	ipfsOptions []options.UnixfsAddOption
+	pinata      *PinataClient
 }
 
 var defaultIPFSOptions = []options.UnixfsAddOption{
@@ -37,28 +38,59 @@ type IPFSFile struct {
 	Buffer *bytes.Buffer
 }
 
+func NewBaseIPFSClient(cfg config.AppConfig) (*BaseIPFSClient, error) {
+	client := &BaseIPFSClient{
+		config:      cfg,
+		ipfsOptions: defaultIPFSOptions,
+	}
+
+	// Initialize Pinata client if enabled
+	if cfg.IPFS.Pinata.Enabled {
+		client.pinata = NewPinataClient(
+			cfg.IPFS.Pinata.APIKey,
+			cfg.IPFS.Pinata.APISecret,
+			cfg.IPFS.Pinata.JWT,
+		)
+	}
+
+	return client, nil
+}
+
 // Note: filename is not used in this function until pinata support is added
 func (ic *BaseIPFSClient) PinFileToIPFS(data []byte, filename string) string {
+	// Try Pinata first if enabled in config
+	if ic.config.IPFS.Pinata.Enabled && ic.pinata != nil {
+		cid := ic.pinata.PinFileToIPFS(data, filename)
+		if cid != "" {
+			return cid
+		}
+	}
+
+	// Fall back to local IPFS
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	file := files.NewBytesFile(data)
 	test, err := ic.api.Unixfs().Add(ctx, file, ic.ipfsOptions...)
 	if err != nil {
-		//fmt.Println(err.Error())
 		return ""
 	}
-	//fmt.Println(test.RootCid().String())
 	return test.RootCid().String()
 }
 
 // PinFilesToIPFS adds the files to IPFS
 // note: taskid is not used in this function until pinata support is added
 func (ic *BaseIPFSClient) PinFilesToIPFS(ctx context.Context, taskid string, filesToAdd []IPFSFile) (string, error) {
+	// Try Pinata first if enabled in config
+	if ic.config.IPFS.Pinata.Enabled && ic.pinata != nil {
+		cid, err := ic.pinata.PinFilesToIPFS(ctx, taskid, filesToAdd)
+		if err == nil && cid != "" {
+			return cid, nil
+		}
+	}
 
-	// Check if context is already canceled before doing anything
+	// Fall back to local IPFS
 	if err := ctx.Err(); err != nil {
-		// Consider logging here if appropriate
 		return "", err
 	}
 
