@@ -52,8 +52,6 @@
     "blockchain": {
         "private_key": "",
         "rpc_url": "",
-        "sender_rpc_url": "",
-        "client_rpc_urls": [],
         "cache_nonce": false,
         "basefee_x": 2
     },
