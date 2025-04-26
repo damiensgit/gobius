@@ -15,7 +15,7 @@
         "error_backoff_multiplier": 1.5,
         "metrics_sample_rate": "30s",
         "enable_gas_estimation_mode": true,
-        "gas_estimation_margin": 100
+        "gas_estimation_margin": 1000
     },
     "validator_config": {
         "initial_stake": 0,
