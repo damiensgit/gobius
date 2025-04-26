@@ -556,12 +556,14 @@ func main() {
 	var ipfsClient ipfs.IPFSClient
 
 	switch cfg.IPFS.Strategy {
-	case "mock":
+	case config.MockClient:
 		ipfsClient, err = ipfs.NewMockIPFSClient(*cfg, true)
-	case "http_client":
+	case config.HttpClient:
 		ipfsClient, err = ipfs.NewHttpIPFSClient(*cfg, false)
+	case config.PinataClient:
+		ipfsClient, err = ipfs.NewPinataIPFSClient(*cfg)
 	default:
-		logger.Fatal().Str("strategy", cfg.IPFS.Strategy).Msg("invalid IPFS strategy")
+		logger.Fatal().Str("strategy", cfg.IPFS.Strategy.String()).Msg("invalid IPFS strategy")
 	}
 
 	if err != nil {

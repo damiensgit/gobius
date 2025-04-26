@@ -82,7 +82,6 @@
         "oracle_url": "http://45.63.37.71:8444",
         "timeout": "120s",
         "pinata": {
-            "enabled": false,
             "api_key": "api_key",
             "api_secret": "api_secret",
             "jwt": "jwt",

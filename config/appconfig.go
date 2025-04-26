@@ -238,17 +238,16 @@ type Cog struct {
 }
 
 type IPFS struct {
-	Strategy       string     `json:"strategy"`
-	HTTPClient     HTTPClient `json:"http_client"`
-	IncentiveClaim bool       `json:"incentive_claim"` // set to true to claim the incentive for pinning ipfs content
-	ClaimInterval  string     `json:"claim_interval"`  // how often to claim the incentive for pinning ipfs content
-	OracleURL      string     `json:"oracle_url"`
-	Timeout        string     `json:"timeout"`
-	Pinata         Pinata     `json:"pinata"`
+	Strategy       IpfsStrategy `json:"strategy"`        // mock, http_client, pinata_client, mixed_client
+	HTTPClient     HTTPClient   `json:"http_client"`     // http client to use for ipfs pinning
+	Pinata         Pinata       `json:"pinata"`          // pinata client to use for ipfs pinning
+	IncentiveClaim bool         `json:"incentive_claim"` // set to true to claim the incentive for pinning ipfs content
+	ClaimInterval  string       `json:"claim_interval"`  // how often to claim the incentive for pinning ipfs content
+	OracleURL      string       `json:"oracle_url"`      // oracle url to use for incentive claim
+	Timeout        string       `json:"timeout"`
 }
 
 type Pinata struct {
-	Enabled   bool   `json:"enabled"`
 	APIKey    string `json:"api_key"`
 	APISecret string `json:"api_secret"`
 	JWT       string `json:"jwt"`
@@ -257,6 +256,56 @@ type Pinata struct {
 
 type HTTPClient struct {
 	URL string `json:"url"`
+}
+
+type IpfsStrategy int
+
+const (
+	MockClient IpfsStrategy = iota
+	HttpClient
+	PinataClient
+	MixedClient
+)
+
+func (c IpfsStrategy) MarshalJSON() ([]byte, error) {
+	return json.Marshal(c.String())
+}
+
+func (c *IpfsStrategy) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+
+	switch s {
+	case "mock":
+		*c = MockClient
+	case "http_client":
+		*c = HttpClient
+	case "pinata_client":
+		*c = PinataClient
+	case "mixed_client":
+		*c = MixedClient
+	default:
+		return errors.New("invalid IpfsStrategy")
+	}
+
+	return nil
+}
+
+func (c IpfsStrategy) String() string {
+	switch c {
+	case MockClient:
+		return "mock"
+	case HttpClient:
+		return "http_client"
+	case PinataClient:
+		return "pinata_client"
+	case MixedClient:
+		return "mixed_client"
+	default:
+		return "unknown"
+	}
 }
 
 type CommitmentOption int
@@ -397,7 +446,7 @@ func NewAppConfig(testnetType int) AppConfig {
 			Strategy: "nop",
 		},
 		IPFS: IPFS{
-			Strategy:       "nop",
+			Strategy:       MockClient,
 			IncentiveClaim: false,
 			OracleURL:      "",
 			Timeout:        "10s",
@@ -483,4 +532,21 @@ func (cfg *AppConfig) ExportConfig(path string) error {
 	defer f.Close()
 
 	return json.NewEncoder(f).Encode(cfg)
+}
+
+func LoadConfigForTesting(file string, testnetType int) (*AppConfig, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	cfg := NewAppConfig(testnetType)
+
+	err = json.NewDecoder(f).Decode(&cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return &cfg, nil
 }

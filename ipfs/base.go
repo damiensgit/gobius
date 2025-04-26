@@ -16,14 +16,15 @@ import (
 // Interface for IPFS things
 type IPFSClient interface {
 	PinFilesToIPFS(ctx context.Context, taskid string, filesToAdd []IPFSFile) (string, error)
-	PinFileToIPFS(data []byte, filename string) string
+	PinFileToIPFS(data []byte, filename string) (string, error)
 }
 
+// BaseIPFSClient provides common fields but should not be used directly.
+// Specific implementations like HttpIPFSClient should be used.
 type BaseIPFSClient struct {
 	config      config.AppConfig
-	api         iface.CoreAPI
-	ipfsOptions []options.UnixfsAddOption
-	pinata      *PinataClient
+	api         iface.CoreAPI             // Interface to local Kubo node
+	ipfsOptions []options.UnixfsAddOption // Options for local Kubo node adds
 }
 
 var defaultIPFSOptions = []options.UnixfsAddOption{
@@ -34,100 +35,67 @@ var defaultIPFSOptions = []options.UnixfsAddOption{
 
 type IPFSFile struct {
 	Name   string // name of file on IPFS
-	Path   string // local path to file to add to IPFS
+	Path   string
 	Buffer *bytes.Buffer
 }
 
-func NewBaseIPFSClient(cfg config.AppConfig) (*BaseIPFSClient, error) {
+// NewBaseIPFSClient initializes common fields. SHOULD NOT BE USED DIRECTLY.
+// Use NewHttpIPFSClient instead.
+func NewBaseIPFSClient(cfg config.AppConfig, api iface.CoreAPI) (*BaseIPFSClient, error) {
+	if api == nil {
+		return nil, fmt.Errorf("api is nil, cannot create BaseIPFSClient")
+	}
+
 	client := &BaseIPFSClient{
 		config:      cfg,
-		ipfsOptions: defaultIPFSOptions,
+		api:         api,                // API must be provided by concrete implementation
+		ipfsOptions: defaultIPFSOptions, // Use default options
 	}
-
-	// Initialize Pinata client if enabled
-	if cfg.IPFS.Pinata.Enabled {
-		client.pinata = NewPinataClient(
-			cfg.IPFS.Pinata.APIKey,
-			cfg.IPFS.Pinata.APISecret,
-			cfg.IPFS.Pinata.JWT,
-		)
-	}
-
 	return client, nil
 }
 
-// Note: filename is not used in this function until pinata support is added
-func (ic *BaseIPFSClient) PinFileToIPFS(data []byte, filename string) string {
-	var pinataCID string
-	
-	// Try Pinata if enabled
-	if ic.config.IPFS.Pinata.Enabled && ic.pinata != nil {
-		pinataCID = ic.pinata.PinFileToIPFS(data, filename)
-	}
-
-	// Always pin to local IPFS
-	ctx, cancel := context.WithCancel(context.Background())
+// PinFileToIPFS pins a single file using the local Kubo node.
+// Note: This implementation uses the BaseIPFSClient's api field.
+func (ic *BaseIPFSClient) PinFileToIPFS(data []byte, filename string) (string, error) {
+	ctx, cancel := context.WithCancel(context.Background()) // Use background context for now
 	defer cancel()
 
 	file := files.NewBytesFile(data)
-	test, err := ic.api.Unixfs().Add(ctx, file, ic.ipfsOptions...)
+	node, err := ic.api.Unixfs().Add(ctx, file, ic.ipfsOptions...)
 	if err != nil {
-		// If local pinning fails, return Pinata CID if available
-		if pinataCID != "" {
-			return pinataCID
-		}
-		return ""
+		return "", fmt.Errorf("error adding file locally: %w", err)
 	}
-	
-	localCID := test.RootCid().String()
-	
-	// Return Pinata CID if available, otherwise return local CID
-	if pinataCID != "" {
-		return pinataCID
-	}
-	return localCID
+
+	localCID := node.RootCid().String()
+	return localCID, nil
 }
 
-// PinFilesToIPFS adds the files to IPFS
-// note: taskid is not used in this function until pinata support is added
+// PinFilesToIPFS pins multiple files as a directory using the local Kubo node.
+// Note: This implementation uses the BaseIPFSClient's api field.
 func (ic *BaseIPFSClient) PinFilesToIPFS(ctx context.Context, taskid string, filesToAdd []IPFSFile) (string, error) {
-	var pinataCID string
-	
-	// Try Pinata if enabled
-	if ic.config.IPFS.Pinata.Enabled && ic.pinata != nil {
-		pinataCID, _ = ic.pinata.PinFilesToIPFS(ctx, taskid, filesToAdd)
-	}
-
-	// Always pin to local IPFS
 	if err := ctx.Err(); err != nil {
-		// If context is canceled, return Pinata CID if available
-		if pinataCID != "" {
-			return pinataCID, nil
-		}
-		return "", err
+		return "", fmt.Errorf("context canceled before local pinning: %w", err)
 	}
 
 	mapOfFiles := map[string]files.Node{}
 	for _, file := range filesToAdd {
+		if file.Buffer == nil {
+			continue
+		}
 		mapOfFiles[file.Name] = files.NewReaderFile(file.Buffer)
+	}
+	// Check if map is empty after potentially skipping files
+	if len(mapOfFiles) == 0 {
+		return "", fmt.Errorf("no valid files with non-nil buffers provided")
 	}
 	mapDirectory := files.NewMapDirectory(mapOfFiles)
 
-	test, err := ic.api.Unixfs().Add(ctx, mapDirectory, ic.ipfsOptions...)
+	node, err := ic.api.Unixfs().Add(ctx, mapDirectory, ic.ipfsOptions...)
 	if err != nil {
-		// If local pinning fails, return Pinata CID if available
-		if pinataCID != "" {
-			return pinataCID, nil
-		}
-		return "", err
+		return "", fmt.Errorf("error adding directory locally: %w", err)
 	}
-	
-	localCID := test.RootCid().String()
-	
-	// Return Pinata CID if available, otherwise return local CID
-	if pinataCID != "" {
-		return pinataCID, nil
-	}
+
+	localCID := node.RootCid().String()
 	return localCID, nil
 }
 

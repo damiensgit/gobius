@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	files "github.com/ipfs/boxo/files"
@@ -73,7 +74,10 @@ func Test_Http_Client_PinFileToIPFS(t *testing.T) {
 			t.Fatalf("Failed to read file: %v", err)
 		}
 
-		hashResult := ipfsClient.PinFileToIPFS(content, "test")
+		hashResult, err := ipfsClient.PinFileToIPFS(content, "test")
+		if err != nil {
+			t.Fatalf("Failed to pin file: %v", err)
+		}
 
 		hashResultFast, err := GetIPFSHashFast(content)
 		if err != nil {
@@ -160,7 +164,10 @@ func Test_Mock_PinFileToIPFS(t *testing.T) {
 			t.Fatalf("Failed to read file: %v", err)
 		}
 
-		hashResult := ipfsClient.PinFileToIPFS(content, "test")
+		hashResult, err := ipfsClient.PinFileToIPFS(content, "test")
+		if err != nil {
+			t.Fatalf("Failed to pin file: %v", err)
+		}
 
 		hashResultFast, err := GetIPFSHashFast(content)
 		if err != nil {
@@ -246,4 +253,121 @@ func Test_PrivateNode(t *testing.T) {
 	// /ipfs/QmQx4LqzvgAhXtictjyZKN5gL3V9EEP1B5PhZTdnwW6NjQ
 	// wanted: QmQx4LqzvgAhXtictjyZKN5gL3V9EEP1B5PhZTdnwW6NjQ
 	fmt.Println("CID of parent directory:", cid)
+}
+
+func loadTestConfig() (config.AppConfig, error) {
+	// Determine the base path relative to the test file
+	_, filename, _, ok := runtime.Caller(0)
+	if !ok {
+		return config.AppConfig{}, fmt.Errorf("could not get caller information")
+	}
+	basePath := filepath.Dir(filename)
+
+	configPath := filepath.Join(basePath, "ipfs_config.json")
+
+	cfg, err := config.LoadConfigForTesting(configPath, 0)
+	if err != nil {
+		return config.AppConfig{}, fmt.Errorf("failed to load test config: %v", err)
+	}
+	if cfg == nil { // Handle case where LoadConfig might return nil cfg, nil err
+		return config.AppConfig{}, nil
+	}
+	return *cfg, nil
+}
+
+func Test_Pinata_Client_PinFileToIPFS(t *testing.T) {
+	appConfig, err := loadTestConfig() // Assuming this provides defaults or uses env vars
+	if err != nil {
+		t.Fatalf("Failed to load test config (or defaults): %v", err)
+	}
+
+	// Skip test if Pinata JWT is not configured
+	if appConfig.IPFS.Pinata.JWT == "" {
+		t.Skip("Skipping Pinata test: IPFS_PINATA_JWT not set in config or environment")
+	}
+
+	// Create Pinata Client
+	ipfsClient, err := NewPinataIPFSClient(appConfig)
+	if err != nil {
+		t.Fatalf("Failed to create Pinata client: %v", err)
+	}
+
+	for _, tc := range testCasesForPinFileToIPFS {
+		t.Run(tc.filePath, func(t *testing.T) { // Use subtests for better isolation
+			// open a file and read its contents
+			content, err := os.ReadFile(tc.filePath)
+			if err != nil {
+				t.Fatalf("Failed to read file %s: %v", tc.filePath, err)
+			}
+
+			// Call PinFileToIPFS
+			// Note: Current signature returns string, not error. Error is logged internally by the client.
+			base58CID, err := ipfsClient.PinFileToIPFS(content, filepath.Base(tc.filePath))
+			if err != nil {
+				t.Fatalf("Failed to pin file %s: %v", tc.filePath, err)
+			}
+
+			// Assertions
+			if base58CID == "" {
+				t.Fatalf("PinFileToIPFS returned an empty CID for %s", tc.filePath)
+			}
+
+			// Convert the returned Base58 CID to hex multihash for comparison
+			// This assumes the Pinata API returns a CIDv0 (Qm...)
+			convertedHash, err := mh.FromB58String(base58CID)
+			if err != nil {
+				t.Fatalf("Failed to convert returned Base58 CID %s to multihash: %v", base58CID, err)
+			}
+
+			hexMultihash := convertedHash.String()
+
+			// Compare with the expected hex hash from test case
+			if hexMultihash != tc.expectedHash {
+				t.Errorf("Hash mismatch for file %s:\n  Got (hex): %s\n Want (hex): %s\n(From Base58: %s)",
+					tc.filePath, hexMultihash, tc.expectedHash, base58CID)
+			}
+
+			// TODO: Add unpinning logic if necessary for cleanup
+		})
+	}
+}
+
+func Test_Pinata_Client_PinFilesToIPFS(t *testing.T) {
+	appConfig, err := loadTestConfig()
+	if err != nil {
+		t.Fatalf("Failed to load test config: %v", err)
+	}
+
+	// Create Pinata Client
+	ipfsClient, err := NewPinataIPFSClient(appConfig)
+	if err != nil {
+		t.Fatalf("Failed to create Pinata client: %v", err)
+	}
+
+	// Test Data
+	testFiles := []IPFSFile{
+		{Name: "file1.txt", Buffer: bytes.NewBufferString("Pinata test file 1 content.")},
+		{Name: "file2.txt", Buffer: bytes.NewBufferString("Pinata test file 2 content.")},
+	}
+	testTaskID := "pinata-test-task-1234"
+
+	// Call PinFilesToIPFS
+	ctx := context.Background() // Or use context with timeout
+	cid, err := ipfsClient.PinFilesToIPFS(ctx, testTaskID, testFiles)
+
+	// Assertions
+	if err != nil {
+		t.Errorf("PinFilesToIPFS failed: %v", err)
+	}
+	if cid == "" {
+		t.Errorf("PinFilesToIPFS returned an empty CID, expected a valid CID")
+	}
+
+	// Optional: Add more specific CID check if you know the expected directory CID
+	// expectedCID := "Qm..."
+	// if cid != expectedCID {
+	// 	t.Errorf("PinFilesToIPFS CID mismatch: got %s, want %s", cid, expectedCID)
+	// }
+
+	// TODO: Add unpinning logic if necessary for cleanup
 }

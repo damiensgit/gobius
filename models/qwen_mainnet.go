@@ -372,7 +372,6 @@ func (m *QwenMainnetModel) GetCID(ctx context.Context, gpu *common.GPU, taskid s
 		return nil, err
 	}
 
-	// Note: IPFS pinning might need its own context/timeout strategy if it becomes slow
 	// Create a new context for IPFS pinning with its specific timeout
 	ipfsCtx, ipfsCancel := context.WithTimeout(ctx, m.ipfsTimeoutDuration)
 	defer ipfsCancel()
