@@ -63,7 +63,15 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
 
 2. **Git**: Install Git if you haven't already. You can download it from [https://git-scm.com/](https://git-scm.com/).
 
-3. **IPFS**: Gobius requires IPFS for model and data storage.
+3. **C Compiler (Linux/macOS)**: Gobius uses a database library (`go-sqlite3`) that requires a C compiler (like `gcc`) to build correctly.
+   - **Ubuntu/Debian**: Install the necessary build tools:
+     ```bash
+     sudo apt update && sudo apt install gcc build-essential
+     ```
+   - **macOS**: Xcode Command Line Tools usually include `gcc`. Install them if you haven't: `xcode-select --install`
+   - **Windows**: The Go build process on Windows typically handles this automatically if you've installed Go correctly.
+
+4. **IPFS**: Gobius requires IPFS for model and data storage.
 
    **Recommendation**: It's highly recommended to run the IPFS daemon on the **same server** where you are running Gobius. This simplifies network configuration.
 
@@ -586,15 +594,7 @@ Here are some common problems users might encounter during setup:
 *   **Symptom**: Gobius fails to start with a fatal error mentioning `CGO_ENABLED=0` and `go-sqlite3 requires cgo to work`.
     Example log: `{"level":"fatal","error":"Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo to work..."}`
 *   **Cause**: Gobius was built on a system missing a C compiler (`gcc`), which is required by the `go-sqlite3` library. Go automatically disables CGO when a C compiler is not found during the build.
-*   **Solution**: Install the necessary C compiler and build tools, then rebuild Gobius.
-    ```bash
-    # On Debian/Ubuntu
-    sudo apt update && sudo apt install gcc build-essential
-    
-    # Then navigate back to the gobius directory and rebuild
-    cd path/to/gobius
-    go build
-    ```
+*   **Solution**: Install the necessary C compiler and build tools as described in the Prerequisites section, then rebuild Gobius.
 
 **3. Configuration (`config.json`) Errors**
 
