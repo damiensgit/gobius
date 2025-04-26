@@ -483,7 +483,6 @@ func main() {
 			} else {
 				log.Fatalf("autotasksubmit requires a duration argument (e.g., '10s')")
 			}
-			// Assuming RunAutoTaskSubmit is defined in commands.go (in the same package)
 			RunAutoTaskSubmit(appQuit, appServices, interval)
 		case "testplaygroundtask":
 			sendTestPlaygroundTask(appContext)

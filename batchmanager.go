@@ -1940,10 +1940,15 @@ func (tm *BatchTransactionManager) singleSignalCommitment(taskId task.TaskId, co
 	tm.services.Logger.Info().Str("taskid", taskIdStr).Str("commitment", "0x"+hex.EncodeToString(commitment[:])).Msg("sending commitment")
 
 	start := time.Now()
-
-	tx, err := tm.services.OwnerAccount.NonceManagerWrapper(5, 425, 1.5, false, func(opts *bind.TransactOpts) (interface{}, error) {
-		opts.GasLimit = signalCommitmentGasPerItem * 2
-
+	retries := tm.services.Config.Miner.ErrorMaxRetries
+	backoff := tm.services.Config.Miner.ErrorBackoffTime
+	backoffMultiplier := tm.services.Config.Miner.ErrorBackofMultiplier
+	tx, err := tm.services.OwnerAccount.NonceManagerWrapper(retries, backoff, backoffMultiplier, false, func(opts *bind.TransactOpts) (interface{}, error) {
+		if tm.services.Config.Miner.EnableGasEstimationMode {
+			opts.GasLimit = 0
+		} else {
+			opts.GasLimit = signalCommitmentGasPerItem * 10 // why 10? ask the arbitrum team, floating gas intrinsics is a bitch
+		}
 		return tm.services.Engine.Engine.SignalCommitment(opts, commitment)
 	})
 
@@ -2014,7 +2019,7 @@ func (tm *BatchTransactionManager) singleSubmitSolution(validator common.Address
 		if tm.services.Config.Miner.EnableGasEstimationMode {
 			opts.GasLimit = 0
 		} else {
-			opts.GasLimit = submitSolutionGasPerItem * 2
+			opts.GasLimit = submitSolutionGasPerItem * 10 // why 10? ask the arbitrum team, floating gas intrinsics is a bitch
 		}
 
 		return tm.services.Engine.Engine.SubmitSolution(opts, taskId, cid)
