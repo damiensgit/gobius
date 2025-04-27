@@ -561,7 +561,7 @@ func verifyAllTasks(ctx context.Context, dryMode bool) error {
 				if !dryMode {
 					claimTime := time.Unix(int64(res.Blocktime), 0)
 
-					err = services.TaskStorage.UpsertTaskToClaimable(v.Taskid, common.Hash{}, claimTime)
+					_, err = services.TaskStorage.UpsertTaskToClaimable(v.Taskid, common.Hash{}, claimTime)
 					if err != nil {
 						services.Logger.Error().Err(err).Msg("error updating task in storage")
 					} else {
@@ -844,7 +844,7 @@ func verifySolutions(ctx context.Context) error {
 				// update the task in storage with claim information
 				// set empty txhash as we know the task exists in and will be updated
 				claimTime := time.Unix(int64(res.Blocktime), 0)
-				err = services.TaskStorage.UpsertTaskToClaimable(t.TaskId, common.Hash{}, claimTime)
+				_, err = services.TaskStorage.UpsertTaskToClaimable(t.TaskId, common.Hash{}, claimTime)
 				if err != nil {
 					services.Logger.Error().Err(err).Msg("error updating task in storage")
 				}
@@ -1575,7 +1575,7 @@ func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *cl
 						_ = services.TaskStorage.DeleteProcessedSolutions([]task.TaskId{taskId})
 						// Add/Update task to claimable state (status 3)
 						claimTime := time.Unix(int64(sol.Blocktime), 0)
-						err = services.TaskStorage.UpsertTaskToClaimable(taskId, currentlog.TxHash, claimTime)
+						_, err = services.TaskStorage.UpsertTaskToClaimable(taskId, currentlog.TxHash, claimTime)
 						if err != nil {
 							log.Printf("WARN: Failed to upsert task %s to claimable: %v", taskId.String(), err)
 						} else {

@@ -345,10 +345,9 @@ func (tm *BatchTransactionManager) batchClaimPoller(appQuit context.Context, wg 
 			if claimBatchSize <= 0 {
 				tm.services.Logger.Warn().Msgf("** claim batch size set to 0 so no claims will be made **")
 			} else {
-
 				claims, _, err := tm.services.TaskStorage.GetClaims(claimBatchSize)
 				if err != nil {
-					tm.services.Logger.Error().Err(err).Msg("could not get keys from storage")
+					tm.services.Logger.Error().Err(err).Msg("could not get claims from storage")
 					continue
 				}
 				if len(claims) > 0 {
@@ -1116,7 +1115,7 @@ func (tm *BatchTransactionManager) processBatch(
 					// Solution is on-chain but NOT claimed. Update local status to claimable.
 					tm.services.Logger.Info().Str("taskid", t.TaskId.String()).Str("validator", res.Validator.String()).Uint64("blocktime", res.Blocktime).Msg("task solution found and not claimed, updating status to claimable")
 					claimTime := time.Unix(int64(res.Blocktime), 0)
-					err = tm.services.TaskStorage.UpsertTaskToClaimable(t.TaskId, common.Hash{}, claimTime)
+					_, err = tm.services.TaskStorage.UpsertTaskToClaimable(t.TaskId, common.Hash{}, claimTime)
 					if err != nil {
 						tm.services.Logger.Error().Err(err).Str("taskid", t.TaskId.String()).Msg("failed to update task status to claimable")
 						continue
@@ -1195,7 +1194,7 @@ func (tm *BatchTransactionManager) processBatch(
 		receipt, success, _, waitErr := account.WaitForConfirmedTx(tx)
 
 		// Process receipt and metrics (handles nil receipt)
-		txCost := tm.processReceiptAndMetrics(receipt, tm.cumulativeGasUsed.AddCommitment, batchCommitmentLen, "commitment")
+		txCost := tm.processReceiptAndMetrics(receipt, tm.cumulativeGasUsed.AddCommitment, batchCommitmentLen, "batch commitments")
 
 		if waitErr != nil {
 			tm.services.Logger.Error().Err(waitErr).Str("txhash", tx.Hash().String()).Msg("Error waiting for commitment confirmation")
@@ -1336,7 +1335,7 @@ func (tm *BatchTransactionManager) processBatch(
 		receipt, success, _, waitErr := validatorToSendSubmits.Account.WaitForConfirmedTx(tx)
 
 		// Process receipt and metrics
-		txCost := tm.processReceiptAndMetrics(receipt, tm.cumulativeGasUsed.AddSolution, batchSolutionsLen, "solution")
+		txCost := tm.processReceiptAndMetrics(receipt, tm.cumulativeGasUsed.AddSolution, batchSolutionsLen, "batch solutions")
 
 		if waitErr != nil {
 			return waitErr
@@ -1951,29 +1950,38 @@ func (tm *BatchTransactionManager) singleSignalCommitment(taskId task.TaskId, co
 		}
 		return tm.services.Engine.Engine.SignalCommitment(opts, commitment)
 	})
+	elapsed := time.Since(start)
 
 	if err != nil {
-		tm.services.Logger.Error().Err(err).Msg("error signaling commitment")
+		tm.services.Logger.Error().Err(err).Str("taskid", taskIdStr).Str("elapsed", elapsed.String()).Msg("❌ error preparing commitment tx")
+		return err
+	}
+	if tx == nil {
+		err = errors.New("assertion: transaction is nil but no error reported from NonceManagerWrapper")
+		tm.services.Logger.Error().Err(err).Str("taskid", taskIdStr).Msg("❌ error preparing commitment tx")
 		return err
 	}
 
-	elapsed := time.Since(start)
-	tm.services.Logger.Info().Str("taskid", taskIdStr).Uint64("nonce", tx.Nonce()).Str("txhash", tx.Hash().String()).Str("elapsed", elapsed.String()).Msg("signal commitment tx sent")
+	tm.services.Logger.Info().Str("taskid", taskIdStr).Uint64("nonce", tx.Nonce()).Str("txhash", tx.Hash().String()).Str("elapsed", elapsed.String()).Msg("signal commitment tx sent, waiting for confirmation...")
 
 	go func() {
-		receipt, success, _, err := tm.services.OwnerAccount.WaitForConfirmedTx(tx)
-		if err != nil {
-			tm.services.Logger.Error().Err(err).Msg("error waiting for commitment confirmation")
+		receipt, success, _, waitErr := tm.services.OwnerAccount.WaitForConfirmedTx(tx)
+
+		// Process receipt and metrics regardless of success/failure, but handle nil receipt
+		tm.processReceiptAndMetrics(receipt, tm.cumulativeGasUsed.AddCommitment, 1, "single commitment") // batchSize is 1
+
+		if waitErr != nil {
 			return
 		}
+
 		if !success {
-			tm.services.Logger.Error().Msg("commitment tx reverted")
-			return
+			tm.services.Logger.Error().Str("txHash", tx.Hash().String()).Msg("single commitment transaction reverted on-chain")
+			return // errors.New("single commitment transaction reverted on-chain")
 		}
-		if receipt != nil {
-			txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
-			tm.services.Logger.Info().Uint64("gas", receipt.GasUsed).Uint64("gas_per_commit", receipt.GasUsed).Msg("single commitment gas used")
-			tm.cumulativeGasUsed.AddCommitment(txCost)
+		// Double-check receipt is not nil after success
+		if receipt == nil {
+			tm.services.Logger.Error().Str("txhash", tx.Hash().String()).Msg("assertion: single commitment transaction returned nil receipt despite success")
+			return
 		}
 
 		var signalledCommitments [][32]byte
@@ -1990,7 +1998,7 @@ func (tm *BatchTransactionManager) singleSignalCommitment(taskId task.TaskId, co
 		}
 
 		if len(signalledCommitments) != 1 {
-			tm.services.Logger.Error().Msg("ASSERT: NO COMMITMENTS SIGNALLLED!")
+			tm.services.Logger.Error().Msg("ASSERT: COMMITMENTS SIGNALLLED NOT EQUAL TO 1!")
 		}
 	}()
 
@@ -2027,11 +2035,16 @@ func (tm *BatchTransactionManager) singleSubmitSolution(validator common.Address
 	elapsed := time.Since(start)
 
 	if err != nil {
-		tm.services.Logger.Error().Err(err).Str("taskid", taskIdStr).Str("elapsed", elapsed.String()).Msg("❌ error submitting solution")
+		tm.services.Logger.Error().Err(err).Str("taskid", taskIdStr).Str("elapsed", elapsed.String()).Msg("❌ error preparing solution tx")
+		return err
+	}
+	if tx == nil {
+		err = errors.New("assertion: transaction is nil but no error reported from NonceManagerWrapper")
+		tm.services.Logger.Error().Err(err).Str("taskid", taskIdStr).Msg("❌ error preparing solution tx")
 		return err
 	}
 
-	tm.services.Logger.Info().Str("taskid", taskIdStr).Uint64("nonce", tx.Nonce()).Str("txhash", tx.Hash().String()).Str("elapsed", elapsed.String()).Msg("solution tx sent")
+	tm.services.Logger.Info().Str("taskid", taskIdStr).Uint64("nonce", tx.Nonce()).Str("txhash", tx.Hash().String()).Str("elapsed", elapsed.String()).Msg("solution tx sent, waiting for confirmation...")
 
 	go func() {
 		// find out who mined the soluition and log it
@@ -2041,9 +2054,7 @@ func (tm *BatchTransactionManager) singleSubmitSolution(validator common.Address
 				tm.services.Logger.Err(err).Msg("error getting solution information")
 				return
 			}
-
 			if res.Blocktime > 0 {
-
 				if tm.services.Validators.IsAddressValidator(res.Validator) {
 					tm.services.TaskTracker.TaskSucceeded()
 				} else {
@@ -2061,27 +2072,34 @@ func (tm *BatchTransactionManager) singleSubmitSolution(validator common.Address
 				}
 				tm.services.Logger.Info().Str("taskid", taskIdStr).Str("validator", res.Validator.String()).Str("Cid", solversCid).Msg("solution information")
 			} else {
-				tm.services.Logger.Info().Str("taskid", taskIdStr).Msg("solution not solved")
+				tm.services.TaskTracker.TaskFailed()
+				tm.services.Logger.Warn().Str("taskid", taskIdStr).Msg("solution not solved")
 			}
-
 		}()
 
-		receipt, success, _, _ := tm.services.OwnerAccount.WaitForConfirmedTx(tx)
+		receipt, success, _, waitErr := tm.services.OwnerAccount.WaitForConfirmedTx(tx)
 
-		if receipt != nil {
-			txCost := receipt.EffectiveGasPrice.Mul(big.NewInt(int64(receipt.GasUsed)), receipt.EffectiveGasPrice)
-			tm.services.Logger.Info().Uint64("gas", receipt.GasUsed).Uint64("gas_per_solution", receipt.GasUsed).Msg("**** single solution gas used *****")
-			tm.cumulativeGasUsed.AddSolution(txCost)
+		// Process receipt and metrics regardless of success/failure, but handle nil receipt
+		tm.processReceiptAndMetrics(receipt, tm.cumulativeGasUsed.AddSolution, 1, "single solution") // batchSize is 1
+
+		if waitErr != nil {
+			return
 		}
 
 		if !success {
-			return //errors.New("error waiting for solution confirmation")
+			tm.services.Logger.Error().Str("txHash", tx.Hash().String()).Msg("single solution transaction reverted on-chain")
+			return // errors.New("single solution transaction reverted on-chain")
+		}
+		// Double-check receipt is not nil after success
+		if receipt == nil {
+			tm.services.Logger.Error().Str("txhash", tx.Hash().String()).Msg("assertion: single solution transaction returned nil receipt despite success")
+			return
 		}
 
 		tm.services.Logger.Info().Str("taskid", taskIdStr).Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("✅ solution accepted!")
 
-		claims := []task.TaskId{taskId}
-		claimTime, err := tm.services.TaskStorage.AddTasksToClaim(claims, 0)
+		// ensure the task is added to the claimable list
+		claimTime, err := tm.services.TaskStorage.UpsertTaskToClaimable(taskId, tx.Hash(), time.Now())
 		if err != nil {
 			tm.services.Logger.Error().Err(err).Msg("error adding claim in redis")
 			return
@@ -2138,7 +2156,7 @@ func (tm *BatchTransactionManager) BulkClaimWithAccount(account *account.Account
 
 	receipt, _, _, waitErr := account.WaitForConfirmedTx(tx)
 
-	tm.processReceiptAndMetrics(receipt, tm.cumulativeGasUsed.AddClaim, taskCount, "claim")
+	tm.processReceiptAndMetrics(receipt, tm.cumulativeGasUsed.AddClaim, taskCount, "bulk claims")
 
 	return receipt, waitErr
 }
@@ -2189,7 +2207,7 @@ func (tm *BatchTransactionManager) BulkTasks(account *account.Account, count int
 		receipt, success, _, waitErr := account.WaitForConfirmedTx(tx)
 
 		// Process receipt and metrics
-		txCost := tm.processReceiptAndMetrics(receipt, tm.cumulativeGasUsed.AddTasks, count, "task")
+		txCost := tm.processReceiptAndMetrics(receipt, tm.cumulativeGasUsed.AddTasks, count, "bulk tasks")
 
 		if waitErr != nil {
 			// Error logged in WaitForConfirmedTx
@@ -2723,7 +2741,7 @@ func (tm *BatchTransactionManager) processReceiptAndMetrics(receipt *types.Recei
 		Float64(fmt.Sprintf("gas_per_%s", itemName), gasPerItem).
 		Str("tx_cost_eth", txCostEthStr).        // Log cost in ETH
 		Str("tx_hash", receipt.TxHash.String()). // Add tx hash for context
-		Msgf("**** bulk %s gas usage *****", itemName)
+		Msgf("**** %s gas usage *****", itemName)
 
 	metricFunc(txCost)
 

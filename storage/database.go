@@ -550,7 +550,7 @@ func (ts *TaskStorageDB) DeleteTask(taskid task.TaskId) error {
 	return err
 }
 
-func (ts *TaskStorageDB) UpsertTaskToClaimable(taskid task.TaskId, txhash common.Hash, claimTime time.Time) error {
+func (ts *TaskStorageDB) UpsertTaskToClaimable(taskid task.TaskId, txhash common.Hash, claimTime time.Time) (time.Time, error) {
 	claimTime = claimTime.Add(ts.minclaimtime)
 
 	params := db.UpsertTaskToClaimableParams{
@@ -558,7 +558,9 @@ func (ts *TaskStorageDB) UpsertTaskToClaimable(taskid task.TaskId, txhash common
 		Txhash:    txhash,
 		Claimtime: claimTime.Unix(),
 	}
-	return ts.queries.UpsertTaskToClaimable(ts.ctx, params)
+	err := ts.queries.UpsertTaskToClaimable(ts.ctx, params)
+
+	return claimTime, err
 }
 
 func (ts *TaskStorageDB) GetAllTasks() ([]db.Task, error) {
