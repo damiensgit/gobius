@@ -546,6 +546,11 @@ func main() {
 			if err != nil {
 				logger.Fatal().Err(err).Msg("error during reward recovery analysis")
 			}
+		case "cleanqueuelocal":
+			err = cleanQueueLocal(appQuit, appContext)
+			if err != nil {
+				logger.Fatal().Err(err).Msg("error cleaning local queue")
+			}
 		default:
 			log.Fatalf("unknown command: %s", command)
 		}

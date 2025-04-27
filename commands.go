@@ -2611,3 +2611,98 @@ func analyzeRewardRecovery(appQuit context.Context, services *Services, rpcClien
 
 	return nil
 }
+
+// cleanQueueLocal removes tasks from the local queue (status 0) if their on-chain owner
+// does not match the miner's OwnerAccount address.
+func cleanQueueLocal(appQuit context.Context, ctx context.Context) error {
+	// Get the services from the context
+	services, ok := ctx.Value(servicesKey{}).(*Services)
+	if !ok {
+		return fmt.Errorf("could not get services from context")
+	}
+
+	logger := services.Logger
+	ownerAddress := services.OwnerAccount.Address
+
+	logger.Info().Str("owner", ownerAddress.Hex()).Msg("Starting local task queue cleanup based on owner address...")
+
+	queuedTasks, err := services.TaskStorage.GetQueuedTasks()
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to get queued tasks from storage")
+		return err
+	}
+
+	if len(queuedTasks) == 0 {
+		logger.Info().Msg("Local task queue is empty, no cleanup needed.")
+		return nil
+	}
+
+	totalTasks := len(queuedTasks)
+	tasksToDelete := make([]task.TaskId, 0)
+	checkedCount := 0
+	mismatchCount := 0
+
+	s := spinner.New(spinner.CharSets[11], 500*time.Millisecond, spinner.WithWriter(os.Stderr))
+	s.Suffix = " checking tasks..."
+	s.FinalMSG = "task check completed!\n"
+	s.Start()
+	defer s.Stop()
+
+	for _, queuedTask := range queuedTasks {
+		select {
+		case <-appQuit.Done():
+			logger.Warn().Msg("Cleanup process cancelled by user.")
+			return fmt.Errorf("cleanup cancelled")
+		default:
+		}
+
+		checkedCount++
+		s.Suffix = fmt.Sprintf(" checking tasks [%d/%d] (mismatched: %d)...", checkedCount, totalTasks, mismatchCount)
+
+		// Get task info from the blockchain
+		taskInfo, err := services.Engine.Engine.Tasks(nil, queuedTask.TaskId)
+		if err != nil {
+			// Log error but continue; maybe the task doesn't exist on-chain anymore
+			logger.Warn().Err(err).Str("task", queuedTask.TaskId.String()).Msg("Failed to get task info from blockchain, skipping task.")
+			continue
+		}
+
+		// Compare owner address
+		if taskInfo.Owner != ownerAddress {
+			mismatchCount++
+			tasksToDelete = append(tasksToDelete, queuedTask.TaskId)
+			logger.Debug().Str("task", queuedTask.TaskId.String()).Str("expected_owner", ownerAddress.Hex()).Str("actual_owner", taskInfo.Owner.Hex()).Msg("Owner mismatch detected, marking task for deletion.")
+		}
+	}
+
+	s.Stop() // Stop spinner before final logs
+
+	if len(tasksToDelete) > 0 {
+		logger.Info().Int("count", len(tasksToDelete)).Msg("Deleting tasks with mismatched owners from local storage...")
+		// Delete tasks individually as DeleteTasks is not available
+		deletedCount := 0
+		failedCount := 0
+		for _, taskID := range tasksToDelete {
+			err = services.TaskStorage.DeleteTask(taskID)
+			if err != nil {
+				logger.Error().Err(err).Str("task", taskID.String()).Msg("Failed to delete task from storage")
+				failedCount++
+			} else {
+				deletedCount++
+			}
+		}
+
+		if failedCount > 0 {
+			logger.Warn().Int("deleted", deletedCount).Int("failed", failedCount).Msg("Finished deleting tasks with some errors.")
+			// Return an error if any deletion failed
+			return fmt.Errorf("failed to delete %d tasks", failedCount)
+		} else {
+			logger.Info().Int("deleted_count", deletedCount).Msg("Successfully deleted tasks with mismatched owners.")
+		}
+	} else {
+		logger.Info().Msg("No tasks found with mismatched owners. Local queue is clean.")
+	}
+
+	logger.Info().Msg("Local task queue cleanup finished.")
+	return nil
+}
