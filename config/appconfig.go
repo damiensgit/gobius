@@ -152,7 +152,6 @@ type SolverConfig struct {
 	PauseStakeBufferLevel           float64          `json:"pause_stake_buffer_level"`           // pause submitting commits/solutions if the buffer = (current stake - min stake) is below this level
 	UsePolling                      bool             `json:"use_polling"`                        // use polling to check profit and submit txes if false, new block triggers batching
 	PollingTime                     string           `json:"polling_time"`                       // polling interval for profit checks and batching as "1m", "5m", "1h", etc..
-	BatchMode                       int              `json:"batch_mode"`                         // 0: no batch, single commitment/solution cycle, 1 - normal batching using storage and polling, 2 - batch manually (not used!)
 	NoChecks                        bool             `json:"no_checks"`                          // perform no onchain checks on the tasks/commitments/solutions, just submit them
 	ErrorMaxRetries                 int              `json:"error_max_retries"`                  // max retries for tx errors
 	ErrorBackoffTime                float64          `json:"error_backoff"`                      // sleep time between retries
@@ -238,13 +237,17 @@ type Cog struct {
 }
 
 type IPFS struct {
-	Strategy       IpfsStrategy `json:"strategy"`        // mock, http_client, pinata_client, mixed_client
-	HTTPClient     HTTPClient   `json:"http_client"`     // http client to use for ipfs pinning
-	Pinata         Pinata       `json:"pinata"`          // pinata client to use for ipfs pinning
-	IncentiveClaim bool         `json:"incentive_claim"` // set to true to claim the incentive for pinning ipfs content
-	ClaimInterval  string       `json:"claim_interval"`  // how often to claim the incentive for pinning ipfs content
-	OracleURL      string       `json:"oracle_url"`      // oracle url to use for incentive claim
-	Timeout        string       `json:"timeout"`
+	Strategy                  IpfsStrategy `json:"strategy"`        // mock, http_client, pinata_client, mixed_client
+	HTTPClient                HTTPClient   `json:"http_client"`     // http client to use for ipfs pinning
+	Pinata                    Pinata       `json:"pinata"`          // pinata client to use for ipfs pinning
+	IncentiveClaim            bool         `json:"incentive_claim"` // set to true to claim the incentive for pinning ipfs content
+	ClaimInterval             string       `json:"claim_interval"`  // how often to claim the incentive for pinning ipfs content
+	OracleURL                 string       `json:"oracle_url"`      // oracle url to use for incentive claim
+	Timeout                   string       `json:"timeout"`
+	UseBulkClaim              bool         `json:"use_bulk_claim"`               // New: Option to use bulk IPFS claims
+	BulkClaimBatchSize        int          `json:"bulk_claim_batch_size"`        // New: Batch size for bulk IPFS claims
+	MaxSingleClaimsPerRun     int          `json:"max_single_claims_per_run"`    // Max single claims per processing run
+	MinAiusIncentiveThreshold float64      `json:"min_aius_incentive_threshold"` // Minimum AIUS value to claim incentive (0 = disabled)
 }
 
 type Pinata struct {
@@ -418,7 +421,6 @@ func NewAppConfig(testnetType int) AppConfig {
 			PauseStakeBufferLevel:   0,
 			UsePolling:              true,
 			PollingTime:             "1m",
-			BatchMode:               1,
 			ErrorMaxRetries:         5,
 			ErrorBackoffTime:        425,
 			ErrorBackofMultiplier:   1.5,

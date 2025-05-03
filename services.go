@@ -18,7 +18,6 @@ import (
 	"gobius/metrics"
 	"gobius/paraswap"
 	"gobius/storage"
-	"math/big"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -29,15 +28,6 @@ import (
 )
 
 type servicesKey struct{}
-
-// Define the function parameters
-type SubmitTaskParams struct {
-	Version uint8
-	Owner   common.Address
-	Model   [32]byte
-	Fee     *big.Int
-	Input   []byte
-}
 
 type Services struct {
 	Basetoken    *basetoken.BaseToken

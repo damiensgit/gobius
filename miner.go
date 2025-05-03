@@ -26,7 +26,6 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum"
@@ -132,8 +131,6 @@ func setupCloseHandler(logger *zerolog.Logger) (ctx context.Context, cancel cont
 }
 
 func main() {
-	var appQuitWG sync.WaitGroup
-
 	configPath := flag.String("config", "config.json", "Path to the configuration file")
 	skipValidation := flag.Bool("skipvalidation", false, "Skip safety checks and validation of the model and miner version")
 	logLevel := flag.Int("loglevel", 1, "Set the logging level")
@@ -223,7 +220,7 @@ func main() {
 		logger.Fatal().Err(err).Msg("could not create application context")
 	}
 
-	manager, err := NewBatchTransactionManager(appServices, appContext, &appQuitWG)
+	manager, err := NewBatchTransactionManager(appServices, appContext)
 
 	if err != nil {
 		logger.Fatal().Err(err).Msg("could not create transaction manager")
@@ -619,10 +616,10 @@ func main() {
 		logger.Warn().Msg("skipped model validation and engine version checks!")
 	}
 
-	err = manager.Start(appQuit)
-	if err != nil {
-		logger.Fatal().Err(err).Msg("could not create start batch manager")
-	}
+	// err = manager.Start(appQuit)
+	// if err != nil {
+	// 	logger.Fatal().Err(err).Msg("could not create start batch manager")
+	// }
 
 	// TODO: this code only works for websocket/ipc node connections. Add polling support if this fails
 	headers := make(chan *types.Header)
@@ -816,9 +813,6 @@ func main() {
 exit_app:
 	logger.Info().Msg("waiting for application workers to finish")
 
-	// Wait for all workers to finish
-	//appQuitWG.Wait()
-	// for debugging purposes
 	// Create a timeout channel to detect if the wait takes too long
 	waitDone := make(chan struct{})
 	go func() {
@@ -826,7 +820,6 @@ exit_app:
 		if strategy != nil {
 			strategy.Stop()
 		}
-		appQuitWG.Wait()
 		close(waitDone)
 	}()
 
