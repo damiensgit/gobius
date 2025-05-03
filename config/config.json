@@ -16,6 +16,17 @@
           "rate": "0",
           "cid": "0x12208dc17f4317285392e6811ca31c9efeb3b8511ebac1bd14b935ecf2c1b60c1b09"
         }
+      },
+      "wai-v120": {
+        "id": "0xa473c70e9d7c872ac948d20546bc79db55fa64ca325a4b229aaffddb7f86aae0",
+        "mineable": true,
+        "contracts": {},
+        "params": {
+          "addr": "0x1298F8A91B046d7fCBd5454cd3331Ba6f4feA168",
+          "fee": "3500000000000000",
+          "rate": "0",
+          "cid": "0x12208dc17f4317285392e6811ca31c9efeb3b8511ebac1bd14b935ecf2c1b60c1b09"
+        }
       }
     }
   }
