@@ -21,7 +21,6 @@ type Model struct {
 
 type InputHydrationResult any
 
-// TODO: add context support to GetFiles and GetCID
 type ModelInterface interface {
 	GetFiles(ctx context.Context, gpu *common.GPU, taskid string, input any) ([]ipfs.IPFSFile, error)
 	GetCID(ctx context.Context, gpu *common.GPU, taskid string, input any) ([]byte, error)
@@ -30,7 +29,6 @@ type ModelInterface interface {
 	Validate(gpu *common.GPU, taskid string) error
 }
 
-// ErrResourceBusy indicates that the target GPU reported a 409 Conflict status.
 var ErrResourceBusy = errors.New("resource busy")
 
 type MiningFilter struct {
@@ -58,11 +56,9 @@ func (mf *ModelFactory) RegisterModel(model ModelInterface) {
 
 // GetModel retrieves a model by ID
 func (mf *ModelFactory) GetModel(id string) ModelInterface {
-	// Normalize ID format (add 0x prefix if missing)
 	if !strings.HasPrefix(id, "0x") {
 		id = "0x" + id
 	}
-
 	return mf.registeredModels[id]
 }
 
@@ -82,25 +78,28 @@ var ModelRegistry *ModelFactory
 func InitModelRegistry(client ipfs.IPFSClient, config *config.AppConfig, logger zerolog.Logger) {
 	ModelRegistry = NewModelFactory()
 
-	// Register available models
+	// Register Qwen Mainnet
 	modelQwenMainnet := NewQwenMainnetModel(client, config, logger)
-	// only register if not nil e.g. is it is available in the config for this network
 	if modelQwenMainnet != nil {
 		ModelRegistry.RegisterModel(modelQwenMainnet)
 	}
 
-	// Sepolia testnet model
+	// Register Qwen Testnet
 	modelQwenTest := NewQwenTestModel(client, config, logger)
-	// only register if not nil e.g. is it is available in the config for this network
 	if modelQwenTest != nil {
 		ModelRegistry.RegisterModel(modelQwenTest)
 	}
 
-	// Deprecated models, will be removed in future versions
+	// Register Kandinsky2
 	modelKandinsky2 := NewKandinsky2Model(client, config, logger)
 	if modelKandinsky2 != nil {
 		ModelRegistry.RegisterModel(modelKandinsky2)
 	}
 
-	// Register additional models here as needed
+	// Register Metabaron-Uncensored-8B
+	modelMetabaron := NewMetabaronModel(client, config, logger)
+	if modelMetabaron != nil {
+		ModelRegistry.RegisterModel(modelMetabaron)
+	}
+
 }

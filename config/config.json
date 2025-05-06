@@ -1,22 +1,21 @@
 {
-    "baseTokenAddress": "0x4a24B101728e07A52053c13FB4dB2BcF490CAbc3",
-    "engineAddress": "0x9b51Ef044d3486A1fB0A2D55A6e0CeeAdd323E66",
-    "bulkTasksAddress": "0x75879250b1d43F8860Bd30C628E8606782a02a87",
-    "voterAddress": "0x80E9B3dA81258705eC7C3DC89a799b78f2c68968",
-    "veStakingAddress": "0x1c0a14cAC52ebDe9c724e5627162a90A26B85E15",
-    "arbiusRouterAddress": "0xecAba4E6a4bC1E3DE3e996a8B2c89e8B0626C9a1",
-    "models": {
-      "qwen-qwq-32b": {
-        "id": "0x89c39001e3b23d2092bd998b62f07b523d23deb55e1627048b4ed47a4a38d5cc",
-        "mineable": true,
-        "contracts": {},
-        "params": {
-          "addr": "0x1298F8A91B046d7fCBd5454cd3331Ba6f4feA168",
-          "fee": "7000000000000000",
-          "rate": "0",
-          "cid": "0x12208dc17f4317285392e6811ca31c9efeb3b8511ebac1bd14b935ecf2c1b60c1b09"
-        }
+  "baseTokenAddress": "0x4a24B101728e07A52053c13FB4dB2BcF490CAbc3",
+  "engineAddress": "0x9b51Ef044d3486A1fB0A2D55A6e0CeeAdd323E66",
+  "bulkTasksAddress": "0x75879250b1d43F8860Bd30C628E8606782a02a87",
+  "voterAddress": "0x80E9B3dA81258705eC7C3DC89a799b78f2c68968",
+  "veStakingAddress": "0x1c0a14cAC52ebDe9c724e5627162a90A26B85E15",
+  "arbiusRouterAddress": "0xecAba4E6a4bC1E3DE3e996a8B2c89e8B0626C9a1",
+  "models": {
+    "metabaron": {
+      "id": "0x6cb3eed9fe3f32da1910825b98bd49d537912c99410e7a35f30add137fd3b64c",
+      "mineable": true,
+      "contracts": {},
+      "params": {
+        "addr": "0x2f508B35Ab37492Dff3000844bDAC68af2460FEe",
+        "fee": "1000000000000000",
+        "rate": "0",
+        "cid": "0x12203d13bda9fa57dff9ba5fdedda8e3062e7bb9c2470e3a4857d456fce181173f97"
       }
     }
   }
-  
+}
