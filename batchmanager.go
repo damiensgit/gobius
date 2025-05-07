@@ -1110,7 +1110,6 @@ func (tm *BatchTransactionManager) processBatch(
 			return validator, tasks, nil
 		}
 
-		// --- Lock is released before this loop ---
 		var commitmentsToDelete []task.TaskId
 		var solutionsToDelete []task.TaskId
 		var validTasksForBatch storage.TaskDataSlice
