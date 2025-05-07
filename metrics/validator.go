@@ -26,9 +26,13 @@ type TaskTracker struct {
 
 func NewTaskTracker(appContext context.Context) *TaskTracker {
 	t := &TaskTracker{}
+	return t
+}
+
+// Add a new method to start the logging goroutine
+func (t *TaskTracker) StartLogging(appContext context.Context) {
 	t.sessionStart = time.Now()
 	go t.logEveryMinute(appContext)
-	return t
 }
 
 func (t *TaskTracker) Silence(silence bool) {

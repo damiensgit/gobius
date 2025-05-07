@@ -1,0 +1,11 @@
+[profile.default]
+src = "contracts/src"
+out = "contracts/artifacts"
+libs = ["contracts/lib"]
+allow_paths = ["./external/arbius/contract/contracts"]
+fs_permissions = [{ access = "read", path = "./config/"}]
+
+remappings = [
+    "@openzeppelin/=lib/openzeppelin-contracts/",
+    "arbius-contracts=./external/arbius/contract/contracts"
+]

@@ -84,9 +84,9 @@ func NewQwenMainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig, lo
 		return nil
 	}
 
+
 	http := &http.Client{
-		// Timeout is now handled per-request via context
-		// Timeout: time.Second * 120,
+		Transport: &http.Transport{MaxIdleConnsPerHost: 10}, // Use a dedicated transport
 	}
 
 	// Use model.ID (the hex string CID) as the key for the Cog map

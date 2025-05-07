@@ -633,7 +633,7 @@ func (bs *baseStrategy) solveTask(ctx context.Context, taskId task.TaskId, param
 	modelIdHex := "0x" + common.Bytes2Hex(params.Model[:])
 	configuredModel := bs.services.Config.Strategies.Model
 	if modelIdHex != configuredModel {
-		solveLog.Debug().Str("task_model", modelIdHex).Str("configured_model", configuredModel).Msg("skipping task, model mismatch")
+		solveLog.Warn().Str("task_model", modelIdHex).Str("configured_model", configuredModel).Msg("skipping task, model mismatch")
 		return nil, nil // Skipped, not an error
 	}
 

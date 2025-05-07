@@ -33,8 +33,8 @@ type ModelParams struct {
 	Cid  string         `json:"cid"`
 }
 
-//go:embed config.json
-var baseConfigJsonData string
+//go:embed config.mainnet.json
+var baseConfigJsonDataMainnet string
 
 //go:embed config.local.json
 var baseConfigJsonDataLocal string

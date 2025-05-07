@@ -97,8 +97,7 @@ func NewWaiV120MainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig,
 	}
 
 	http := &http.Client{
-		// Timeout is now handled per-request via context
-		// Timeout: time.Second * 120,
+		Transport: &http.Transport{MaxIdleConnsPerHost: 10}, // Use a dedicated transport
 	}
 
 	// Use model.ID (the hex string CID) as the key for the Cog map
@@ -352,20 +351,20 @@ func (m *WaiV120MainnetModel) GetFiles(ctx context.Context, gpu *common.GPU, tas
 		return nil, err
 	}
 
-        // Remove the "data:image/png;base64," prefix
-        resp.Output[0] = strings.TrimPrefix(resp.Output[0], "data:image/png;base64,")
+	// Remove the "data:image/png;base64," prefix
+	resp.Output[0] = strings.TrimPrefix(resp.Output[0], "data:image/png;base64,")
 
-        // Assuming body is a base64 encoded string
-        buf, err := base64.StdEncoding.DecodeString(resp.Output[0])
-        if err != nil {
-                return nil, err
-        }
+	// Assuming body is a base64 encoded string
+	buf, err := base64.StdEncoding.DecodeString(resp.Output[0])
+	if err != nil {
+		return nil, err
+	}
 
-        fileName := fmt.Sprintf("%d.%s.png", gpu.ID, uuid.New().String())
-        path := filepath.Join(m.config.CachePath, fileName)
-        buffer := bytes.NewBuffer(buf)
+	fileName := fmt.Sprintf("%d.%s.png", gpu.ID, uuid.New().String())
+	path := filepath.Join(m.config.CachePath, fileName)
+	buffer := bytes.NewBuffer(buf)
 
-        return []ipfs.IPFSFile{{Name: "out-1.png", Path: path, Buffer: buffer}}, nil
+	return []ipfs.IPFSFile{{Name: "out-1.png", Path: path, Buffer: buffer}}, nil
 }
 
 func (m *WaiV120MainnetModel) GetCID(ctx context.Context, gpu *common.GPU, taskid string, input any) ([]byte, error) {
@@ -413,7 +412,6 @@ func (m *WaiV120MainnetModel) GetCID(ctx context.Context, gpu *common.GPU, taski
 
 	return cidBytes, nil
 }
-
 
 func (m *WaiV120MainnetModel) Validate(gpu *common.GPU, taskid string) error {
 
