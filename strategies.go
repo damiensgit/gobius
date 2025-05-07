@@ -697,7 +697,7 @@ func (bs *baseStrategy) solveTask(ctx context.Context, taskId task.TaskId, param
 			}
 			return nil, err // Propagate error
 		}
-		solveLog.Info().Str("cid", "0x"+hex.EncodeToString(cid)).Str("elapsed", inferenceElapsed.String()).Msg("inference successful")
+		solveLog.Debug().Str("cid", "0x"+hex.EncodeToString(cid)).Str("elapsed", inferenceElapsed.String()).Msg("inference successful")
 	}
 
 	if validateOnly {
@@ -716,10 +716,10 @@ func (bs *baseStrategy) solveTask(ctx context.Context, taskId task.TaskId, param
 
 	// Signal Commitment (Conditional)
 	if submitImmediately {
-		solveLog.Info().Msg("signalling commitment immediately...")
+		solveLog.Debug().Msg("signalling commitment immediately...")
 		err = bs.submitter.SignalCommitmentNow(validatorAddr, taskId, commitment)
 	} else {
-		solveLog.Info().Msg("queueing commitment...")
+		solveLog.Debug().Msg("queueing commitment...")
 		err = bs.submitter.SignalCommitment(validatorAddr, taskId, commitment) // Queues via storage
 	}
 	if err != nil {
@@ -727,7 +727,7 @@ func (bs *baseStrategy) solveTask(ctx context.Context, taskId task.TaskId, param
 		// Consider if this is fatal or if we should still try submitting
 		return nil, err
 	}
-	solveLog.Info().Msg("commitment signalled/queued")
+	solveLog.Debug().Msg("commitment signalled/queued")
 
 	// Optimistically submit IPFS CID (best effort)
 	// Check incentive threshold before submitting CID for potential claim
@@ -759,17 +759,17 @@ func (bs *baseStrategy) solveTask(ctx context.Context, taskId task.TaskId, param
 
 	// Submit Solution (Conditional)
 	if submitImmediately {
-		solveLog.Info().Msg("submitting solution immediately...")
+		solveLog.Debug().Msg("submitting solution immediately...")
 		err = bs.submitter.SubmitSolutionNow(validatorAddr, taskId, cid)
 	} else {
-		solveLog.Info().Msg("queueing solution...")
+		solveLog.Debug().Msg("queueing solution...")
 		err = bs.submitter.SubmitSolution(validatorAddr, taskId, cid) // Queues via storage
 	}
 	if err != nil {
 		solveLog.Error().Err(err).Msg("solution submission/queuing failed")
 		return nil, err // This is critical
 	}
-	solveLog.Info().Msg("solution submitted/queued successfully")
+	solveLog.Debug().Msg("solution submitted/queued successfully")
 
 	return cid, nil // Full success
 }
