@@ -27,3 +27,4 @@ bin/*
 !playground.example.json
 contracts/cache
 broadcast/*
+ipfs/ipfs_config.json

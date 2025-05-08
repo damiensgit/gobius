@@ -100,11 +100,12 @@ func NewWaiV120MainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig,
 		Transport: &http.Transport{MaxIdleConnsPerHost: 10}, // Use a dedicated transport
 	}
 
+	// Set default timeouts first
+	timeout := 120 * time.Second    // Default inference timeout
+	ipfsTimeout := 30 * time.Second // Default IPFS timeout
+
 	// Use model.ID (the hex string CID) as the key for the Cog map
 	cogConfig, ok := appConfig.ML.Cog[model.ID]
-	// Set default timeouts first
-	var timeout time.Duration = 120 * time.Second    // Default inference timeout
-	var ipfsTimeout time.Duration = 30 * time.Second // Default IPFS timeout
 	if ok {
 		// Parse inference timeout only if the string is not empty
 		if cogConfig.HttpTimeout != "" {
@@ -127,10 +128,6 @@ func NewWaiV120MainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig,
 				ipfsTimeout = parsedIpfsTimeout
 			}
 		} // Else: IpfsTimeout is empty, silently use the default
-
-	} else {
-		logger.Error().Str("model", model.ID).Msg("model ID not found in ML.Cog config")
-		return nil
 	}
 
 	m := &WaiV120MainnetModel{

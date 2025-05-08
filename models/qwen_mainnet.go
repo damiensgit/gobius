@@ -88,13 +88,12 @@ func NewQwenMainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig, lo
 		Transport: &http.Transport{MaxIdleConnsPerHost: 10}, // Use a dedicated transport
 	}
 
-	// Use model.ID (the hex string CID) as the key for the Cog map
-	cogConfig, ok := appConfig.ML.Cog[model.ID]
-
 	// Set default timeouts first
 	timeout := 120 * time.Second    // Default inference timeout
 	ipfsTimeout := 30 * time.Second // Default IPFS timeout
 
+	// Use model.ID (the hex string CID) as the key for the Cog map
+	cogConfig, ok := appConfig.ML.Cog[model.ID]
 	if ok {
 		// Parse inference timeout only if the string is not empty
 		if cogConfig.HttpTimeout != "" {
@@ -117,10 +116,6 @@ func NewQwenMainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig, lo
 				ipfsTimeout = parsedIpfsTimeout
 			}
 		} // Else: IpfsTimeout is empty, silently use the default
-
-	} else {
-		logger.Error().Str("model", model.ID).Msg("model ID not found in ML.Cog config")
-		return nil
 	}
 
 	m := &QwenMainnetModel{

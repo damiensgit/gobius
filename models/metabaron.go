@@ -88,12 +88,6 @@ func NewMetabaronModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logg
 		return nil
 	}
 
-	cogConfig, ok := appConfig.ML.Cog[model.ID]
-	if !ok {
-		logger.Error().Str("model", model.ID).Msg("model ID not found in ML.Cog config")
-		return nil
-	}
-
 	http := &http.Client{
 		Transport: &http.Transport{MaxIdleConnsPerHost: 10}, // Use a dedicated transport
 	}
@@ -101,15 +95,21 @@ func NewMetabaronModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logg
 	timeout := 120 * time.Second
 	ipfsTimeout := 30 * time.Second
 
-	if cogConfig.HttpTimeout != "" {
-		if t, err := time.ParseDuration(cogConfig.HttpTimeout); err == nil {
-			timeout = t
+	// Get the cog config for the model
+	// if there is no cog config, use the default values
+	cogConfig, ok := appConfig.ML.Cog[model.ID]
+	if ok {
+		// Parse the timeout values from the cog config
+		if cogConfig.HttpTimeout != "" {
+			if t, err := time.ParseDuration(cogConfig.HttpTimeout); err == nil {
+				timeout = t
+			}
 		}
-	}
 
-	if cogConfig.IpfsTimeout != "" {
-		if t, err := time.ParseDuration(cogConfig.IpfsTimeout); err == nil {
-			ipfsTimeout = t
+		if cogConfig.IpfsTimeout != "" {
+			if t, err := time.ParseDuration(cogConfig.IpfsTimeout); err == nil {
+				ipfsTimeout = t
+			}
 		}
 	}
 
