@@ -27,6 +27,17 @@
           "rate": "0",
           "cid": "0x12208dc17f4317285392e6811ca31c9efeb3b8511ebac1bd14b935ecf2c1b60c1b09"
         }
+      },
+      "metabaron": {
+        "id": "0x6cb3eed9fe3f32da1910825b98bd49d537912c99410e7a35f30add137fd3b64c",
+        "mineable": true,
+        "contracts": {},
+        "params": {
+          "addr": "0x2f508B35Ab37492Dff3000844bDAC68af2460FEe",
+          "fee": "1000000000000000",
+          "rate": "0",
+          "cid": "0x12203d13bda9fa57dff9ba5fdedda8e3062e7bb9c2470e3a4857d456fce181173f97"
+        }
       }
     }
   }
