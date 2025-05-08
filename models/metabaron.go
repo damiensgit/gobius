@@ -163,9 +163,24 @@ func (m *MetabaronModel) GetFiles(ctx context.Context, gpu *common.GPU, taskid s
 		return nil, err
 	}
 
+	if result.Output == "" {
+		m.logger.Error().
+			Str("taskid", taskid).
+			Str("gpu", gpu.Url).
+			Str("response", string(body)).
+			Msg("Empty output received from GPU")
+		return nil, fmt.Errorf("empty output received from GPU")
+	}
+
 	filename := fmt.Sprintf("%d.%s.txt", gpu.ID, uuid.New().String())
 	path := filepath.Join(m.config.CachePath, filename)
 	buffer := bytes.NewBufferString(result.Output)
+
+	m.logger.Debug().
+		Str("taskid", taskid).
+		Str("gpu", gpu.Url).
+		Int("buffer_size", buffer.Len()).
+		Msg("Created buffer for IPFS upload")
 
 	return []ipfs.IPFSFile{{Name: "output.txt", Path: path, Buffer: buffer}}, nil
 }
@@ -202,7 +217,7 @@ func (m *MetabaronModel) GetCID(ctx context.Context, gpu *common.GPU, taskid str
 func (m *MetabaronModel) Validate(gpu *common.GPU, taskid string) error {
 	testPrompt := MetabaronPrompt{
 		Input: MetabaronInner{
-			Prompt: "Why is the sky blue?",
+			Prompt: "<|begin_of_text|><|start_header_id|>system<|end_header_id|> You are a helpful assistant.<|eot_id|><|start_header_id|>user<|end_header_id|> what's 4+4?<|eot_id|><|start_header_id|>assistant<|end_header_id|>",
 			Seed:   42,
 		},
 	}
