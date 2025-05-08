@@ -89,11 +89,6 @@ func InitModelRegistry(client ipfs.IPFSClient, config *config.AppConfig, logger 
 		ModelRegistry.RegisterModel(modelWaiV120Mainnet)
 	}
 
-	modelWaiV120Mainnet := NewWaiV120MainnetModel(client, config, logger)
-	if modelWaiV120Mainnet != nil {
-		ModelRegistry.RegisterModel(modelWaiV120Mainnet)
-	}
-
 	// Sepolia testnet model
 	modelQwenTest := NewQwenTestModel(client, config, logger)
 	if modelQwenTest != nil {
