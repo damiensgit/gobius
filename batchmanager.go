@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"gobius/account"
 	"gobius/bindings/arbiusrouterv1"
+	"gobius/bindings/bulktasks"
 	"gobius/bindings/engine"
 	"gobius/client"
 	task "gobius/common"
@@ -978,7 +979,6 @@ func (tm *BatchTransactionManager) processBatch(
 		var err error
 
 		tasks, err = tm.services.TaskStorage.GetPendingCommitments(batchSize)
-
 		if err != nil {
 			tm.services.Logger.Err(err).Msg("failed to get commitments from storage")
 			return nil, err
@@ -992,27 +992,73 @@ func (tm *BatchTransactionManager) processBatch(
 		var validTasksForBatch storage.TaskDataSlice
 		var tasksToUpdateToStatus2 []task.TaskId // New list to track tasks needing status update
 
+		// Collect all commitment hashes for a bulk call
+		collectedCommitmentHashes := make([][32]byte, 0, len(tasks))
+		taskMapByCommitment := make(map[[32]byte]storage.TaskData) // Helper to map results back
 		for _, t := range tasks {
 			// Ensure task has a commitment hash locally before checking on-chain
-			if t.Commitment == [32]byte{} {
+			if t.Commitment == ([32]byte{}) {
 				tm.services.Logger.Warn().Str("taskid", t.TaskId.String()).Msg("Task in pending commitments has zero commitment hash, skipping.")
 				continue // Skip tasks with invalid local state
 			}
+			collectedCommitmentHashes = append(collectedCommitmentHashes, t.Commitment)
+			taskMapByCommitment[t.Commitment] = t
+		}
 
-			block, err := tm.services.Engine.Engine.Commitments(nil, t.Commitment)
+		if len(collectedCommitmentHashes) == 0 {
+			// All tasks might have had zero commitment hash
+			return validTasksForBatch, nil
+		}
+
+		// Make a single bulk call to get commitment statuses
+		var blockNumbers []*big.Int
+
+		getCommitmentsOperation := func() (interface{}, error) {
+			blocks, err := tm.services.BulkTasks.GetCommitments(nil, collectedCommitmentHashes)
 			if err != nil {
-				tm.services.Logger.Error().Err(err).Str("taskid", t.TaskId.String()).Msg("error checking on-chain commitment status, skipping task")
+				return nil, err
+			}
+			return blocks, nil
+		}
+
+		retryResult, err := utils.ExpRetry(tm.services.Logger, getCommitmentsOperation, 3, 1000)
+
+		if err != nil {
+			tm.services.Logger.Error().Err(err).Msg("error checking on-chain commitments")
+			return nil, err
+		}
+
+		// Type assert the result from ExpRetry
+		var ok bool
+		blockNumbers, ok = retryResult.([]*big.Int)
+		if !ok {
+			errInternal := errors.New("ExpRetry returned unexpected type for GetCommitments")
+			tm.services.Logger.Error().Err(errInternal).Msg("internal error: type assertion failed for blockNumbers")
+			return nil, errInternal
+		}
+
+		if len(blockNumbers) != len(collectedCommitmentHashes) {
+			tm.services.Logger.Error().Msgf("bulk commitment check returned %d results for %d commitments, mismatch, skipping processing this batch", len(blockNumbers), len(collectedCommitmentHashes))
+			return nil, errors.New("bulk commitment check result count mismatch")
+		}
+
+		for i, blockNumBig := range blockNumbers {
+			commitmentHash := collectedCommitmentHashes[i]
+			originalTask, found := taskMapByCommitment[commitmentHash]
+			if !found {
+				// Should not happen if logic is correct
+				tm.services.Logger.Error().Str("commitment", hex.EncodeToString(commitmentHash[:])).Msg("Original task not found for commitment hash after bulk call")
 				continue
 			}
 
-			blockNo := block.Uint64()
+			blockNo := blockNumBig.Uint64()
 			if blockNo > 0 {
 				// Commitment already exists on-chain
-				commitmentsToDelete = append(commitmentsToDelete, t.TaskId)
-				tasksToUpdateToStatus2 = append(tasksToUpdateToStatus2, t.TaskId) // Mark for status update
+				commitmentsToDelete = append(commitmentsToDelete, originalTask.TaskId)
+				tasksToUpdateToStatus2 = append(tasksToUpdateToStatus2, originalTask.TaskId) // Mark for status update
 			} else {
 				// Commitment not on-chain, add to the batch to be sent
-				validTasksForBatch = append(validTasksForBatch, t)
+				validTasksForBatch = append(validTasksForBatch, originalTask)
 			}
 		}
 
@@ -1115,37 +1161,80 @@ func (tm *BatchTransactionManager) processBatch(
 		var validTasksForBatch storage.TaskDataSlice
 		var claimsToDelete []task.TaskId
 
+		// Collect all task IDs for a bulk call
+		collectedTaskIds := make([][32]byte, 0, len(tasks))
+		taskMapById := make(map[[32]byte]storage.TaskData) // Helper to map results back
 		for _, t := range tasks {
-			res, err := tm.services.Engine.GetSolution(t.TaskId)
+			collectedTaskIds = append(collectedTaskIds, t.TaskId)
+			taskMapById[t.TaskId] = t
+		}
+
+		if len(collectedTaskIds) == 0 {
+			// Should not happen if tasks slice was not empty
+			return validator, validTasksForBatch, nil
+		}
+
+		// Make a single bulk call to get solution statuses with retry
+		var bulkSolutions []bulktasks.IArbiusSolution
+
+		getSolutionsOperation := func() (interface{}, error) {
+			solutions, err := tm.services.BulkTasks.GetSolutions(nil, collectedTaskIds)
 			if err != nil {
-				tm.services.Logger.Err(err).Str("taskid", t.TaskId.String()).Msg("error getting on-chain solution information, skipping task in batch prep")
+				return nil, err
+			}
+			return solutions, nil
+		}
+
+		retryResult, err := utils.ExpRetry(tm.services.Logger, getSolutionsOperation, 3, 1000)
+
+		if err != nil {
+			tm.services.Logger.Error().Err(err).Msg("error checking on-chain solutions")
+			return validator, nil, err // Return error, no fallback
+		}
+
+		// Type assert the result from ExpRetry
+		var ok bool
+		bulkSolutions, ok = retryResult.([]bulktasks.IArbiusSolution)
+		if !ok {
+			errInternal := errors.New("ExpRetry returned unexpected type for GetSolutions")
+			tm.services.Logger.Error().Err(errInternal).Msg("internal error: type assertion failed for bulkSolutions")
+			return validator, nil, errInternal
+		}
+
+		// Process bulk results
+		if len(bulkSolutions) != len(collectedTaskIds) {
+			tm.services.Logger.Error().Msgf("bulk solution check returned %d results for %d tasks, mismatch, skipping processing this batch", len(bulkSolutions), len(collectedTaskIds))
+			return validator, nil, errors.New("bulk solution check result count mismatch")
+		}
+
+		for i, solInfo := range bulkSolutions {
+			taskIdBytes := collectedTaskIds[i] // The TaskId from our input list
+			originalTask, found := taskMapById[taskIdBytes]
+			if !found {
+				tm.services.Logger.Error().Str("task_id", task.TaskId(taskIdBytes).String()).Msg("Original task not found for task ID after bulk solution call")
 				continue
 			}
 
-			if res.Blocktime > 0 {
-				if res.Claimed {
-					// Solution is already claimed on-chain
-					tm.services.Logger.Info().Str("taskid", t.TaskId.String()).Str("validator", res.Validator.String()).Msg("task already claimed, ensuring local cleanup")
-					claimsToDelete = append(claimsToDelete, t.TaskId)
+			if solInfo.Blocktime > 0 {
+				if solInfo.Claimed {
+					tm.services.Logger.Info().Str("taskid", originalTask.TaskId.String()).Str("validator", solInfo.Validator.String()).Msg("task already claimed (bulk), ensuring local cleanup")
+					claimsToDelete = append(claimsToDelete, originalTask.TaskId)
 				} else {
-					// Solution exists on-chain delete the solution and commitment
-					solutionsToDelete = append(solutionsToDelete, t.TaskId)
-					commitmentsToDelete = append(commitmentsToDelete, t.TaskId)
-
-					// Solution is on-chain but NOT claimed. Update local status to claimable.
-					tm.services.Logger.Info().Str("taskid", t.TaskId.String()).Str("validator", res.Validator.String()).Uint64("blocktime", res.Blocktime).Msg("task solution found and not claimed, updating status to claimable")
-					claimTime := time.Unix(int64(res.Blocktime), 0)
-					_, err = tm.services.TaskStorage.UpsertTaskToClaimable(t.TaskId, common.Hash{}, claimTime)
-					if err != nil {
-						tm.services.Logger.Error().Err(err).Str("taskid", t.TaskId.String()).Msg("failed to update task status to claimable")
+					solutionsToDelete = append(solutionsToDelete, originalTask.TaskId)
+					commitmentsToDelete = append(commitmentsToDelete, originalTask.TaskId)
+					tm.services.Logger.Info().Str("taskid", originalTask.TaskId.String()).Str("validator", solInfo.Validator.String()).Uint64("blocktime", solInfo.Blocktime).Msg("task solution found (bulk) and not claimed, updating status to claimable")
+					claimTime := time.Unix(int64(solInfo.Blocktime), 0)
+					_, taskErr := tm.services.TaskStorage.UpsertTaskToClaimable(originalTask.TaskId, common.Hash{}, claimTime)
+					if taskErr != nil {
+						tm.services.Logger.Error().Err(taskErr).Str("taskid", originalTask.TaskId.String()).Msg("failed to update task status to claimable (bulk)")
 						continue
 					}
 				}
-				if res.Validator.String() != validator.ValidatorAddress().String() {
-					tm.services.Logger.Warn().Msgf("solution solved by another validator! solver: %s task: %s", res.Validator.String(), t.TaskId.String())
+				if solInfo.Validator.String() != validator.ValidatorAddress().String() {
+					tm.services.Logger.Warn().Msgf("solution solved by another validator (bulk)! solver: %s task: %s", solInfo.Validator.String(), originalTask.TaskId.String())
 				}
 			} else {
-				validTasksForBatch = append(validTasksForBatch, t)
+				validTasksForBatch = append(validTasksForBatch, originalTask)
 			}
 		}
 
