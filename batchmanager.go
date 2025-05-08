@@ -974,18 +974,17 @@ func (tm *BatchTransactionManager) processBatch(
 	// simplified this function and removed solution checks, these are now only done in the getSolutionBatchdata function
 	// If a commitment is found to be on-chain, it is deleted from storage
 	getCommitmentBatchdata := func(batchSize int, noChecks bool) (storage.TaskDataSlice, error) {
-		tm.Lock()
-		defer tm.Unlock()
 		var tasks storage.TaskDataSlice
 		var err error
 
 		tasks, err = tm.services.TaskStorage.GetPendingCommitments(batchSize)
+
 		if err != nil {
 			tm.services.Logger.Err(err).Msg("failed to get commitments from storage")
 			return nil, err
 		}
 
-		if noChecks {
+		if noChecks || len(tasks) == 0 { // Also return early if no tasks
 			return tasks, nil
 		}
 
@@ -1040,8 +1039,6 @@ func (tm *BatchTransactionManager) processBatch(
 	}
 
 	getSolutionBatchdata := func(batchSize int, noChecks bool) (*Validator, storage.TaskDataSlice, error) {
-		tm.Lock()
-		defer tm.Unlock()
 
 		// map of validator to number of items we can send
 		// loop through pending counts for each validator and do min(count, items we can send)
@@ -1103,12 +1100,13 @@ func (tm *BatchTransactionManager) processBatch(
 		batchSize = min(int(validatorHighestMin), batchSize)
 
 		tasks, err = tm.services.TaskStorage.GetPendingSolutions(validator.ValidatorAddress(), batchSize)
+
 		if err != nil {
 			tm.services.Logger.Err(err).Msg("failed to get tasks from storage")
 			return nil, nil, err
 		}
 
-		if noChecks {
+		if noChecks || len(tasks) == 0 { // Also return early if no tasks
 			return validator, tasks, nil
 		}
 
@@ -1485,6 +1483,7 @@ func (tm *BatchTransactionManager) processBatch(
 			minBatchSize := tm.services.Config.Miner.SolutionBatch.MinBatchSize
 			maxBatchSize := tm.services.Config.Miner.SolutionBatch.MaxBatchSize
 
+			// Revert to original: Use configured NoChecks value
 			validator, batchTasks, err := getSolutionBatchdata(tm.services.Config.Miner.SolutionBatch.NumberOfBatches*maxBatchSize, tm.services.Config.Miner.NoChecks)
 			if err != nil {
 				tm.services.Logger.Error().Err(err).Msg("error getting solution batch data")

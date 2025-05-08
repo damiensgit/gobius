@@ -483,6 +483,8 @@ func main() {
 			RunAutoTaskSubmit(appQuit, appServices, interval)
 		case "testplaygroundtask":
 			sendTestPlaygroundTask(appContext)
+		case "modelrepl":
+			modelRepl(appContext, args)
 		case "gas-stats":
 			var fromBlock, endBlock int64
 			if len(args) < 2 {
@@ -547,6 +549,16 @@ func main() {
 			err = cleanQueueLocal(appQuit, appContext)
 			if err != nil {
 				logger.Fatal().Err(err).Msg("error cleaning local queue")
+			}
+		case "getipfslink":
+			if len(args) == 2 {
+				taskIdStr := args[1]
+				err := getIpfsLink(appContext, taskIdStr)
+				if err != nil {
+					logger.Fatal().Err(err).Msgf("error getting IPFS link for task %s", taskIdStr)
+				}
+			} else {
+				log.Fatalf("getipfslink requires a taskid argument")
 			}
 		default:
 			log.Fatalf("unknown command: %s", command)

@@ -3,6 +3,7 @@ package models
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,11 +23,21 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// known good cid for qwen-qwq-32b
-const expectedCID = "0x12209e5962a0b505af317e43db6e1ac3ec7e66af56fe55c8bd952615e84179b09776"
-const modelNameKey = "qwen-qwq-32b"
+type WaiV120Inner struct {
+	Prompt string `json:"prompt"`
+	Seed   uint64 `json:"seed"`
+}
 
-type QwenMainnetModel struct {
+type WaiV120Prompt struct {
+	Input WaiV120Inner `json:"input"`
+}
+
+type WaiV120ModelResponse struct {
+	Input  map[string]any `json:"input"`
+	Output []string       `json:"output"`
+}
+
+type WaiV120MainnetModel struct {
 	Model
 	timeoutDuration     time.Duration
 	ipfsTimeoutDuration time.Duration
@@ -36,16 +48,16 @@ type QwenMainnetModel struct {
 	ipfs                ipfs.IPFSClient
 }
 
-// Ensure QwenTestModel implements the Model interface.
-var _ ModelInterface = (*QwenMainnetModel)(nil)
+// Ensure WaiV120TestModel implements the Model interface.
+var _ ModelInterface = (*WaiV120MainnetModel)(nil)
 
-var QwenMainnetModelTemplate = Model{
+var WaiV120MainnetModelTemplate = Model{
 	ID:       "",
 	Mineable: true,
 	Template: map[string]any{
 		"meta": map[string]any{
-			"title":       "qwen-qwq-32b",
-			"description": "Qwen Mainnet Model",
+			"title":       "WAI-NSFW-illustrious-SDXL-v120",
+			"description": "Anime image generation model",
 			"version":     1,
 			"input": []map[string]any{
 				{
@@ -65,16 +77,16 @@ var QwenMainnetModelTemplate = Model{
 			},
 			"output": []map[string]any{
 				{
-					"filename": "out-1.txt",
-					"type":     "text",
+					"filename": "out-1.png",
+					"type":     "image",
 				},
 			},
 		},
 	},
 }
 
-func NewQwenMainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logger zerolog.Logger) *QwenMainnetModel {
-	model, ok := appConfig.BaseConfig.Models[modelNameKey]
+func NewWaiV120MainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logger zerolog.Logger) *WaiV120MainnetModel {
+	model, ok := appConfig.BaseConfig.Models["wai-v120"]
 	if !ok {
 		return nil
 	}
@@ -83,7 +95,6 @@ func NewQwenMainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig, lo
 		logger.Error().Str("model", modelNameKey).Msg("model ID is empty")
 		return nil
 	}
-
 
 	http := &http.Client{
 		Transport: &http.Transport{MaxIdleConnsPerHost: 10}, // Use a dedicated transport
@@ -122,8 +133,8 @@ func NewQwenMainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig, lo
 		return nil
 	}
 
-	m := &QwenMainnetModel{
-		Model:               QwenMainnetModelTemplate,
+	m := &WaiV120MainnetModel{
+		Model:               WaiV120MainnetModelTemplate,
 		timeoutDuration:     timeout,
 		ipfsTimeoutDuration: ipfsTimeout, // Store the IPFS timeout
 		config:              appConfig,
@@ -142,7 +153,7 @@ func NewQwenMainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig, lo
 	return m
 }
 
-func (m *QwenMainnetModel) HydrateInput(preprocessedInput map[string]any, seed uint64) (InputHydrationResult, error) {
+func (m *WaiV120MainnetModel) HydrateInput(preprocessedInput map[string]any, seed uint64) (InputHydrationResult, error) {
 	input := make(map[string]any)
 
 	// Helper functions for type conversion
@@ -264,28 +275,28 @@ func (m *QwenMainnetModel) HydrateInput(preprocessedInput map[string]any, seed u
 		}
 	}
 
-	// Convert validated input to the expected QwenInner format
-	var inner QwenInner
+	// Convert validated input to the expected WaiV120Inner format
+	var inner WaiV120Inner
 	jsonBytes, err := json.Marshal(input)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal input: %w", err)
 	}
 
 	if err := json.Unmarshal(jsonBytes, &inner); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal to QwenInner: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal to WaiV120Inner: %w", err)
 	}
 
 	// TODO: probable a better way to handle values we need to set
 	inner.Seed = seed
 
-	return QwenPrompt{Input: inner}, nil
+	return WaiV120Prompt{Input: inner}, nil
 }
 
-func (m *QwenMainnetModel) GetID() string {
+func (m *WaiV120MainnetModel) GetID() string {
 	return m.Model.ID
 }
 
-func (m *QwenMainnetModel) GetFiles(ctx context.Context, gpu *common.GPU, taskid string, input any) ([]ipfs.IPFSFile, error) {
+func (m *WaiV120MainnetModel) GetFiles(ctx context.Context, gpu *common.GPU, taskid string, input any) ([]ipfs.IPFSFile, error) {
 
 	// Check if context is already canceled before doing anything
 	if err := ctx.Err(); err != nil {
@@ -330,7 +341,7 @@ func (m *QwenMainnetModel) GetFiles(ctx context.Context, gpu *common.GPU, taskid
 		return nil, err
 	}
 
-	var resp QwenModelResponse
+	var resp WaiV120ModelResponse
 	err = json.Unmarshal(body, &resp)
 	if err != nil {
 		return nil, err
@@ -340,14 +351,23 @@ func (m *QwenMainnetModel) GetFiles(ctx context.Context, gpu *common.GPU, taskid
 		return nil, err
 	}
 
-	fileName := fmt.Sprintf("%d.%s.txt", gpu.ID, uuid.New().String())
-	path := filepath.Join(m.config.CachePath, fileName)
-	buffer := bytes.NewBufferString(resp.Output[0])
+	// Remove the "data:image/png;base64," prefix
+	resp.Output[0] = strings.TrimPrefix(resp.Output[0], "data:image/png;base64,")
 
-	return []ipfs.IPFSFile{{Name: "out-1.txt", Path: path, Buffer: buffer}}, nil
+	// Assuming body is a base64 encoded string
+	buf, err := base64.StdEncoding.DecodeString(resp.Output[0])
+	if err != nil {
+		return nil, err
+	}
+
+	fileName := fmt.Sprintf("%d.%s.png", gpu.ID, uuid.New().String())
+	path := filepath.Join(m.config.CachePath, fileName)
+	buffer := bytes.NewBuffer(buf)
+
+	return []ipfs.IPFSFile{{Name: "out-1.png", Path: path, Buffer: buffer}}, nil
 }
 
-func (m *QwenMainnetModel) GetCID(ctx context.Context, gpu *common.GPU, taskid string, input any) ([]byte, error) {
+func (m *WaiV120MainnetModel) GetCID(ctx context.Context, gpu *common.GPU, taskid string, input any) ([]byte, error) {
 
 	// Check context before attempting GetFiles
 	if err := ctx.Err(); err != nil {
@@ -393,10 +413,10 @@ func (m *QwenMainnetModel) GetCID(ctx context.Context, gpu *common.GPU, taskid s
 	return cidBytes, nil
 }
 
-func (m *QwenMainnetModel) Validate(gpu *common.GPU, taskid string) error {
+func (m *WaiV120MainnetModel) Validate(gpu *common.GPU, taskid string) error {
 
-	testPrompt := QwenPrompt{
-		Input: QwenInner{
+	testPrompt := WaiV120Prompt{
+		Input: WaiV120Inner{
 			Prompt: "Hello World",
 			Seed:   100,
 		},
@@ -409,11 +429,12 @@ func (m *QwenMainnetModel) Validate(gpu *common.GPU, taskid string) error {
 		return err
 	}
 
+	expected := "0x1220945305a006a10e4325fba5c1cab70ef18bb717dbb3a2979878dd7f8afe7caf19"
 	cidStr := "0x" + hex.EncodeToString(cid)
-	if cidStr == expectedCID {
-		m.logger.Info().Str("model", m.GetID()).Str("cid", cidStr).Str("expected", expectedCID).Msg("model CID matches expected CID")
+	if cidStr == expected {
+		m.logger.Info().Str("model", m.GetID()).Str("cid", cidStr).Str("expected", expected).Msg("model CID matches expected CID")
 	} else {
-		m.logger.Error().Str("model", m.GetID()).Str("cid", cidStr).Str("expected", expectedCID).Msg("model CID does not match expected CID")
+		m.logger.Error().Str("model", m.GetID()).Str("cid", cidStr).Str("expected", expected).Msg("model CID does not match expected CID")
 		return errors.New("model CID does not match expected CID")
 	}
 

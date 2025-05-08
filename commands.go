@@ -1,9 +1,11 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"gobius/account"
 	"gobius/bindings/arbiusrouterv1"
@@ -11,8 +13,11 @@ import (
 	"gobius/bindings/engine"
 	"gobius/client"
 	task "gobius/common"
+	"gobius/ipfs"
 	"gobius/metrics"
+	"gobius/models"
 	"gobius/storage"
+	"io"
 	"log"
 	"math"
 	"math/big"
@@ -25,13 +30,18 @@ import (
 	"bytes" // Added for bytes.Equal
 	"gobius/bindings/bulktasks"
 
+	gpu "gobius/common"
+
 	"github.com/briandowns/spinner"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types" // Added for deriving addresses
-	"github.com/olekukonko/tablewriter"          // Added for table output
+	"github.com/google/uuid"
+	"github.com/ipfs/go-cid"            // Added for CID handling
+	"github.com/mr-tron/base58"         // Added for Base58 encoding
+	"github.com/olekukonko/tablewriter" // Added for table output
 	"github.com/rs/zerolog"
 )
 
@@ -1209,7 +1219,7 @@ func sendTestPlaygroundTask(ctx context.Context) {
 		services.Logger.Info().Str("txhash", tx.Hash().String()).Msgf("allowance increased")
 	}
 
-	services.Logger.Info().Msgf("submitting task")
+	services.Logger.Info().Msgf("submitting task with input %s on model %s", services.AutoMineParams.Input, common.Bytes2Hex(services.AutoMineParams.Model[:]))
 
 	opts := services.OwnerAccount.GetOpts(0, nil, nil, nil)
 
@@ -1253,7 +1263,6 @@ func fundTaskWallets(ctx context.Context, amount float64, minbal float64) {
 		services.Logger.Err(err).Str("account", services.OwnerAccount.Address.String()).Msg("could not get eth balance on account")
 		return
 	}
-
 	// convert ETH balance to float
 	balAsFloat := Eth.ToFloat(ethBalance)
 
@@ -2704,5 +2713,225 @@ func cleanQueueLocal(appQuit context.Context, ctx context.Context) error {
 	}
 
 	logger.Info().Msg("Local task queue cleanup finished.")
+	return nil
+}
+
+// getIpfsLink fetches the on-chain solution CID for a task and prints a Pinata gateway link.
+func getIpfsLink(ctx context.Context, taskIdStr string) error {
+	// Get the services from the context
+	services, ok := ctx.Value(servicesKey{}).(*Services)
+	if !ok {
+		return fmt.Errorf("could not get services from context")
+	}
+	logger := services.Logger // Use logger from services
+
+	logger.Info().Str("task_id", taskIdStr).Msg("fetching IPFS link...")
+
+	taskId, err := task.ConvertTaskIdString2Bytes(taskIdStr)
+	if err != nil {
+		logger.Error().Err(err).Str("task_id", taskIdStr).Msg("invalid Task ID format")
+		return fmt.Errorf("invalid Task ID format: %w", err)
+	}
+
+	solution, err := services.Engine.GetSolution(taskId)
+	if err != nil {
+		logger.Error().Err(err).Str("task_id", taskIdStr).Msg("failed to get solution from chain")
+		return fmt.Errorf("failed to get solution from chain: %w", err)
+	}
+
+	if solution.Blocktime == 0 {
+		logger.Warn().Str("task_id", taskIdStr).Msg("no solution found on-chain for this task ID")
+		fmt.Println("no solution found on-chain for this task ID.")
+		return nil // Not an error, just no solution yet
+	}
+
+	rawCidBytes := solution.Cid[:]
+
+	if len(rawCidBytes) == 0 || bytes.Equal(rawCidBytes, make([]byte, 34)) {
+		logger.Error().Str("task_id", taskIdStr).Msg("on-chain solution exists but CID is empty or zeroed")
+		return fmt.Errorf("on-chain solution exists but CID is empty or zeroed")
+	}
+
+	parsedCid, err := cid.Cast(rawCidBytes)
+	if err != nil {
+		// If Cast fails, it might be just the multihash value without the prefix bytes.
+		// Let's try decoding the common case (SHA2-256 -> 0x12 prefix, 32 bytes hash -> 0x20 length)
+		// Assuming the Engine returns 34 bytes: [0x12, 0x20, 32_byte_hash]
+		if len(rawCidBytes) == 34 && rawCidBytes[0] == 0x12 && rawCidBytes[1] == 0x20 {
+			// Construct CID v1 manually (common case for IPFS)
+			parsedCid = cid.NewCidV1(cid.DagProtobuf, rawCidBytes) // Use DagProtobuf for typical IPFS data
+			logger.Debug().Str("task_id", taskIdStr).Msg("raw bytes looked like multihash, created CID v1 DagProtobuf")
+		} else {
+			// Attempt Base58 encoding directly as a fallback, might be needed if Engine format changes
+			logger.Warn().Err(err).Str("raw_cid_hex", hex.EncodeToString(rawCidBytes)).Msg("could not cast raw bytes to CID object, attempting direct Base58 encoding")
+			cidBase58 := base58.Encode(rawCidBytes)
+			ipfsUrl := fmt.Sprintf("https://gateway.pinata.cloud/ipfs/%s", cidBase58)
+			fmt.Println(ipfsUrl)
+			return nil
+		}
+	}
+
+	cidBase58 := parsedCid.String() // CID object's String() method returns Base58
+
+	ipfsUrl := fmt.Sprintf("https://gateway.pinata.cloud/ipfs/%s", cidBase58)
+
+	fmt.Println(ipfsUrl)
+	logger.Info().Str("task_id", taskIdStr).Str("url", ipfsUrl).Msg("successfully generated IPFS link")
+
+	return nil
+}
+
+// modelRepl provides an interactive REPL to test models locally.
+func modelRepl(appCtx context.Context, args []string) error {
+	if len(args) < 2 {
+		return errors.New("modelrepl requires a model ID argument (e.g., wai-v120)")
+	}
+	modelIdArg := args[1]
+
+	// Get services from context
+	services, ok := appCtx.Value(servicesKey{}).(*Services)
+	if !ok {
+		return errors.New("could not get services from context")
+	}
+	logger := services.Logger.With().Str("command", "modelrepl").Str("model_id_arg", modelIdArg).Logger()
+
+	// Find the model hex ID from the alias/key used in config
+	var modelHexId string
+	for id, modelCfg := range services.Config.BaseConfig.Models {
+		if id == modelIdArg {
+			modelHexId = modelCfg.ID
+			break
+		}
+	}
+	if modelHexId == "" {
+		logger.Error().Msg("model ID not found in BaseConfig.Models mapping")
+		return fmt.Errorf("model alias '%s' not found in config. Check BaseConfig.Models", modelIdArg)
+	}
+	logger = logger.With().Str("model_hex_id", modelHexId).Logger()
+
+	ipfsClient, err := ipfs.NewMockIPFSClient(*services.Config, true)
+
+	if err != nil {
+		logger.Fatal().Err(err).Msg("error connecting to IPFS")
+	}
+
+	models.InitModelRegistry(ipfsClient, services.Config, logger)
+
+	logger.Info().Msg("loading model...")
+
+	// Get the actual model implementation from the registry
+	model := models.ModelRegistry.GetModel(modelHexId)
+	if model == nil {
+		logger.Error().Msg("model not found in registry or not enabled")
+		return fmt.Errorf("model with hex ID %s not found or enabled", modelHexId)
+	}
+
+	// Find the first configured GPU endpoint for this model ID
+	cogConfig, ok := services.Config.ML.Cog[modelHexId]
+	if !ok || len(cogConfig.URL) == 0 {
+		logger.Error().Msg("No GPU URLs configured for this model ID in ML.Cog section")
+		return fmt.Errorf("no GPU URLs configured for model %s (hex ID: %s)", modelIdArg, modelHexId)
+	}
+
+	// Use the first configured GPU URL
+	gpuUrl := cogConfig.URL[0]
+	mockGpu := gpu.GPU{
+		ID:   0,
+		Url:  gpuUrl,
+		Mock: false,
+	}
+	logger.Info().Str("gpu_url", gpuUrl).Msg("using first configured GPU endpoint for inference")
+
+	reader := bufio.NewReader(os.Stdin)
+	logger.Info().Msg("model REPL started. enter prompt or type 'exit' to quit.")
+
+	for {
+		fmt.Print("> ")
+		userInput, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				logger.Info().Msg("EOF received, exiting REPL.")
+				break // Exit loop on EOF
+			}
+			logger.Error().Err(err).Msg("error reading input")
+			continue
+		}
+
+		userInput = strings.TrimSpace(userInput)
+
+		if strings.ToLower(userInput) == "exit" {
+			logger.Info().Msg("exiting REPL.")
+			break
+		}
+
+		if userInput == "" {
+			continue // Skip empty input
+		}
+
+		logger.Info().Str("prompt", userInput).Msg("processing prompt...")
+
+		seed := uint64(rand.Int63()) // Generate a random seed for each run
+		preprocessedInput := map[string]any{
+			"prompt":          userInput,
+			"negative_prompt": "",
+		}
+
+		hydratedInput, err := model.HydrateInput(preprocessedInput, seed)
+		if err != nil {
+			logger.Error().Err(err).Msg("Failed to hydrate input")
+			fmt.Println("Error preparing input:", err)
+			continue
+		}
+
+		// run inference
+		taskId := fmt.Sprintf("repl-%s", uuid.New().String())
+		startTime := time.Now()
+
+		// Use a context for the GetFiles call, respecting potential app shutdown
+		files, err := model.GetFiles(appCtx, &mockGpu, taskId, hydratedInput)
+		if err != nil {
+			logger.Error().Err(err).Msg("model inference failed")
+			fmt.Println("error during model inference:", err)
+			continue
+		}
+		elapsed := time.Since(startTime)
+		logger.Info().Dur("duration", elapsed).Msg("inference complete")
+
+		// save output files
+		if len(files) == 0 {
+			logger.Warn().Msg("model did not return any output files.")
+			fmt.Println("model returned no output files.")
+			continue
+		}
+
+		for i, file := range files {
+			// Generate a unique local filename
+			// Use the filename suggested by the model template if available
+			suggestedFilename := fmt.Sprintf("output-%d.bin", i+1) // Default binary extension
+			if file.Name != "" {
+				suggestedFilename = file.Name
+			}
+
+			localFilename := fmt.Sprintf("repl_output_%s_%s", time.Now().Format("20060102150405"), suggestedFilename)
+
+			// Read the buffer content
+			fileBytes, err := io.ReadAll(file.Buffer)
+			if err != nil {
+				logger.Error().Err(err).Str("suggested_filename", suggestedFilename).Msg("failed to read file buffer")
+				fmt.Printf("error reading buffer for %s: %v\n", suggestedFilename, err)
+				continue
+			}
+
+			err = os.WriteFile(localFilename, fileBytes, 0644)
+			if err != nil {
+				logger.Error().Err(err).Str("filename", localFilename).Msg("failed to write output file")
+				fmt.Printf("error writing file %s: %v\n", localFilename, err)
+			} else {
+				logger.Info().Str("filename", localFilename).Int("bytes", len(fileBytes)).Msg("saved output file")
+				fmt.Printf("saved output to: %s\n", localFilename)
+			}
+		}
+	}
+
 	return nil
 }

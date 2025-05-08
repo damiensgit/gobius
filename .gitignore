@@ -25,4 +25,5 @@ bin/*
 !config.example.json
 !sepolia.example.json
 !playground.example.json
-config.json
+contracts/cache
+broadcast/*

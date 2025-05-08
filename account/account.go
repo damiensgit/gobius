@@ -449,16 +449,31 @@ func (account *Account) NonceManagerWrapperWithContext(ctx context.Context, opts
 		}
 		return fn(opts)
 	}
-	result, err := utils.ExpRetryWithNonceContext(ctx, account.logger, txFunc, tries, base, backoffMultiplier)
-	txResult, ok := result.(*types.Transaction)
-	if !ok {
-		return nil, errors.New("result is not the expected type")
-	}
-	if err != nil {
+	resultIntf, originalErr := utils.ExpRetryWithNonceContext(ctx, account.logger, txFunc, tries, base, backoffMultiplier)
+
+	if originalErr != nil {
+		// Refresh the account's nonce from the chain.
 		account.UpdateNonce()
-		//		account.DecNonce()
+
+		// Prioritize returning the originalErr.
+		// The logging for resultIntf != nil && !isTx is just for extra diagnostics
+		if resultIntf != nil {
+			if _, isTx := resultIntf.(*types.Transaction); !isTx {
+				account.logger.Error().Err(originalErr).Interface("result_type", fmt.Sprintf("%T", resultIntf)).Msg("txFunc errored but also returned a non-nil, non-transaction result")
+			}
+		}
+		return nil, originalErr
 	}
-	return txResult, err
+
+	tx, ok := resultIntf.(*types.Transaction)
+	if !ok {
+		return nil, fmt.Errorf("transaction function succeeded but result (%T: %v) is not a valid *types.Transaction", resultIntf, resultIntf)
+	}
+	if tx == nil {
+		// This is hit if originalErr was nil, AND resultIntf was a *types.Transaction, BUT tx itself is nil.
+		return nil, fmt.Errorf("assertion failed: transaction function reported success but returned a nil transaction object")
+	}
+	return tx, nil
 }
 
 func (account *Account) NonceManagerWrapper(tries int, base, backoffMultiplier float64, override bool, fn func(opts *bind.TransactOpts) (interface{}, error)) (*types.Transaction, error) {

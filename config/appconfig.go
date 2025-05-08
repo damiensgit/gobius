@@ -455,7 +455,7 @@ func NewAppConfig(testnetType int) AppConfig {
 		},
 	}
 
-	data := baseConfigJsonData
+	data := baseConfigJsonDataMainnet
 
 	switch testnetType {
 	case 1:

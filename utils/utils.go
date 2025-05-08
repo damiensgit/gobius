@@ -123,10 +123,15 @@ func ExpRetryWithNonceContext(ctx context.Context, logger zerolog.Logger, fn fun
 		}
 
 		if strings.Contains(err.Error(), "execution reverted") {
-			logger.Error().Err(err).Msg("contract execution reverted (no retry)")
-			return result, err // Return the revert error immediately
-			// } else if strings.Contains(err.Error(), "solution already submitted") {
-			// 	return result, err
+			// Check if it's the specific "solution rate limit" revert error
+			if strings.Contains(strings.ToLower(err.Error()), "solution rate limit") {
+				// Log it, but allow it to fall through to the retry logic
+				logger.Warn().Err(err).Msg("execution reverted due to solution rate limit, will retry")
+			} else {
+				// For other "execution reverted" errors, return immediately
+				logger.Error().Err(err).Msg("contract execution reverted (no retry)")
+				return result, err
+			}
 		} else if strings.Contains(err.Error(), "nonce too low") || strings.Contains(err.Error(), "nonce too high") {
 			parts := strings.Split(err.Error(), "state: ")
 			if len(parts) < 2 {
