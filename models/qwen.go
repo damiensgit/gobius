@@ -91,11 +91,12 @@ func NewQwenTestModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logge
 	}
 
 	if model.ID == "" {
-		logger.Error().Str("model", "qwen").Msg("qwen model ID is empty")
+		logger.Error().Str("model", "qwen-test").Msg("qwen-test model ID is empty")
 		return nil
 	}
 
-	http := &http.Client{
+	httpClient := &http.Client{
+		Transport: &http.Transport{MaxIdleConnsPerHost: 10}, // Use a dedicated transport for test model
 		// Timeout is now handled per-request via context
 		// Timeout: time.Second * 30,
 	}
@@ -145,7 +146,7 @@ func NewQwenTestModel(client ipfs.IPFSClient, appConfig *config.AppConfig, logge
 			},
 		},
 		ipfs:   client,
-		client: http,
+		client: httpClient,
 		logger: logger,
 	}
 	// set this from config for now

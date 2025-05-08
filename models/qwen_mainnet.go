@@ -84,16 +84,17 @@ func NewQwenMainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig, lo
 		return nil
 	}
 
-
 	http := &http.Client{
 		Transport: &http.Transport{MaxIdleConnsPerHost: 10}, // Use a dedicated transport
 	}
 
 	// Use model.ID (the hex string CID) as the key for the Cog map
 	cogConfig, ok := appConfig.ML.Cog[model.ID]
+
 	// Set default timeouts first
-	var timeout time.Duration = 120 * time.Second    // Default inference timeout
-	var ipfsTimeout time.Duration = 30 * time.Second // Default IPFS timeout
+	timeout := 120 * time.Second    // Default inference timeout
+	ipfsTimeout := 30 * time.Second // Default IPFS timeout
+
 	if ok {
 		// Parse inference timeout only if the string is not empty
 		if cogConfig.HttpTimeout != "" {
@@ -125,7 +126,7 @@ func NewQwenMainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig, lo
 	m := &QwenMainnetModel{
 		Model:               QwenMainnetModelTemplate,
 		timeoutDuration:     timeout,
-		ipfsTimeoutDuration: ipfsTimeout, // Store the IPFS timeout
+		ipfsTimeoutDuration: ipfsTimeout,
 		config:              appConfig,
 		Filters: []MiningFilter{
 			{
@@ -327,17 +328,22 @@ func (m *QwenMainnetModel) GetFiles(ctx context.Context, gpu *common.GPU, taskid
 
 	body, err := io.ReadAll(postResp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read model response body: %w", err)
 	}
 
 	var resp QwenModelResponse
 	err = json.Unmarshal(body, &resp)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to unmarshal model response: %w", err)
 	}
 
 	if len(resp.Output) != 1 {
-		return nil, err
+		return nil, fmt.Errorf("model returned %d outputs, expected 1", len(resp.Output))
+	}
+
+	// Add check for empty text data
+	if resp.Output[0] == "" {
+		return nil, errors.New("model returned empty text data")
 	}
 
 	fileName := fmt.Sprintf("%d.%s.txt", gpu.ID, uuid.New().String())
@@ -383,11 +389,11 @@ func (m *QwenMainnetModel) GetCID(ctx context.Context, gpu *common.GPU, taskid s
 	}, 3, 1000)
 
 	if err != nil {
-		return nil, errors.New("cannot pin files to retrieve cid")
+		return nil, fmt.Errorf("failed to pin files to IPFS after retries: %w", err)
 	}
 	cidBytes, err := base58.Decode(cid58.(string))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to decode base58 CID string: %w", err)
 	}
 
 	return cidBytes, nil

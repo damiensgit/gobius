@@ -13,6 +13,7 @@ import (
 	"gobius/models"
 	"gobius/utils"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,6 +44,7 @@ type SubmitTaskParams struct {
 	Incentive      *big.Int
 	OriginMethod   string
 	OriginContract common.Address
+	BulkTaskCount  *big.Int // Number of tasks in a bulk submission
 }
 
 type TaskSubmitted struct {
@@ -319,7 +321,7 @@ func (bs *baseStrategy) GetTxHash(taskIdStr string) (common.Hash, bool) {
 	// Look specifically for the common.Hash type cached by EventManager
 	if val, found := bs.txTaskCache.Get(taskIdStr); found {
 		if hashVal, ok := val.(common.Hash); ok {
-			bs.logger.Trace().Str("task", taskIdStr).Str("txHash", hashVal.Hex()).Msg("cache hit for taskid->txhash")
+			bs.logger.Trace().Str("task", taskIdStr).Str("tx_hash", hashVal.Hex()).Msg("cache hit for taskid->txhash")
 			return hashVal, true
 		}
 		bs.logger.Warn().Str("task", taskIdStr).Msgf("cache contained non-hash type (%T) for taskid->txhash lookup", val)
@@ -459,6 +461,7 @@ func (bs *baseStrategy) decodeTaskTransaction(tx *types.Transaction) (*SubmitTas
 	originMethod := "unknown"
 	originContract := txTo
 	incentive := big.NewInt(0)
+	var bulkCountFromTx *big.Int // Variable to store parsed bulk count
 
 	if isEngine {
 		if bytes.Equal(bs.submitMethod.ID, methodSig) {
@@ -467,8 +470,10 @@ func (bs *baseStrategy) decodeTaskTransaction(tx *types.Transaction) (*SubmitTas
 		} else if bytes.Equal(bs.bulkSubmitMethod.ID, methodSig) {
 			selectedMethod = bs.bulkSubmitMethod
 			originMethod = "bulkSubmitTask"
+			// Attempt to parse bulk count if this is the method
+			// Unpack occurs later, but we note it's a bulk here.
 		}
-	} else {
+	} else { // isRouter
 		if bytes.Equal(bs.submitMethodOnRouter.ID, methodSig) {
 			selectedMethod = bs.submitMethodOnRouter
 			originMethod = "submitTaskOnRouter"
@@ -482,6 +487,7 @@ func (bs *baseStrategy) decodeTaskTransaction(tx *types.Transaction) (*SubmitTas
 	}
 
 	if selectedMethod == nil {
+		bs.logger.Error().Str("tx_hash", tx.Hash().Hex()).Str("to", txTo.Hex()).Str("method_sig_hex", hex.EncodeToString(methodSig)).Msg("decodeTaskTransaction: unknown method signature for contract")
 		return nil, fmt.Errorf("transaction to %s has unknown method signature: %s", txTo.Hex(), hex.EncodeToString(methodSig))
 	}
 
@@ -491,8 +497,15 @@ func (bs *baseStrategy) decodeTaskTransaction(tx *types.Transaction) (*SubmitTas
 	}
 
 	// Extract common parameters
-	if len(params) < 5 {
-		return nil, fmt.Errorf("unpacked fewer parameters (%d) than expected (min 5) for %s", len(params), originMethod)
+	// For bulkSubmitTask (engine): version, owner, model, fee, input, tasks_count
+	// For others: version, owner, model, fee, input, [incentive for router]
+	expectedMinParams := 5
+	if originMethod == "bulkSubmitTask" {
+		expectedMinParams = 6
+	}
+
+	if len(params) < expectedMinParams {
+		return nil, fmt.Errorf("unpacked fewer parameters (%d) than expected (min %d) for %s", len(params), expectedMinParams, originMethod)
 	}
 	version, okV := params[0].(uint8)
 	owner, okO := params[1].(common.Address)
@@ -503,12 +516,18 @@ func (bs *baseStrategy) decodeTaskTransaction(tx *types.Transaction) (*SubmitTas
 		return nil, fmt.Errorf("type assertion failed for common parameters in %s", originMethod)
 	}
 
-	// Extract incentive (Index 5 for Router Methods)
-	if isRouter && len(params) > 5 {
+	// Extract specific parameters based on originMethod
+	if originMethod == "bulkSubmitTask" {
+		if count, okCount := params[5].(*big.Int); okCount {
+			bulkCountFromTx = count
+		} else {
+			bs.logger.Warn().Str("method", originMethod).Msg("type assertion failed for bulk task count parameter")
+		}
+	} else if isRouter && len(params) > 5 { // Router methods with incentive
 		if inc, okInc := params[5].(*big.Int); okInc {
 			incentive = inc
 		} else {
-			bs.logger.Warn().Str("method", originMethod).Msg("type assertion failed for incentive parameter")
+			bs.logger.Warn().Str("method", originMethod).Msg("type assertion failed for incentive parameter on router method")
 		}
 	}
 
@@ -521,6 +540,7 @@ func (bs *baseStrategy) decodeTaskTransaction(tx *types.Transaction) (*SubmitTas
 		Incentive:      incentive,
 		OriginMethod:   originMethod,
 		OriginContract: originContract,
+		BulkTaskCount:  bulkCountFromTx, // Assign parsed bulk count
 	}
 	return submitParams, nil
 }
@@ -558,17 +578,21 @@ func (bs *baseStrategy) decodeTransactionWithCache(txHash common.Hash) (*SubmitT
 		waitCtx, cancel := context.WithTimeout(bs.ctx, 60*time.Second) // TODO: Configurable wait timeout
 		defer cancel()
 		select {
-		case params, chanOk := <-existingChan:
-			if !chanOk {
-				decodeLog.Error().Msg("decode channel closed unexpectedly while waiting")
-				return nil, fmt.Errorf("decode channel closed unexpectedly for %s", txHashStr)
-			}
-			if params != nil {
-				decodeLog.Info().Msg("decode finished, got params from waiter")
-				return params, nil // Success
+		case <-existingChan: // Wait for signal (channel closed by decoder)
+			decodeLog.Info().Msg("decode by other goroutine signaled completion, checking cache.")
+			// The decoding goroutine is done. Check the cache for the result.
+			if cachedVal, found := bs.txTaskCache.Get(txHashStr); found {
+				if actualParams, okC := cachedVal.(*SubmitTaskParams); okC {
+					decodeLog.Info().Msg("decode finished, got params from cache after waiting.")
+					return actualParams, nil // Success from cache
+				}
+				// This case should ideally not happen if only correct types are cached.
+				decodeLog.Error().Msgf("cached value is not of type *SubmitTaskParams: %T", cachedVal)
+				return nil, fmt.Errorf("internal error: unexpected type in cache for %s", txHashStr)
 			} else {
-				decodeLog.Warn().Msg("decode failed (waited for result)")
-				return nil, fmt.Errorf("decode failed for tx %s (waited)", txHashStr)
+				// If not in cache, implies the original decode attempt failed and did not populate the cache.
+				decodeLog.Warn().Msg("decode by other goroutine likely failed (result not in cache).")
+				return nil, fmt.Errorf("decode failed for tx %s (waited, result not found in cache)", txHashStr)
 			}
 		case <-waitCtx.Done():
 			decodeLog.Warn().Msg("timeout waiting for decode result")
@@ -582,8 +606,7 @@ func (bs *baseStrategy) decodeTransactionWithCache(txHash common.Hash) (*SubmitT
 	defer func() {
 		decodeLog.Debug().Msg("cleaning up decodingInProgress map entry")
 		bs.decodingInProgress.Delete(txHash)
-		waitChan <- params // Send params (if successful) or nil (if failed)
-		close(waitChan)    // Signal completion/failure
+		close(waitChan) // signal completion
 	}()
 
 	// Fetch transaction (RPC call)
@@ -1299,7 +1322,7 @@ func (em *EventManager) routeTaskSubmittedEvents() {
 
 			taskId, txHash := event.Id, event.Raw.TxHash
 			taskIdStr := task.TaskId(taskId).String()
-			eventLog := loopLog.With().Str("task", taskIdStr).Str("txHash", txHash.String()).Logger()
+			eventLog := loopLog.With().Str("task", taskIdStr).Str("tx_hash", txHash.String()).Logger()
 
 			// 1. Cache TaskId -> TxHash mapping immediately
 			em.bs.txTaskCache.Add(taskIdStr, txHash)
@@ -1401,7 +1424,7 @@ func (em *EventManager) routeSolutionSubmittedEvents() {
 				eventLog.Warn().Msg("txhash cache miss for sampled taskid, skipping baseline validation")
 				continue
 			}
-			eventLog.Debug().Str("txHash", txHash.String()).Msg("found txhash for sampled task")
+			eventLog.Debug().Str("tx_hash", txHash.String()).Msg("found txhash for sampled task")
 
 			// Route directly to BASE strategy's shared validation channel
 			ts := &TaskSubmitted{TaskId: taskId, TxHash: txHash}
@@ -1782,16 +1805,22 @@ func (s *BulkMineStrategy) handleStorageTask(workerId int, gpu *task.GPU, ts *Ta
 	// 1. Get Parameters (use caching decoder)
 	params, err := s.bs.decodeTransactionWithCache(ts.TxHash)
 	if err != nil || params == nil {
-		// Decide whether to requeue based on error type
-		if errors.Is(err, ErrTxDecodePermanent) || errors.Is(err, ethereum.NotFound) {
-			// Permanent decode error or tx vanished - don't requeue
-			workerLogger.Error().Err(err).Msg("permanent decode error or tx not found, dropping storage task")
+		// Check for specific permanent decode errors vs transient errors
+		if errors.Is(err, ErrTxDecodePermanent) || errors.Is(err, ethereum.NotFound) || strings.Contains(err.Error(), "unknown method signature") {
+			// Treat specific decode failures or missing tx as permanent for this task instance
+			workerLogger.Error().Err(err).Msg("permanent decode failure for task, dropping")
+			// Do not requeue, let it be handled manually or by other processes if needed
 		} else {
-			// Assume transient error (RPC issue, temporary context cancel, etc.) - requeue
+			// Assume other errors (RPC, context cancelled during fetch) are transient - requeue
 			requeueTask(fmt.Sprintf("transient decode error: %v", err))
 		}
 		gpu.SetStatus("Error") // Mark error status
 		return
+	}
+
+	// Log if we popped a non-bulk task but allow processing
+	if params.OriginMethod != "bulkSubmitTask" {
+		workerLogger.Warn().Str("origin_method", params.OriginMethod).Msg("Processing non-bulk task popped from storage queue")
 	}
 
 	// 2. Solve and Submit

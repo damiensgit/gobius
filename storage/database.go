@@ -247,7 +247,7 @@ func (ts *TaskStorageDB) DeleteClaims(tasks []task.TaskId) error {
 	for _, v := range tasks {
 		qtx.DeleteCommitment(ts.ctx, v)
 		qtx.DeleteSolution(ts.ctx, v)
-		qtx.DeletedClaimedTask(ts.ctx, v)
+		qtx.DeletedTask(ts.ctx, v)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -255,7 +255,6 @@ func (ts *TaskStorageDB) DeleteClaims(tasks []task.TaskId) error {
 	}
 
 	return nil
-
 }
 
 func (ts *TaskStorageDB) TotalTasks() (int64, error) {

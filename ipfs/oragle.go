@@ -38,10 +38,15 @@ type HTTPOracleClient struct {
 
 // NewHTTPOracleClient creates a new HTTP oracle client
 func NewHTTPOracleClient(oracleURL string, timeout time.Duration) *HTTPOracleClient {
+	// Create a dedicated HTTP transport for this client
+	transport := &http.Transport{
+		MaxIdleConnsPerHost: 5, // Or another suitable number for oracle interactions
+		// Add other transport settings if needed (e.g., TLS)
+	}
 	return &HTTPOracleClient{
 		OracleURL:      oracleURL,
 		DefaultTimeout: timeout,
-		client:         &http.Client{Timeout: timeout},
+		client:         &http.Client{Timeout: timeout, Transport: transport},
 	}
 }
 
