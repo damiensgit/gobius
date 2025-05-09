@@ -1726,32 +1726,32 @@ func (tm *BatchTransactionManager) canTaskIdBeClaimed(
 ) bool {
 	taskIdStr := claim.ID.String()
 
-	// Use pre-fetched contestation details from combinedInfo
-	if combinedInfo.ContestationExists {
-		// The Solidity function sets ContestationExists if cont.validator != address(0)
-		tm.services.Logger.Warn().Str("task", taskIdStr).Str("contestor", combinedInfo.ContestationValidator.String()).Msg("⚠️ task was contested (details from combined bulk) ⚠️")
-		return false
-	}
-
-	// Use pre-fetched solution details from combinedInfo
+	// First check if solution exists
 	if !combinedInfo.SolutionExists {
 		tm.services.Logger.Warn().Str("task", taskIdStr).Msg("no valid solution details in combined info or solution not found on-chain")
 		return false
 	}
 
-	solTime := time.Unix(int64(combinedInfo.SolutionBlocktime), 0)
+	// Then check if already claimed
+	if combinedInfo.SolutionClaimed {
+		tm.services.Logger.Debug().Str("taskid", taskIdStr).Msg("solution already claimed")
+		return false
+	}
 
-	cooldownTime := cooldownTimes[combinedInfo.SolutionValidator] // Use SolutionValidator from combinedInfo
+	// Then check contestation
+	if combinedInfo.ContestationExists {
+		tm.services.Logger.Warn().Str("task", taskIdStr).Str("contestor", combinedInfo.ContestationValidator.String()).Msg("⚠️ task was contested (details from combined bulk) ⚠️")
+		return false
+	}
+
+	solTime := time.Unix(int64(combinedInfo.SolutionBlocktime), 0)
+	cooldownTime := cooldownTimes[combinedInfo.SolutionValidator]
 	if combinedInfo.SolutionBlocktime <= cooldownTime {
 		tm.services.Logger.Warn().Str("taskid", taskIdStr).Msg("⚠️ claim is lost due to lost contestation cooldown - removing from storage ⚠️")
 		return false
 	}
 
-	tm.services.Logger.Debug().Str("taskid", taskIdStr).Bool("claimed", combinedInfo.SolutionClaimed).Time("solved", solTime).Str("validator", combinedInfo.SolutionValidator.String()).Msg("solution information (using combined pre-fetched data)")
-
-	if combinedInfo.SolutionClaimed {
-		return false
-	}
+	tm.services.Logger.Debug().Str("taskid", taskIdStr).Time("solved", solTime).Str("validator", combinedInfo.SolutionValidator.String()).Msg("solution information (using combined pre-fetched data)")
 
 	return true
 }
@@ -1929,6 +1929,7 @@ func (tm *BatchTransactionManager) processBulkClaim(account *account.Account, ta
 				claimsToDeletePostTx = append(claimsToDeletePostTx, taskidItem.ID)
 			}
 		}
+
 	}
 
 	// Delete tasks that were successfully claimed or determined unclaimable
