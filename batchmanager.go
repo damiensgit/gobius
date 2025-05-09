@@ -18,7 +18,6 @@ import (
 	"math"
 	"math/big"
 	"math/rand"
-	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -1175,7 +1174,7 @@ func (tm *BatchTransactionManager) processBatch(
 		}
 
 		// Make a single bulk call to get solution statuses with retry
-		var bulkSolutions []bulktasks.IArbiusSolution
+		var bulkSolutions []bulktasks.IArbiusEngineEngineSolution
 
 		getSolutionsOperation := func() (interface{}, error) {
 			solutions, err := tm.services.BulkTasks.GetSolutions(nil, collectedTaskIds)
@@ -1194,7 +1193,7 @@ func (tm *BatchTransactionManager) processBatch(
 
 		// Type assert the result from ExpRetry
 		var ok bool
-		bulkSolutions, ok = retryResult.([]bulktasks.IArbiusSolution)
+		bulkSolutions, ok = retryResult.([]bulktasks.IArbiusEngineEngineSolution)
 		if !ok {
 			errInternal := errors.New("ExpRetry returned unexpected type for GetSolutions")
 			tm.services.Logger.Error().Err(errInternal).Msg("internal error: type assertion failed for bulkSolutions")
@@ -1211,7 +1210,7 @@ func (tm *BatchTransactionManager) processBatch(
 			taskIdBytes := collectedTaskIds[i] // The TaskId from our input list
 			originalTask, found := taskMapById[taskIdBytes]
 			if !found {
-				tm.services.Logger.Error().Str("task_id", task.TaskId(taskIdBytes).String()).Msg("Original task not found for task ID after bulk solution call")
+				tm.services.Logger.Error().Str("taskid", task.TaskId(taskIdBytes).String()).Msg("original task not found for task ID after bulk solution call")
 				continue
 			}
 
@@ -1320,7 +1319,7 @@ func (tm *BatchTransactionManager) processBatch(
 			return err
 		}
 
-		var signalledCommitments [][32]byte
+		var signalledCommitments = make(map[[32]byte]bool) // Use map for faster lookups
 		tm.services.Logger.Info().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("batch commitments transaction accepted")
 		for _, log := range receipt.Logs {
 			if len(log.Topics) > 0 && log.Topics[0] == tm.signalCommitmentEvent {
@@ -1329,31 +1328,60 @@ func (tm *BatchTransactionManager) processBatch(
 					tm.services.Logger.Error().Err(parseErr).Msg("could not parse signal commitment event")
 					continue
 				}
-				signalledCommitments = append(signalledCommitments, parsed.Commitment)
+				signalledCommitments[parsed.Commitment] = true
 			}
 		}
+
 		var commitmentsToUpdateAndDelete []task.TaskId
+		var commitmentsToCheckInBulk [][32]byte
+		taskIdMapForBulkCheck := make(map[[32]byte]task.TaskId)
+
 		for _, commitment := range batchCommitments {
-			commitmentStr := task.TaskId(commitment).String()
-			if slices.Contains(signalledCommitments, commitment) {
+			if signalledCommitments[commitment] {
 				if taskId, found := commitmentsToTaskMap[commitment]; found {
 					commitmentsToUpdateAndDelete = append(commitmentsToUpdateAndDelete, taskId)
 				}
 			} else {
-				blockNo, chainErr := tm.services.Engine.Engine.Commitments(nil, commitment)
-				if chainErr != nil {
-					tm.services.Logger.Error().Err(chainErr).Str("commitment", commitmentStr).Msg("could not get commitment block number")
-					continue
-				}
-				// if we have a non zero block no, there is already a commitment for this task, so delete it
-				if blockNo.Cmp(utils.Zero) != 0 {
-					if taskId, found := commitmentsToTaskMap[commitment]; found {
-						// Found on chain, but not in *this* batch's logs. Still needs cleanup/status update.
-						commitmentsToUpdateAndDelete = append(commitmentsToUpdateAndDelete, taskId)
-					}
-					tm.services.Logger.Warn().Str("commitment", commitmentStr).Msg("commitment was already accepted (found on-chain)")
+				// Not found in this tx's logs, add to bulk check list
+				commitmentsToCheckInBulk = append(commitmentsToCheckInBulk, commitment)
+				if taskId, found := commitmentsToTaskMap[commitment]; found {
+					taskIdMapForBulkCheck[commitment] = taskId
 				} else {
-					tm.services.Logger.Warn().Str("commitment", commitmentStr).Msg("commitment was not accepted (not in logs, not on-chain)")
+					tm.services.Logger.Warn().Str("commitment_hex", hex.EncodeToString(commitment[:])).Msg("Original taskId not found for commitment to be bulk checked")
+				}
+			}
+		}
+
+		if len(commitmentsToCheckInBulk) > 0 {
+			tm.services.Logger.Debug().Int("count", len(commitmentsToCheckInBulk)).Msg("performing bulk check for commitments not found in transaction logs")
+			getCommitmentsOperation := func() (interface{}, error) {
+				return tm.services.BulkTasks.GetCommitments(nil, commitmentsToCheckInBulk)
+			}
+			retryResult, expRetryErr := utils.ExpRetry(tm.services.Logger, getCommitmentsOperation, 3, 1000)
+			if expRetryErr != nil {
+				tm.services.Logger.Error().Err(expRetryErr).Msg("bulk getcommitments call failed after retries")
+			} else {
+				blockNumbers, ok := retryResult.([]*big.Int)
+				if !ok {
+					tm.services.Logger.Error().Msg("assertion: returned unexpected type for getcommitments")
+				} else if len(blockNumbers) != len(commitmentsToCheckInBulk) {
+					tm.services.Logger.Error().Int("expected", len(commitmentsToCheckInBulk)).Int("got", len(blockNumbers)).Msg("assertion: mismatch in bulk getcommitments result length")
+				} else {
+					for i, bn := range blockNumbers {
+						if bn.Cmp(utils.Zero) != 0 { // If block number > 0, it exists on-chain
+							commitmentChecked := commitmentsToCheckInBulk[i]
+							if taskId, found := taskIdMapForBulkCheck[commitmentChecked]; found {
+								commitmentsToUpdateAndDelete = append(commitmentsToUpdateAndDelete, taskId)
+								tm.services.Logger.Debug().Str("commitment_hex", hex.EncodeToString(commitmentChecked[:])).Str("taskid", taskId.String()).Uint64("block_no", bn.Uint64()).Msg("commitment found on-chain via bulk follow-up check")
+							} else {
+								// This should ideally not happen if taskIdMapForBulkCheck was populated correctly
+								tm.services.Logger.Warn().Str("commitment_hex", hex.EncodeToString(commitmentChecked[:])).Msg("task id not found for commitment confirmed in bulk follow-up check.")
+							}
+						} else {
+							commitmentChecked := commitmentsToCheckInBulk[i]
+							tm.services.Logger.Warn().Str("commitment_hex", hex.EncodeToString(commitmentChecked[:])).Msg("commitment not found on-chain via bulk follow-up check (was not in logs and not on chain)")
+						}
+					}
 				}
 			}
 		}
@@ -1451,7 +1479,7 @@ func (tm *BatchTransactionManager) processBatch(
 		}
 
 		if !success {
-			tm.services.Logger.Error().Str("txHash", tx.Hash().String()).Msg("batch solution transaction reverted on-chain")
+			tm.services.Logger.Error().Str("txhash", tx.Hash().String()).Msg("batch solution transaction reverted on-chain")
 			return errors.New("batch solution transaction reverted on-chain")
 		} else if receipt == nil {
 			err := errors.New("assertion: batch solution transaction returned nil receipt despite no error")
@@ -1460,7 +1488,7 @@ func (tm *BatchTransactionManager) processBatch(
 		}
 
 		tm.services.Logger.Info().Str("txhash", tx.Hash().String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("batch solutions transaction accepted")
-		var solutionsSubmitted []task.TaskId
+		var solutionsSubmittedInLogs = make(map[[32]byte]bool) // Use map for faster lookups
 		for _, log := range receipt.Logs {
 			if len(log.Topics) > 0 && log.Topics[0] == tm.solutionSubmittedEvent {
 				parsed, parseErr := tm.services.Engine.Engine.ParseSolutionSubmitted(*log)
@@ -1468,29 +1496,53 @@ func (tm *BatchTransactionManager) processBatch(
 					tm.services.Logger.Error().Err(parseErr).Msg("could not parse solution submitted event")
 					continue
 				}
-				solutionsSubmitted = append(solutionsSubmitted, parsed.Task)
+				solutionsSubmittedInLogs[parsed.Task] = true
 			}
 		}
 
 		solutionsToDelete := make([]task.TaskId, 0)
-		for _, taskid := range tasksToSubmit {
-			taskIdStr := task.TaskId(taskid).String()
-			if slices.Contains(solutionsSubmitted, taskid) {
+		var tasksToCheckInBulk [][32]byte
+
+		for _, taskid := range tasksToSubmit { // tasksToSubmit is [][32]byte
+			if solutionsSubmittedInLogs[taskid] {
 				tm.services.TaskTracker.TaskSucceeded()
 				solutionsToDelete = append(solutionsToDelete, taskid)
 			} else {
-				tm.services.TaskTracker.TaskFailed()
+				tm.services.TaskTracker.TaskFailed() // Assume failed for now, will be checked in bulk
+				tasksToCheckInBulk = append(tasksToCheckInBulk, taskid)
+			}
+		}
 
-				res, chainErr := tm.services.Engine.GetSolution(taskid)
-				if chainErr != nil {
-					tm.services.Logger.Err(chainErr).Str("taskid", taskIdStr).Msg("error getting solution information for task onchain")
-					continue
-				}
-				if res.Blocktime > 0 {
-					solutionsToDelete = append(solutionsToDelete, taskid)
-					tm.services.Logger.Warn().Str("taskid", taskIdStr).Str("validator", res.Validator.String()).Msg("solution was already accepted (found on-chain)")
+		if len(tasksToCheckInBulk) > 0 {
+			tm.services.Logger.Debug().Int("count", len(tasksToCheckInBulk)).Msg("performing bulk check for solutions not found in transaction logs")
+			getSolutionsOperation := func() (interface{}, error) {
+				return tm.services.BulkTasks.GetSolutions(nil, tasksToCheckInBulk)
+			}
+			retryResult, expRetryErr := utils.ExpRetry(tm.services.Logger, getSolutionsOperation, 3, 1000)
+
+			if expRetryErr != nil {
+				tm.services.Logger.Error().Err(expRetryErr).Msg("bulk getsolutions call failed after retries for follow-up check")
+				// Continue with solutions found in logs, others remain unconfirmed for this round
+			} else {
+				bulkSolutions, ok := retryResult.([]bulktasks.IArbiusEngineEngineSolution)
+				if !ok {
+					tm.services.Logger.Error().Msg("assertion: returned unexpected type for getsolutions")
+				} else if len(bulkSolutions) != len(tasksToCheckInBulk) {
+					tm.services.Logger.Error().Int("expected", len(tasksToCheckInBulk)).Int("got", len(bulkSolutions)).Msg("assertion: mismatch in bulk getsolutions result length")
 				} else {
-					tm.services.Logger.Warn().Str("taskid", taskIdStr).Msg("solution was not accepted (not in logs, not on-chain)")
+					for i, solInfo := range bulkSolutions {
+						taskIdChecked := tasksToCheckInBulk[i]
+						taskIdStr := task.TaskId(taskIdChecked).String()
+						if solInfo.Blocktime > 0 { // If blocktime > 0, solution exists on-chain
+							solutionsToDelete = append(solutionsToDelete, taskIdChecked)
+							tm.services.Logger.Info().Str("taskid", taskIdStr).Str("validator", solInfo.Validator.String()).Uint64("blocktime", solInfo.Blocktime).Msg("solution found on-chain via bulk follow-up check")
+							// If it was solved by us, TaskSucceeded was already called.
+							// If solved by someone else, TaskFailed was already called. This is just confirming it's on chain.
+						} else {
+							tm.services.Logger.Warn().Str("taskid", taskIdStr).Msg("Solution NOT found on-chain via bulk follow-up check (was not in logs and not on chain)")
+							// TaskFailed was already called for these.
+						}
+					}
 				}
 			}
 		}
@@ -1501,21 +1553,29 @@ func (tm *BatchTransactionManager) processBatch(
 			tm.services.Logger.Error().Err(deleteErr).Msg("error deleting solutions from storage")
 		}
 
-		unacceptedSolutions := len(tasksToSubmit) - len(solutionsSubmitted)
-		if unacceptedSolutions > 0 {
-			tm.services.Logger.Warn().Int("unaccepted", unacceptedSolutions).Int("total_in_batch", len(tasksToSubmit)).Msg("⚠️ some solutions submitted in batch were not confirmed via logs")
+		// Reconstruct the list of task IDs that were successfully submitted (found in logs)
+		// to be added to the claim queue.
+		var tasksActuallySubmittedToClaim []task.TaskId
+		for taskidBytes := range solutionsSubmittedInLogs {
+			tasksActuallySubmittedToClaim = append(tasksActuallySubmittedToClaim, task.TaskId(taskidBytes))
 		}
-		if len(solutionsSubmitted) > 0 {
+
+		unacceptedSolutions := len(tasksToSubmit) - len(solutionsSubmittedInLogs)
+		if unacceptedSolutions > 0 {
+			tm.services.Logger.Warn().Int("unaccepted", unacceptedSolutions).Int("total_in_batch", len(tasksToSubmit)).Msg("⚠️ some solutions submitted in batch were not confirmed via logs or subsequent bulk check")
+		}
+
+		if len(tasksActuallySubmittedToClaim) > 0 { // Use the reconstructed slice here
 			gasPerSolution := 0.0
-			if len(solutionsSubmitted) > 0 && txCost.Cmp(big.NewInt(0)) > 0 {
-				gasPerSolution = tm.services.Config.BaseConfig.BaseToken.ToFloat(txCost) / float64(len(solutionsSubmitted))
+			if len(tasksActuallySubmittedToClaim) > 0 && txCost.Cmp(big.NewInt(0)) > 0 {
+				gasPerSolution = tm.services.Config.BaseConfig.BaseToken.ToFloat(txCost) / float64(len(tasksActuallySubmittedToClaim))
 			}
-			_, addClaimErr := tm.services.TaskStorage.AddTasksToClaim(solutionsSubmitted, gasPerSolution)
+			_, addClaimErr := tm.services.TaskStorage.AddTasksToClaim(tasksActuallySubmittedToClaim, gasPerSolution) // Pass the correct slice
 			if addClaimErr != nil {
 				tm.services.Logger.Error().Err(addClaimErr).Msg("error adding tasks to claim in storage")
 				return addClaimErr
 			}
-			tm.services.Logger.Info().Str("validator", validatorToSendSubmits.ValidatorAddress().String()).Int("accepted", len(solutionsSubmitted)).Float64("cost_per_sol", gasPerSolution).Msg("✅ submitted solutions added to claim queue in storage")
+			tm.services.Logger.Info().Str("validator", validatorToSendSubmits.ValidatorAddress().String()).Int("accepted_in_log", len(tasksActuallySubmittedToClaim)).Float64("cost_per_sol", gasPerSolution).Msg("✅ submitted solutions (confirmed in logs) added to claim queue in storage")
 		}
 
 		return nil // Successful completion
@@ -1530,7 +1590,6 @@ func (tm *BatchTransactionManager) processBatch(
 
 		doCommitments := tm.services.Config.Miner.CommitmentsAndSolutions == config.DoCommitmentsOnly || tm.services.Config.Miner.CommitmentsAndSolutions == config.DoBoth
 		doSolutions := tm.services.Config.Miner.CommitmentsAndSolutions == config.DoBoth || tm.services.Config.Miner.CommitmentsAndSolutions == config.DoSolutionsOnly
-
 		if doCommitments {
 			minBatchSize := tm.services.Config.Miner.CommitmentBatch.MinBatchSize
 			maxBatchSize := tm.services.Config.Miner.CommitmentBatch.MaxBatchSize
@@ -1588,94 +1647,119 @@ func (tm *BatchTransactionManager) processBatch(
 	}
 }
 
+// TODO: Remove this function
 func (tm *BatchTransactionManager) processBulkClaimFast(account *account.Account, tasks []storage.ClaimTask, batchSize int) {
+	panic("processBulkClaimFast is deprecated")
+	/*
+		// Use the Map function to extract the TaskId from each struct
+		taskIds := utils.Map(tasks, func(s storage.ClaimTask) [32]byte {
+			//value, _ := task.ConvertTaskIdString2Bytes(s.ID)
+			return s.ID
+		})
 
-	// Use the Map function to extract the TaskId from each struct
-	taskIds := utils.Map(tasks, func(s storage.ClaimTask) [32]byte {
-		//value, _ := task.ConvertTaskIdString2Bytes(s.ID)
-		return s.ID
-	})
+		receipt, err := tm.BulkClaimWithAccount(account, taskIds)
+		if err != nil {
+			tm.services.Logger.Error().Err(err).Msg("❌ error submitting bulk claim")
+			return //err
+		}
 
-	receipt, err := tm.BulkClaimWithAccount(account, taskIds)
-	if err != nil {
-		tm.services.Logger.Error().Err(err).Msg("❌ error submitting bulk claim")
-		return //err
-	}
+		// Check if receipt is nil before accessing Status
+		if receipt == nil {
+			tm.services.Logger.Error().Msg("❌ bulk claim returned nil receipt despite no error")
+			return
+		}
 
-	// Check if receipt is nil before accessing Status
-	if receipt == nil {
-		tm.services.Logger.Error().Msg("❌ bulk claim returned nil receipt despite no error")
-		return
-	}
+		if receipt.Status != types.ReceiptStatusSuccessful {
+			tm.services.Logger.Warn().Str("txhash", receipt.TxHash.String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("⚠️ bulk claim transaction failed/reverted")
+			return
+		}
 
-	if receipt.Status != types.ReceiptStatusSuccessful {
-		tm.services.Logger.Warn().Str("txhash", receipt.TxHash.String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("⚠️ bulk claim transaction failed/reverted")
-		return
-	}
+		tm.services.Logger.Info().Str("txhash", receipt.TxHash.String()).Int("tasks", len(taskIds)).Uint64("block", receipt.BlockNumber.Uint64()).Msg("bulk claim transaction accepted")
 
-	tm.services.Logger.Info().Str("txhash", receipt.TxHash.String()).Int("tasks", len(taskIds)).Uint64("block", receipt.BlockNumber.Uint64()).Msg("bulk claim transaction accepted")
+		tasksClaimed := make([]task.TaskId, 0)
 
-	tasksClaimed := make([]task.TaskId, 0)
+		var totalValidatorReward *big.Int = big.NewInt(0)
 
-	var totalValidatorReward *big.Int = big.NewInt(0)
-
-	for _, log := range receipt.Logs {
-		if len(log.Topics) > 0 {
-			// Check for SolutionClaimed event
-			if log.Topics[0] == tm.solutionClaimedEvent {
-				parsed, err := tm.services.Engine.Engine.ParseSolutionClaimed(*log)
-				if err != nil {
-					tm.services.Logger.Error().Err(err).Msg("could not parse solution claimed event")
-					continue
+		for _, log := range receipt.Logs {
+			if len(log.Topics) > 0 {
+				// Check for SolutionClaimed event
+				if log.Topics[0] == tm.solutionClaimedEvent {
+					parsed, err := tm.services.Engine.Engine.ParseSolutionClaimed(*log)
+					if err != nil {
+						tm.services.Logger.Error().Err(err).Msg("could not parse solution claimed event")
+						continue
+					}
+					tasksClaimed = append(tasksClaimed, task.TaskId(parsed.Task))
 				}
-				tasksClaimed = append(tasksClaimed, task.TaskId(parsed.Task))
-			}
 
-			// Check for RewardsPaid event to sum validatorReward
-			if log.Topics[0] == tm.rewardsPaidEvent {
-				parsed, err := tm.services.Engine.Engine.ParseRewardsPaid(*log)
-				if err != nil {
-					tm.services.Logger.Error().Err(err).Msg("could not parse rewards paid event")
-					continue
+				// Check for RewardsPaid event to sum validatorReward
+				if log.Topics[0] == tm.rewardsPaidEvent {
+					parsed, err := tm.services.Engine.Engine.ParseRewardsPaid(*log)
+					if err != nil {
+						tm.services.Logger.Error().Err(err).Msg("could not parse rewards paid event")
+						continue
+					}
+					totalValidatorReward.Add(totalValidatorReward, parsed.ValidatorReward)
 				}
-				totalValidatorReward.Add(totalValidatorReward, parsed.ValidatorReward)
 			}
 		}
-	}
 
-	if len(tasksClaimed) == 0 {
-		tm.services.Logger.Warn().Msg("⚠️ successful bulk claim transaction but no tasks were claimed: check for contestations/cooldown issues ⚠️")
-	}
+		if len(tasksClaimed) == 0 {
+			tm.services.Logger.Warn().Msg("⚠️ successful bulk claim transaction but no tasks were claimed: check for contestations/cooldown issues ⚠️")
+		}
 
-	/*deleteTaskKeys := utils.Map(tasks, func(s storage.ClaimTask) string {
-		return s.Key
-	})*/
+		if len(tasksClaimed) > 0 {
+			tm.services.Logger.Info().Int("claimed", len(tasksClaimed)).Msg("✅ successfully claimed tasks and removed from storage")
+		}
 
-	/*	err = tm.services.TaskStorage.DeleteClaims(deleteTaskKeys)
-		if err != nil {
-			tm.services.Logger.Error().Err(err).Msg("could not batch delete tasks")
-			return
+		unclaimedTaskCount := len(tasks) - len(tasksClaimed)
+		if unclaimedTaskCount > 0 {
+			tm.services.Logger.Warn().Int("unclaimed", unclaimedTaskCount).Msg("⚠️ tasks that failed to be claimed")
 		}*/
-	/*for _, taskid := range tasks {
-		taskIdStr := task.TaskId(taskid.ID).String()
-		err := tm.services.TaskStorage.DeleteClaim(taskid.Key)
-		if err != nil {
-			tm.services.Logger.Error().Err(err).Str("task", taskIdStr).Msg("could not delete key")
-			return
-		}
-	}*/
-
-	if len(tasksClaimed) > 0 {
-		tm.services.Logger.Info().Int("claimed", len(tasksClaimed)).Msg("✅ successfully claimed tasks and removed from storage")
-	}
-
-	unclaimedTaskCount := len(tasks) - len(tasksClaimed)
-	if unclaimedTaskCount > 0 {
-		tm.services.Logger.Warn().Int("unclaimed", unclaimedTaskCount).Msg("⚠️ tasks that failed to be claimed")
-	}
 }
 
+// returns true if the task is valid and can be claimed or false if not
+func (tm *BatchTransactionManager) canTaskIdBeClaimed(
+	claim storage.ClaimTask,
+	combinedInfo *bulktasks.BulkTasksTaskSolutionWithContestationInfo,
+	cooldownTimes map[common.Address]uint64,
+) bool {
+	taskIdStr := claim.ID.String()
+
+	// Use pre-fetched contestation details from combinedInfo
+	if combinedInfo.ContestationExists {
+		// The Solidity function sets ContestationExists if cont.validator != address(0)
+		tm.services.Logger.Warn().Str("task", taskIdStr).Str("contestor", combinedInfo.ContestationValidator.String()).Msg("⚠️ task was contested (details from combined bulk) ⚠️")
+		return false
+	}
+
+	// Use pre-fetched solution details from combinedInfo
+	if !combinedInfo.SolutionExists {
+		tm.services.Logger.Warn().Str("task", taskIdStr).Msg("no valid solution details in combined info or solution not found on-chain")
+		return false
+	}
+
+	solTime := time.Unix(int64(combinedInfo.SolutionBlocktime), 0)
+
+	cooldownTime := cooldownTimes[combinedInfo.SolutionValidator] // Use SolutionValidator from combinedInfo
+	if combinedInfo.SolutionBlocktime <= cooldownTime {
+		tm.services.Logger.Warn().Str("taskid", taskIdStr).Msg("⚠️ claim is lost due to lost contestation cooldown - removing from storage ⚠️")
+		return false
+	}
+
+	tm.services.Logger.Debug().Str("taskid", taskIdStr).Bool("claimed", combinedInfo.SolutionClaimed).Time("solved", solTime).Str("validator", combinedInfo.SolutionValidator.String()).Msg("solution information (using combined pre-fetched data)")
+
+	if combinedInfo.SolutionClaimed {
+		return false
+	}
+
+	return true
+}
 func (tm *BatchTransactionManager) processBulkClaim(account *account.Account, tasks []storage.ClaimTask, minbatchSize, maxbatchSize int) {
+	if len(tasks) == 0 {
+		tm.services.Logger.Error().Msg("assertion: process bulk claim called with no tasks to claim")
+		return
+	}
 
 	// Get the CooldownTime for each validator we might be claiming for
 	var validatorCooldownTimesMap = make(map[common.Address]uint64)
@@ -1689,49 +1773,79 @@ func (tm *BatchTransactionManager) processBulkClaim(account *account.Account, ta
 	}
 
 	tasksToClaim := make([]storage.ClaimTask, 0)
-
 	claimsToDelete := make([]task.TaskId, 0)
 
-	for _, task := range tasks {
-		taskStr := task.ID.String()
+	// Fetch combined solution and contestation data upfront
+	bulkCombinedInfoMap := make(map[task.TaskId]bulktasks.BulkTasksTaskSolutionWithContestationInfo)
+	taskIdsForBulkFetch := make([][32]byte, 0, len(tasks))
 
-		if task.Time >= time.Now().Unix() {
+	// tasks is the input []storage.ClaimTask
+	for _, taskToValidate := range tasks {
+		taskIdsForBulkFetch = append(taskIdsForBulkFetch, taskToValidate.ID)
+	}
+
+	tm.services.Logger.Debug().Int("count", len(taskIdsForBulkFetch)).Msg("bulk fetching combined task info for claim processing")
+	getCombinedInfoOperation := func() (interface{}, error) {
+		return tm.services.BulkTasks.GetBulkCombinedTaskInfo(nil, taskIdsForBulkFetch)
+	}
+	retryResult, expRetryErr := utils.ExpRetry(tm.services.Logger, getCombinedInfoOperation, 3, 1000)
+
+	if expRetryErr != nil {
+		tm.services.Logger.Error().Err(expRetryErr).Msg("could not bulk fetch combined task info for claim processing")
+	} else {
+		combinedInfos, ok := retryResult.([]bulktasks.BulkTasksTaskSolutionWithContestationInfo)
+		if !ok {
+			tm.services.Logger.Error().Msg("assertion: expRetry returned unexpected type for getbulkcombinedtaskinfo")
+		} else if len(combinedInfos) != len(taskIdsForBulkFetch) {
+			tm.services.Logger.Error().Int("expected", len(taskIdsForBulkFetch)).Int("got", len(combinedInfos)).Msg("assertion: mismatch in bulk getcombinedtaskinfo result length")
+		} else {
+			for _, info := range combinedInfos { // Iterate through the results and map them by their TaskId field
+				if info.TaskId != ([32]byte{}) {
+					bulkCombinedInfoMap[info.TaskId] = info
+				} else {
+					// This case should ideally not happen if the contract always returns TaskId
+					tm.services.Logger.Warn().Msg("assertion: received a combinedtaskinfo struct with zero taskid from bulk call")
+				}
+			}
+		}
+	}
+
+	// Pre-claim validation loop
+	for _, taskItem := range tasks { // taskItem is storage.ClaimTask
+		taskIdStr := task.TaskId(taskItem.ID).String()
+
+		if taskItem.Time >= time.Now().Unix() {
 			continue
 		}
 
-		if tm.services.Config.Claim.ValidateClaims {
-
-			result, err := tm.services.Engine.CanTaskIdBeClaimed(task, validatorCooldownTimesMap)
-			if err != nil {
-				tm.services.Logger.Error().Err(err).Str("taskid", taskStr).Msg("CanTaskIdBeClaimed returned error - not claimable")
-				continue
-			}
-			// if result is false then we can continue to the next task as this one is not claimable
-			if !result {
-				claimsToDelete = append(claimsToDelete, task.ID)
-
-				tm.services.Logger.Debug().Str("taskid", taskStr).Msg("CanTaskIdBeClaimed returned false - not claimable")
-				continue
-			}
+		retrievedCombinedInfo, infoFetched := bulkCombinedInfoMap[taskItem.ID]
+		if !infoFetched {
+			tm.services.Logger.Debug().Str("taskid", taskIdStr).Msg("no combined info available for task, skipping claim validation")
+			continue
 		}
-		tasksToClaim = append(tasksToClaim, task)
+
+		claimable := tm.canTaskIdBeClaimed(taskItem, &retrievedCombinedInfo, validatorCooldownTimesMap)
+		if !claimable {
+			claimsToDelete = append(claimsToDelete, taskItem.ID)
+			tm.services.Logger.Debug().Str("taskid", taskIdStr).Msg("task determined not claimable (pre-tx check), adding to delete queue")
+			continue
+		}
+		tasksToClaim = append(tasksToClaim, taskItem)
 	}
 
 	if len(claimsToDelete) > 0 {
 		err := tm.services.TaskStorage.DeleteClaims(claimsToDelete)
 		if err != nil {
-			tm.services.Logger.Error().Err(err).Msg("error deleting claims")
-			return
+			tm.services.Logger.Error().Err(err).Msg("error deleting claims pre-transaction")
+			// Decide if to return or continue
 		}
 	}
 
 	if len(tasksToClaim) < minbatchSize {
-		// nothing to claim
 		tm.services.Logger.Info().Int("min_batch", minbatchSize).Int("max_batch", maxbatchSize).Int("claimable", len(tasksToClaim)).Msg("claimable less than min batch size")
 		return
 	}
 
-	// order the tasks by time oldest first
 	sort.Slice(tasksToClaim, func(i, j int) bool {
 		return tasksToClaim[i].Time < tasksToClaim[j].Time
 	})
@@ -1740,101 +1854,107 @@ func (tm *BatchTransactionManager) processBulkClaim(account *account.Account, ta
 		tasksToClaim = tasksToClaim[:maxbatchSize]
 	}
 
-	// Use the Map function to extract the TaskId from each struct
-	taskIds := utils.Map(tasksToClaim, func(s storage.ClaimTask) [32]byte {
+	taskIdsForTx := utils.Map(tasksToClaim, func(s storage.ClaimTask) [32]byte {
 		return s.ID
 	})
 
-	receipt, err := tm.BulkClaimWithAccount(account, taskIds)
-	if err != nil {
-		tm.services.Logger.Error().Err(err).Msg("❌ error submitting bulk claim")
-		return //err
+	if len(taskIdsForTx) == 0 { // Add check here to avoid sending empty tx if all were filtered out
+		tm.services.Logger.Info().Msg("No tasks to claim after validation and filtering.")
+		return
 	}
 
-	// Check if receipt is nil before accessing Status
+	receipt, err := tm.BulkClaimWithAccount(account, taskIdsForTx)
+	if err != nil {
+		tm.services.Logger.Error().Err(err).Msg("❌ error submitting bulk claim")
+		return
+	}
 	if receipt == nil {
-		tm.services.Logger.Error().Msg("❌ bulk claim returned nil receipt despite no error")
+		tm.services.Logger.Error().Msg("❌ bulk claim returned nil receipt")
 		return
 	}
 
 	if receipt.Status != types.ReceiptStatusSuccessful {
-		tm.services.Logger.Warn().Str("txhash", receipt.TxHash.String()).Msg("⚠️ bulk claim transaction failed or reverted")
+		tm.services.Logger.Warn().Str("txhash", receipt.TxHash.String()).Uint64("block", receipt.BlockNumber.Uint64()).Msg("⚠️ bulk claim transaction failed or reverted")
 		return
 	}
 
-	tm.services.Logger.Info().Str("txhash", receipt.TxHash.String()).Int("tasks", len(taskIds)).Uint64("block", receipt.BlockNumber.Uint64()).Msg("bulk claim transaction accepted")
+	tm.services.Logger.Info().Str("txhash", receipt.TxHash.String()).Int("tasks_sent", len(taskIdsForTx)).Uint64("block", receipt.BlockNumber.Uint64()).Msg("bulk claim transaction accepted")
 
-	tasksClaimed := make([]task.TaskId, 0)
-
-	var totalValidatorReward *big.Int = big.NewInt(0)
+	tasksClaimedInLogs := make(map[task.TaskId]bool)
+	var totalValidatorReward *big.Int = big.NewInt(0) // Keep this if needed for logging rewards
 
 	for _, log := range receipt.Logs {
 		if len(log.Topics) > 0 {
-			// Check for SolutionClaimed event
 			if log.Topics[0] == tm.solutionClaimedEvent {
-				parsed, err := tm.services.Engine.Engine.ParseSolutionClaimed(*log)
-				if err != nil {
-					tm.services.Logger.Error().Err(err).Msg("could not parse solution claimed event")
+				parsed, parseErr := tm.services.Engine.Engine.ParseSolutionClaimed(*log)
+				if parseErr != nil {
+					tm.services.Logger.Error().Err(parseErr).Msg("could not parse solution claimed event")
 					continue
 				}
-				tasksClaimed = append(tasksClaimed, task.TaskId(parsed.Task))
+				tasksClaimedInLogs[task.TaskId(parsed.Task)] = true
 			}
-
-			// Check for RewardsPaid event to sum validatorReward
-			if log.Topics[0] == tm.rewardsPaidEvent {
-				parsed, err := tm.services.Engine.Engine.ParseRewardsPaid(*log)
-				if err != nil {
-					tm.services.Logger.Error().Err(err).Msg("could not parse rewards paid event")
+			if log.Topics[0] == tm.rewardsPaidEvent { // Keep if reward logging is desired
+				parsedRewards, parseErrRewards := tm.services.Engine.Engine.ParseRewardsPaid(*log)
+				if parseErrRewards != nil {
+					tm.services.Logger.Error().Err(parseErrRewards).Msg("could not parse rewards paid event")
 					continue
 				}
-				totalValidatorReward.Add(totalValidatorReward, parsed.ValidatorReward)
+				totalValidatorReward.Add(totalValidatorReward, parsedRewards.ValidatorReward)
 			}
 		}
 	}
 
-	if len(tasksClaimed) == 0 {
+	if len(tasksClaimedInLogs) == 0 {
 		tm.services.Logger.Warn().Msg("⚠️ successful bulk claim transaction but no tasks were claimed: check for contestations/cooldown issues ⚠️")
 	}
 
-	if totalValidatorReward.Cmp(big.NewInt(0)) > 0 {
+	if totalValidatorReward.Cmp(big.NewInt(0)) > 0 { // Log total rewards from this batch
 		totalValidatorRewardInAius := tm.services.Config.BaseConfig.BaseToken.ToFloat(totalValidatorReward)
-		tm.services.Logger.Info().Float64("validator_reward", totalValidatorRewardInAius).Msg("total validator reward for bulk claim")
+		tm.services.Logger.Info().Float64("validator_reward_batch", totalValidatorRewardInAius).Msg("total validator reward for this bulk claim tx")
 	}
 
-	claimsToDelete = make([]task.TaskId, 0)
-
-	for _, taskid := range tasksToClaim {
-		taskIdStr := task.TaskId(taskid.ID).String()
-		claimed := slices.Contains(tasksClaimed, taskid.ID)
-
-		if claimed {
-			claimsToDelete = append(claimsToDelete, taskid.ID)
-		} else {
-			result, err := tm.services.Engine.CanTaskIdBeClaimed(taskid, validatorCooldownTimesMap)
-			if err != nil {
-				tm.services.Logger.Error().Err(err).Str("task", taskIdStr).Msg("error in canTaskIdBeClaimed")
+	// Post-transaction check for tasks that were sent but not found in logs
+	claimsToDeletePostTx := make([]task.TaskId, 0)
+	for _, taskidItem := range tasksToClaim { // taskidItem is storage.ClaimTask
+		if !tasksClaimedInLogs[taskidItem.ID] {
+			taskIdStr := task.TaskId(taskidItem.ID).String()
+			retrievedCombinedInfo, infoFetched := bulkCombinedInfoMap[taskidItem.ID]
+			if !infoFetched {
+				tm.services.Logger.Debug().Str("taskid", taskIdStr).Msg("no combined info available for task, skipping post-tx claim validation")
 				continue
 			}
-			// if result is true, we can re-add the task to the claim list
-			if !result {
-				tm.services.Logger.Debug().Str("taskid", taskIdStr).Msg("task will be deleted as it is not claimable")
-				claimsToDelete = append(claimsToDelete, taskid.ID)
+			claimable := tm.canTaskIdBeClaimed(taskidItem, &retrievedCombinedInfo, validatorCooldownTimesMap)
+			if !claimable {
+				tm.services.Logger.Debug().Str("taskid", taskIdStr).Msg("task determined not claimable (post-tx check), adding to delete queue")
+				claimsToDeletePostTx = append(claimsToDeletePostTx, taskidItem.ID)
 			}
 		}
 	}
 
-	if len(claimsToDelete) > 0 {
-		tm.services.Logger.Info().Int("claimed", len(claimsToDelete)).Msg("deleting claimed tasks from storage")
-		tm.services.TaskStorage.DeleteClaims(claimsToDelete)
+	// Delete tasks that were successfully claimed or determined unclaimable
+	var finalClaimsToDelete []task.TaskId
+
+	// Add tasks that were successfully claimed according to logs
+	for taskId := range tasksClaimedInLogs {
+		finalClaimsToDelete = append(finalClaimsToDelete, taskId)
 	}
 
-	if len(tasksClaimed) > 0 {
-		tm.services.Logger.Info().Int("claimed", len(tasksClaimed)).Msg("✅ successfully claimed tasks and removed from storage")
+	// Add tasks that were determined unclaimable in post-tx check
+	finalClaimsToDelete = append(finalClaimsToDelete, claimsToDeletePostTx...)
+
+	if len(finalClaimsToDelete) > 0 {
+		tm.services.Logger.Info().Int("count", len(finalClaimsToDelete)).Msg("deleting claimed/unclaimable tasks from storage")
+		err := tm.services.TaskStorage.DeleteClaims(finalClaimsToDelete)
+		if err != nil {
+			tm.services.Logger.Error().Err(err).Msg("error deleting final claims list")
+		}
 	}
 
-	unclaimedTaskCount := len(tasksToClaim) - len(tasksClaimed)
-	if unclaimedTaskCount > 0 {
-		tm.services.Logger.Warn().Int("unclaimed", unclaimedTaskCount).Msg("⚠️ tasks that failed to be claimed")
+	unclaimedCount := len(taskIdsForTx) - len(tasksClaimedInLogs) // Compare against tasks sent in TX
+	if unclaimedCount > 0 {
+		tm.services.Logger.Warn().Int("unclaimed", unclaimedCount).Int("sent_in_batch", len(taskIdsForTx)).Msg("⚠️ some tasks sent in batch that were not confirmed claimed via logs")
+	} else if len(tasksClaimedInLogs) > 0 {
+		tm.services.Logger.Info().Int("claimed_in_log", len(tasksClaimedInLogs)).Msg("✅ successfully processed bulk claim transaction results")
 	}
 }
 
@@ -1963,7 +2083,7 @@ func (tm *BatchTransactionManager) SignalCommitmentNow(validator common.Address,
 		}
 
 		if !success {
-			tm.services.Logger.Error().Str("txHash", tx.Hash().String()).Msg("single commitment transaction reverted on-chain")
+			tm.services.Logger.Error().Str("txhash", tx.Hash().String()).Msg("single commitment transaction reverted on-chain")
 			return // errors.New("single commitment transaction reverted on-chain")
 		}
 		// Double-check receipt is not nil after success
@@ -2537,13 +2657,13 @@ func (tm *BatchTransactionManager) processIpfsClaimsWithAccount(mainAccount *acc
 		multihashLocal, castErr := mh.Cast(entry.Cid)
 		if castErr != nil {
 			// Log warning but don't create logger with invalid field
-			tm.services.Logger.Warn().Err(castErr).Str("task_id", taskIdStr).Msg("failed to cast local cid bytes to multihash for logging")
+			tm.services.Logger.Warn().Err(castErr).Str("taskid", taskIdStr).Msg("failed to cast local cid bytes to multihash for logging")
 			cidStr = "invalid_local_cid"
 			// Create logger without the potentially problematic cid field
-			claimLog = tm.services.Logger.With().Str("task_id", taskIdStr).Logger()
+			claimLog = tm.services.Logger.With().Str("taskid", taskIdStr).Logger()
 		} else {
 			cidStr = cid.NewCidV0(multihashLocal).String()
-			claimLog = tm.services.Logger.With().Str("task_id", taskIdStr).Str("local_cid", cidStr).Logger()
+			claimLog = tm.services.Logger.With().Str("taskid", taskIdStr).Str("local_cid", cidStr).Logger()
 		}
 
 		tm.ipfsClaimBackoffMutex.Lock()
@@ -2849,8 +2969,8 @@ func (tm *BatchTransactionManager) processReceiptAndMetrics(receipt *types.Recei
 	tm.services.Logger.Info().
 		Uint64("gas_used", receipt.GasUsed).
 		Float64(fmt.Sprintf("gas_per_%s", itemName), gasPerItem).
-		Str("tx_cost_eth", txCostEthStr).        // Log cost in ETH
-		Str("tx_hash", receipt.TxHash.String()). // Add tx hash for context
+		Str("tx_cost_eth", txCostEthStr).       // Log cost in ETH
+		Str("txhash", receipt.TxHash.String()). // Add tx hash for context
 		Msgf("**** %s gas usage *****", itemName)
 
 	metricFunc(txCost)
@@ -2894,7 +3014,7 @@ func (tm *BatchTransactionManager) sendSingleIpfsClaim(
 	}
 
 	// Handle Successful Send
-	claimLog.Info().Str("txHash", tx.Hash().String()).Msg("single ipfs claim transaction sent, waiting for confirmation...")
+	claimLog.Info().Str("txhash", tx.Hash().String()).Msg("single ipfs claim transaction sent, waiting for confirmation...")
 	var success bool
 
 	if *tx.To() == (common.Address{}) {
@@ -2903,7 +3023,7 @@ func (tm *BatchTransactionManager) sendSingleIpfsClaim(
 	} else {
 		_, success, _, err = claimAccount.WaitForConfirmedTx(tx) // Use claimAccount here
 		if err != nil {
-			claimLog.Error().Err(err).Str("txHash", tx.Hash().String()).Msg("failed waiting for single ipfs claim confirmation, will retry later")
+			claimLog.Error().Err(err).Str("txhash", tx.Hash().String()).Msg("failed waiting for single ipfs claim confirmation, will retry later")
 			// Apply backoff even for wait errors
 			retryTime := time.Now().Unix() + 60 // Generic 60s backoff for wait errors
 			tm.ipfsClaimBackoffMutex.Lock()
@@ -2914,7 +3034,7 @@ func (tm *BatchTransactionManager) sendSingleIpfsClaim(
 	}
 
 	if success {
-		claimLog.Info().Str("txHash", tx.Hash().String()).Msg("successfully claimed incentive transaction confirmed")
+		claimLog.Info().Str("txhash", tx.Hash().String()).Msg("successfully claimed incentive transaction confirmed")
 		// Delete from database only on confirmed success
 		if err := tm.services.TaskStorage.DeleteIpfsCid(taskId); err != nil {
 			claimLog.Error().Err(err).Msg("failed to delete entry from storage after successful claim")
@@ -2926,7 +3046,7 @@ func (tm *BatchTransactionManager) sendSingleIpfsClaim(
 		delete(tm.ipfsClaimBackoff, taskId)
 		tm.ipfsClaimBackoffMutex.Unlock()
 	} else {
-		claimLog.Warn().Str("txHash", tx.Hash().String()).Msg("single ipfs claim transaction reverted on-chain after sending, will retry later")
+		claimLog.Warn().Str("txhash", tx.Hash().String()).Msg("single ipfs claim transaction reverted on-chain after sending, will retry later")
 		// Add backoff for post-send reverts
 		retryTime := int64(onChainBlocktime) + 61 // Use blocktime for TimeNotPassed reverts
 		tm.ipfsClaimBackoffMutex.Lock()
@@ -2962,7 +3082,7 @@ func (tm *BatchTransactionManager) sendBulkIpfsClaim(
 	for i, data := range batch {
 		taskIds[i] = data.TaskID
 		if uint64(len(data.Signatures)) != sigsPerTask {
-			bulkLog.Error().Str("task_id", task.TaskId(data.TaskID).String()).Int("expected_sigs", int(sigsPerTask)).Int("actual_sigs", len(data.Signatures)).Msg("Inconsistent number of signatures in bulk batch, cannot send.")
+			bulkLog.Error().Str("taskid", task.TaskId(data.TaskID).String()).Int("expected_sigs", int(sigsPerTask)).Int("actual_sigs", len(data.Signatures)).Msg("Inconsistent number of signatures in bulk batch, cannot send.")
 			// Handle this error - potentially skip this task or fail the batch?
 			// For now, failing the batch to be safe.
 			// We could add backoff to all tasks in the batch here.
@@ -2973,7 +3093,7 @@ func (tm *BatchTransactionManager) sendBulkIpfsClaim(
 		// Fetch blocktime again for reliable backoff calculation in case of revert
 		solutionInfo, err := tm.services.Engine.GetSolution(data.TaskID)
 		if err != nil || solutionInfo.Blocktime == 0 {
-			bulkLog.Warn().Err(err).Str("task_id", task.TaskId(data.TaskID).String()).Msg("Could not get blocktime for task in bulk batch for backoff calculation")
+			bulkLog.Warn().Err(err).Str("taskid", task.TaskId(data.TaskID).String()).Msg("Could not get blocktime for task in bulk batch for backoff calculation")
 			taskIDToBlocktimeMap[data.TaskID] = 0 // Mark as unknown
 		} else {
 			taskIDToBlocktimeMap[data.TaskID] = solutionInfo.Blocktime
@@ -3018,7 +3138,7 @@ func (tm *BatchTransactionManager) sendBulkIpfsClaim(
 			blocktime := taskIDToBlocktimeMap[taskId]
 			retryTime := tm.calculateBackoffForError(err, blocktime, currentTime) // Use helper
 			tm.ipfsClaimBackoff[taskId] = retryTime
-			bulkLog.Debug().Str("task_id", task.TaskId(taskId).String()).Int64("backoff_until", retryTime).Msg("setting backoff for task in failed bulk batch (pre-send)")
+			bulkLog.Debug().Str("taskid", task.TaskId(taskId).String()).Int64("backoff_until", retryTime).Msg("setting backoff for task in failed bulk batch (pre-send)")
 		}
 		tm.ipfsClaimBackoffMutex.Unlock()
 		return
@@ -3029,7 +3149,7 @@ func (tm *BatchTransactionManager) sendBulkIpfsClaim(
 	}
 
 	// Handle Successful Send
-	bulkLog.Info().Str("txHash", tx.Hash().String()).Msg("bulk ipfs claim transaction sent, waiting for confirmation...")
+	bulkLog.Info().Str("txhash", tx.Hash().String()).Msg("bulk ipfs claim transaction sent, waiting for confirmation...")
 	var success bool
 	var receipt *types.Receipt
 
@@ -3039,13 +3159,13 @@ func (tm *BatchTransactionManager) sendBulkIpfsClaim(
 	} else {
 		receipt, success, _, err = senderAccount.WaitForConfirmedTx(tx)
 		if err != nil {
-			bulkLog.Error().Err(err).Str("txHash", tx.Hash().String()).Msg("failed waiting for bulk ipfs claim confirmation, will retry batch later")
+			bulkLog.Error().Err(err).Str("txhash", tx.Hash().String()).Msg("failed waiting for bulk ipfs claim confirmation, will retry batch later")
 			// Apply backoff to all tasks in the batch on wait error
 			tm.ipfsClaimBackoffMutex.Lock()
 			retryTime := time.Now().Unix() + 60 // Generic 60s backoff
 			for _, taskId := range taskIds {
 				tm.ipfsClaimBackoff[taskId] = retryTime
-				bulkLog.Debug().Str("task_id", task.TaskId(taskId).String()).Int64("backoff_until", retryTime).Msg("setting backoff for task in failed bulk batch (wait error)")
+				bulkLog.Debug().Str("taskid", task.TaskId(taskId).String()).Int64("backoff_until", retryTime).Msg("setting backoff for task in failed bulk batch (wait error)")
 			}
 			tm.ipfsClaimBackoffMutex.Unlock()
 			return
@@ -3053,7 +3173,7 @@ func (tm *BatchTransactionManager) sendBulkIpfsClaim(
 	}
 
 	if success {
-		bulkLog.Info().Str("txHash", tx.Hash().String()).Msg("bulk ipfs claim transaction confirmed")
+		bulkLog.Info().Str("txhash", tx.Hash().String()).Msg("bulk ipfs claim transaction confirmed")
 
 		claimedTasks := make(map[task.TaskId]bool)
 		if receipt != nil { // Only parse logs if we have a real receipt
@@ -3087,7 +3207,7 @@ func (tm *BatchTransactionManager) sendBulkIpfsClaim(
 				delete(tm.ipfsClaimBackoff, taskId) // Clear backoff on success
 			} else {
 				// Task was in batch but not in success logs (or logs couldn't be parsed)
-				bulkLog.Warn().Str("task_id", task.TaskId(taskId).String()).Msg("task included in bulk claim but not confirmed claimed via logs, applying backoff")
+				bulkLog.Warn().Str("taskid", task.TaskId(taskId).String()).Msg("task included in bulk claim but not confirmed claimed via logs, applying backoff")
 				blocktime := taskIDToBlocktimeMap[taskId]
 				// Use a generic backoff or blocktime-based if available
 				retryTime := int64(blocktime) + 61
@@ -3103,7 +3223,7 @@ func (tm *BatchTransactionManager) sendBulkIpfsClaim(
 			deletedCount := 0
 			for _, tid := range tasksToDelete {
 				if err := tm.services.TaskStorage.DeleteIpfsCid(tid); err != nil {
-					bulkLog.Error().Err(err).Str("task_id", task.TaskId(tid).String()).Msg("failed to delete successfully claimed entry from storage")
+					bulkLog.Error().Err(err).Str("taskid", task.TaskId(tid).String()).Msg("failed to delete successfully claimed entry from storage")
 				} else {
 					deletedCount++
 				}
@@ -3114,7 +3234,7 @@ func (tm *BatchTransactionManager) sendBulkIpfsClaim(
 		}
 
 	} else { // Bulk transaction reverted
-		bulkLog.Warn().Str("txHash", tx.Hash().String()).Msg("bulk ipfs claim transaction reverted on-chain after sending, applying backoff to all in batch")
+		bulkLog.Warn().Str("txhash", tx.Hash().String()).Msg("bulk ipfs claim transaction reverted on-chain after sending, applying backoff to all in batch")
 		// Apply backoff to all tasks in the batch
 		tm.ipfsClaimBackoffMutex.Lock()
 		currentTime := time.Now().Unix()
@@ -3126,7 +3246,7 @@ func (tm *BatchTransactionManager) sendBulkIpfsClaim(
 				retryTime = currentTime + 60 // Fallback
 			}
 			tm.ipfsClaimBackoff[taskId] = retryTime
-			bulkLog.Warn().Str("task_id", task.TaskId(taskId).String()).Int64("backoff_until", retryTime).Msg("setting backoff for task in failed bulk batch (reverted)")
+			bulkLog.Warn().Str("taskid", task.TaskId(taskId).String()).Int64("backoff_until", retryTime).Msg("setting backoff for task in failed bulk batch (reverted)")
 		}
 		tm.ipfsClaimBackoffMutex.Unlock()
 	}

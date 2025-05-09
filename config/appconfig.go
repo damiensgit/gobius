@@ -208,7 +208,6 @@ type Claimer struct {
 	MaxClaims       int     `json:"max_claims_per_batch"` // maximum number of claims per batch
 	MinClaims       int     `json:"min_claims_per_batch"` // minimum number of claims per batch
 	Delay           int     `json:"delay"`                // delay between claims in seconds
-	ValidateClaims  bool    `json:"validate_claims"`      // validate the claims onchain
 	MaxGas          float64 `json:"max_claim_gas"`        // maximum gas to use for a claim
 	SortByCost      bool    `json:"sort_by_cost"`         // sort the claims by cost
 	// Maximum amount of claims to buffer before submitting them regardless of min reward
@@ -438,7 +437,6 @@ func NewAppConfig(testnetType int) AppConfig {
 			MaxClaims:               50,
 			MinClaims:               10,
 			Delay:                   60,
-			ValidateClaims:          false,
 			ClaimOnApproachMinStake: false,
 			MinStakeBufferLevel:     0,
 			HoardMode:               false,

@@ -6,10 +6,8 @@ import (
 	"gobius/bindings/engine"
 	"gobius/bindings/voter"
 	task "gobius/common"
-	"gobius/storage"
 	"gobius/utils"
 	"math/big"
-	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
@@ -230,58 +228,6 @@ func (m *EngineWrapper) GetContestation(taskId task.TaskId) (*struct {
 	}
 
 	return &res, nil
-}
-
-// returns true if the task is valid and can be claimed or false if not
-func (m *EngineWrapper) CanTaskIdBeClaimed(claim storage.ClaimTask, cooldownTimes map[common.Address]uint64) (bool, error) {
-
-	taskIdStr := claim.ID.String()
-	//taskIdByte, err := task.ConvertTaskIdString2Bytes(taskid.ID)
-
-	// TODO: add this check at claim time once to make sure we have enough staked
-	// require(
-	// 	validators[solutions[taskid_].validator].staked -
-	// 		validatorWithdrawPendingAmount[solutions[taskid_].validator] >=
-	// 		getValidatorMinimum(),
-	// 	"validator min staked too low"
-	// );
-
-	contestationDetails, err := m.GetContestation(claim.ID)
-	if err != nil {
-		m.logger.Error().Err(err).Str("task", taskIdStr).Msg("cloud not get contestation details")
-		return false, err
-	}
-
-	if contestationDetails.Validator.String() != "0x0000000000000000000000000000000000000000" {
-		contestor := contestationDetails.Validator.String()
-
-		m.logger.Warn().Str("task", taskIdStr).Str("contestor", contestor).Str("slashedamount", contestationDetails.SlashAmount.String()).Msg("⚠️ task was contested ⚠️")
-
-		return false, nil
-	} else {
-		solution, err := m.GetSolution(claim.ID)
-		if err != nil {
-			m.logger.Error().Err(err).Str("task", taskIdStr).Msg("cloud not get solution details")
-			return false, err
-		}
-
-		solTime := time.Unix(int64(solution.Blocktime), 0)
-
-		// Check if user can even claim this task - if they lost a contestation then they forfeit all claims in the cooldown period
-		// which is the last constestation loss time + min claim solution time + the contestation vote period time
-		cooldownTime := cooldownTimes[solution.Validator]
-		if solution.Blocktime <= cooldownTime {
-			m.logger.Warn().Str("taskid", taskIdStr).Msg("⚠️ claim is lost due to lost contestation cooldown - removing from storage ⚠️")
-			return false, nil
-		}
-
-		m.logger.Debug().Str("taskid", taskIdStr).Bool("claimed", solution.Claimed).Time("solved", solTime).Str("validator", solution.Validator.String()).Msg("solution information")
-
-		if solution.Claimed {
-			return false, nil
-		}
-	}
-	return true, nil
 }
 
 // IsValidatorEligibleToVote checks if a validator can vote on a specific task contestation.

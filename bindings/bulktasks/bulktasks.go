@@ -29,8 +29,31 @@ var (
 	_ = abi.ConvertType
 )
 
-// IArbiusSolution is an auto generated low-level Go binding around an user-defined struct.
-type IArbiusSolution struct {
+// BulkTasksTaskSolutionWithContestationInfo is an auto generated low-level Go binding around an user-defined struct.
+type BulkTasksTaskSolutionWithContestationInfo struct {
+	TaskId                       [32]byte
+	SolutionValidator            common.Address
+	SolutionBlocktime            uint64
+	SolutionClaimed              bool
+	SolutionCid                  []byte
+	SolutionExists               bool
+	ContestationValidator        common.Address
+	ContestationBlocktime        uint64
+	ContestationFinishStartIndex uint32
+	ContestationSlashAmount      *big.Int
+	ContestationExists           bool
+}
+
+// IArbiusEngineEngineContestation is an auto generated low-level Go binding around an user-defined struct.
+type IArbiusEngineEngineContestation struct {
+	Validator        common.Address
+	Blocktime        uint64
+	FinishStartIndex uint32
+	SlashAmount      *big.Int
+}
+
+// IArbiusEngineEngineSolution is an auto generated low-level Go binding around an user-defined struct.
+type IArbiusEngineEngineSolution struct {
 	Validator common.Address
 	Blocktime uint64
 	Claimed   bool
@@ -39,7 +62,7 @@ type IArbiusSolution struct {
 
 // BulkTasksMetaData contains all meta data concerning the BulkTasks contract.
 var BulkTasksMetaData = &bind.MetaData{
-	ABI: "[{\"type\":\"constructor\",\"inputs\":[{\"name\":\"basetoken_\",\"type\":\"address\",\"internalType\":\"address\"},{\"name\":\"engine_\",\"type\":\"address\",\"internalType\":\"address\"}],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"basetoken\",\"inputs\":[],\"outputs\":[{\"name\":\"\",\"type\":\"address\",\"internalType\":\"address\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"bulkSignalCommitment\",\"inputs\":[{\"name\":\"commitments_\",\"type\":\"bytes32[]\",\"internalType\":\"bytes32[]\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"claimSolutions\",\"inputs\":[{\"name\":\"_taskids\",\"type\":\"bytes32[]\",\"internalType\":\"bytes32[]\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"engine\",\"inputs\":[],\"outputs\":[{\"name\":\"\",\"type\":\"address\",\"internalType\":\"contractIArbius\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"getCommitments\",\"inputs\":[{\"name\":\"commitments_\",\"type\":\"bytes32[]\",\"internalType\":\"bytes32[]\"}],\"outputs\":[{\"name\":\"\",\"type\":\"uint256[]\",\"internalType\":\"uint256[]\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"getSolutions\",\"inputs\":[{\"name\":\"taskids_\",\"type\":\"bytes32[]\",\"internalType\":\"bytes32[]\"}],\"outputs\":[{\"name\":\"\",\"type\":\"tuple[]\",\"internalType\":\"structIArbius.Solution[]\",\"components\":[{\"name\":\"validator\",\"type\":\"address\",\"internalType\":\"address\"},{\"name\":\"blocktime\",\"type\":\"uint64\",\"internalType\":\"uint64\"},{\"name\":\"claimed\",\"type\":\"bool\",\"internalType\":\"bool\"},{\"name\":\"cid\",\"type\":\"bytes\",\"internalType\":\"bytes\"}]}],\"stateMutability\":\"view\"}]",
+	ABI: "[{\"type\":\"constructor\",\"inputs\":[{\"name\":\"basetoken_\",\"type\":\"address\",\"internalType\":\"address\"},{\"name\":\"engine_\",\"type\":\"address\",\"internalType\":\"address\"}],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"basetoken\",\"inputs\":[],\"outputs\":[{\"name\":\"\",\"type\":\"address\",\"internalType\":\"address\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"bulkSignalCommitment\",\"inputs\":[{\"name\":\"commitments_\",\"type\":\"bytes32[]\",\"internalType\":\"bytes32[]\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"claimSolutions\",\"inputs\":[{\"name\":\"_taskids\",\"type\":\"bytes32[]\",\"internalType\":\"bytes32[]\"}],\"outputs\":[],\"stateMutability\":\"nonpayable\"},{\"type\":\"function\",\"name\":\"engine\",\"inputs\":[],\"outputs\":[{\"name\":\"\",\"type\":\"address\",\"internalType\":\"contractIArbiusEngine\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"getBulkCombinedTaskInfo\",\"inputs\":[{\"name\":\"taskIds\",\"type\":\"bytes32[]\",\"internalType\":\"bytes32[]\"}],\"outputs\":[{\"name\":\"\",\"type\":\"tuple[]\",\"internalType\":\"structBulkTasks.TaskSolutionWithContestationInfo[]\",\"components\":[{\"name\":\"taskId\",\"type\":\"bytes32\",\"internalType\":\"bytes32\"},{\"name\":\"solutionValidator\",\"type\":\"address\",\"internalType\":\"address\"},{\"name\":\"solutionBlocktime\",\"type\":\"uint64\",\"internalType\":\"uint64\"},{\"name\":\"solutionClaimed\",\"type\":\"bool\",\"internalType\":\"bool\"},{\"name\":\"solutionCid\",\"type\":\"bytes\",\"internalType\":\"bytes\"},{\"name\":\"solutionExists\",\"type\":\"bool\",\"internalType\":\"bool\"},{\"name\":\"contestationValidator\",\"type\":\"address\",\"internalType\":\"address\"},{\"name\":\"contestationBlocktime\",\"type\":\"uint64\",\"internalType\":\"uint64\"},{\"name\":\"contestationFinishStartIndex\",\"type\":\"uint32\",\"internalType\":\"uint32\"},{\"name\":\"contestationSlashAmount\",\"type\":\"uint256\",\"internalType\":\"uint256\"},{\"name\":\"contestationExists\",\"type\":\"bool\",\"internalType\":\"bool\"}]}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"getBulkContestations\",\"inputs\":[{\"name\":\"taskids_\",\"type\":\"bytes32[]\",\"internalType\":\"bytes32[]\"}],\"outputs\":[{\"name\":\"\",\"type\":\"tuple[]\",\"internalType\":\"structIArbiusEngine.EngineContestation[]\",\"components\":[{\"name\":\"validator\",\"type\":\"address\",\"internalType\":\"address\"},{\"name\":\"blocktime\",\"type\":\"uint64\",\"internalType\":\"uint64\"},{\"name\":\"finish_start_index\",\"type\":\"uint32\",\"internalType\":\"uint32\"},{\"name\":\"slashAmount\",\"type\":\"uint256\",\"internalType\":\"uint256\"}]}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"getCommitments\",\"inputs\":[{\"name\":\"commitments_\",\"type\":\"bytes32[]\",\"internalType\":\"bytes32[]\"}],\"outputs\":[{\"name\":\"\",\"type\":\"uint256[]\",\"internalType\":\"uint256[]\"}],\"stateMutability\":\"view\"},{\"type\":\"function\",\"name\":\"getSolutions\",\"inputs\":[{\"name\":\"taskids_\",\"type\":\"bytes32[]\",\"internalType\":\"bytes32[]\"}],\"outputs\":[{\"name\":\"\",\"type\":\"tuple[]\",\"internalType\":\"structIArbiusEngine.EngineSolution[]\",\"components\":[{\"name\":\"validator\",\"type\":\"address\",\"internalType\":\"address\"},{\"name\":\"blocktime\",\"type\":\"uint64\",\"internalType\":\"uint64\"},{\"name\":\"claimed\",\"type\":\"bool\",\"internalType\":\"bool\"},{\"name\":\"cid\",\"type\":\"bytes\",\"internalType\":\"bytes\"}]}],\"stateMutability\":\"view\"}]",
 	Bin: "0x608060405234801561001057600080fd5b506040516109c03803806109c083398101604081905261002f916100ec565b600080546001600160a01b038481166001600160a01b031992831681179093556001805491851691909216811790915560405163095ea7b360e01b81526004810191909152600019602482015263095ea7b3906044016020604051808303816000875af11580156100a4573d6000803e3d6000fd5b505050506040513d601f19601f820116820180604052508101906100c8919061011f565b505050610148565b80516001600160a01b03811681146100e757600080fd5b919050565b600080604083850312156100ff57600080fd5b610108836100d0565b9150610116602084016100d0565b90509250929050565b60006020828403121561013157600080fd5b8151801515811461014157600080fd5b9392505050565b610869806101576000396000f3fe608060405234801561001057600080fd5b50600436106100625760003560e01c806302546ffc146100675780631023ad7c146100975780631fbeeddb146100ac57806350ec55e1146100cc57806380452ec5146100df578063c9d4623f146100ff575b600080fd5b60005461007a906001600160a01b031681565b6040516001600160a01b0390911681526020015b60405180910390f35b6100aa6100a53660046104a4565b610112565b005b6100bf6100ba3660046104a4565b6101b1565b60405161008e919061053d565b6100aa6100da3660046104a4565b6102f4565b6100f26100ed3660046104a4565b61038d565b60405161008e91906105f7565b60015461007a906001600160a01b031681565b8060005b818110156101ab576001546001600160a01b03166377286d178585848181106101415761014161063b565b905060200201356040518263ffffffff1660e01b815260040161016691815260200190565b600060405180830381600087803b15801561018057600080fd5b505af1158015610194573d6000803e3d6000fd5b5050505080806101a390610651565b915050610116565b50505050565b60608160008167ffffffffffffffff8111156101cf576101cf610678565b60405190808252806020026020018201604052801561022057816020015b60408051608081018252600080825260208083018290529282015260608082015282526000199092019101816101ed5790505b50905060005b828110156102eb576001546001600160a01b03166375c705098787848181106102515761025161063b565b905060200201356040518263ffffffff1660e01b815260040161027691815260200190565b600060405180830381865afa158015610293573d6000803e3d6000fd5b505050506040513d6000823e601f3d908101601f191682016040526102bb919081019061075c565b8282815181106102cd576102cd61063b565b602002602001018190525080806102e390610651565b915050610226565b50949350505050565b8060005b818110156101ab576001546001600160a01b031663506ea7de8585848181106103235761032361063b565b905060200201356040518263ffffffff1660e01b815260040161034891815260200190565b600060405180830381600087803b15801561036257600080fd5b505af1158015610376573d6000803e3d6000fd5b50505050808061038590610651565b9150506102f8565b60608160008167ffffffffffffffff8111156103ab576103ab610678565b6040519080825280602002602001820160405280156103d4578160200160208202803683370190505b50905060005b828110156102eb576001546001600160a01b031663839df9458787848181106104055761040561063b565b905060200201356040518263ffffffff1660e01b815260040161042a91815260200190565b602060405180830381865afa158015610447573d6000803e3d6000fd5b505050506040513d601f19601f8201168201806040525081019061046b9190610811565b67ffffffffffffffff168282815181106104875761048761063b565b60209081029190910101528061049c81610651565b9150506103da565b600080602083850312156104b757600080fd5b823567ffffffffffffffff808211156104cf57600080fd5b818501915085601f8301126104e357600080fd5b8135818111156104f257600080fd5b8660208260051b850101111561050757600080fd5b60209290920196919550909350505050565b60005b8381101561053457818101518382015260200161051c565b50506000910152565b60006020808301818452808551808352604092508286019150828160051b87010184880160005b838110156105e957888303603f19018552815180516001600160a01b031684528781015167ffffffffffffffff168885015286810151151587850152606090810151608091850182905280519185018290529060a0906105c981838801858d01610519565b96890196601f01601f191694909401909301925090860190600101610564565b509098975050505050505050565b6020808252825182820181905260009190848201906040850190845b8181101561062f57835183529284019291840191600101610613565b50909695505050505050565b634e487b7160e01b600052603260045260246000fd5b60006001820161067157634e487b7160e01b600052601160045260246000fd5b5060010190565b634e487b7160e01b600052604160045260246000fd5b6040516080810167ffffffffffffffff811182821017156106b1576106b1610678565b60405290565b805167ffffffffffffffff811681146106cf57600080fd5b919050565b600082601f8301126106e557600080fd5b815167ffffffffffffffff8082111561070057610700610678565b604051601f8301601f19908116603f0116810190828211818310171561072857610728610678565b8160405283815286602085880101111561074157600080fd5b610752846020830160208901610519565b9695505050505050565b60006020828403121561076e57600080fd5b815167ffffffffffffffff8082111561078657600080fd5b908301906080828603121561079a57600080fd5b6107a261068e565b82516001600160a01b03811681146107b957600080fd5b81526107c7602084016106b7565b6020820152604083015180151581146107df57600080fd5b60408201526060830151828111156107f657600080fd5b610802878286016106d4565b60608301525095945050505050565b60006020828403121561082357600080fd5b61082c826106b7565b939250505056fea26469706673582212200f0a9f0f31d96731e2451ccf8b52e61cb29cdcec3e6292d52f15f8644089ee2864736f6c63430008130033",
 }
 
@@ -272,6 +295,68 @@ func (_BulkTasks *BulkTasksCallerSession) Engine() (common.Address, error) {
 	return _BulkTasks.Contract.Engine(&_BulkTasks.CallOpts)
 }
 
+// GetBulkCombinedTaskInfo is a free data retrieval call binding the contract method 0x3dd871cc.
+//
+// Solidity: function getBulkCombinedTaskInfo(bytes32[] taskIds) view returns((bytes32,address,uint64,bool,bytes,bool,address,uint64,uint32,uint256,bool)[])
+func (_BulkTasks *BulkTasksCaller) GetBulkCombinedTaskInfo(opts *bind.CallOpts, taskIds [][32]byte) ([]BulkTasksTaskSolutionWithContestationInfo, error) {
+	var out []interface{}
+	err := _BulkTasks.contract.Call(opts, &out, "getBulkCombinedTaskInfo", taskIds)
+
+	if err != nil {
+		return *new([]BulkTasksTaskSolutionWithContestationInfo), err
+	}
+
+	out0 := *abi.ConvertType(out[0], new([]BulkTasksTaskSolutionWithContestationInfo)).(*[]BulkTasksTaskSolutionWithContestationInfo)
+
+	return out0, err
+
+}
+
+// GetBulkCombinedTaskInfo is a free data retrieval call binding the contract method 0x3dd871cc.
+//
+// Solidity: function getBulkCombinedTaskInfo(bytes32[] taskIds) view returns((bytes32,address,uint64,bool,bytes,bool,address,uint64,uint32,uint256,bool)[])
+func (_BulkTasks *BulkTasksSession) GetBulkCombinedTaskInfo(taskIds [][32]byte) ([]BulkTasksTaskSolutionWithContestationInfo, error) {
+	return _BulkTasks.Contract.GetBulkCombinedTaskInfo(&_BulkTasks.CallOpts, taskIds)
+}
+
+// GetBulkCombinedTaskInfo is a free data retrieval call binding the contract method 0x3dd871cc.
+//
+// Solidity: function getBulkCombinedTaskInfo(bytes32[] taskIds) view returns((bytes32,address,uint64,bool,bytes,bool,address,uint64,uint32,uint256,bool)[])
+func (_BulkTasks *BulkTasksCallerSession) GetBulkCombinedTaskInfo(taskIds [][32]byte) ([]BulkTasksTaskSolutionWithContestationInfo, error) {
+	return _BulkTasks.Contract.GetBulkCombinedTaskInfo(&_BulkTasks.CallOpts, taskIds)
+}
+
+// GetBulkContestations is a free data retrieval call binding the contract method 0x900a8b61.
+//
+// Solidity: function getBulkContestations(bytes32[] taskids_) view returns((address,uint64,uint32,uint256)[])
+func (_BulkTasks *BulkTasksCaller) GetBulkContestations(opts *bind.CallOpts, taskids_ [][32]byte) ([]IArbiusEngineEngineContestation, error) {
+	var out []interface{}
+	err := _BulkTasks.contract.Call(opts, &out, "getBulkContestations", taskids_)
+
+	if err != nil {
+		return *new([]IArbiusEngineEngineContestation), err
+	}
+
+	out0 := *abi.ConvertType(out[0], new([]IArbiusEngineEngineContestation)).(*[]IArbiusEngineEngineContestation)
+
+	return out0, err
+
+}
+
+// GetBulkContestations is a free data retrieval call binding the contract method 0x900a8b61.
+//
+// Solidity: function getBulkContestations(bytes32[] taskids_) view returns((address,uint64,uint32,uint256)[])
+func (_BulkTasks *BulkTasksSession) GetBulkContestations(taskids_ [][32]byte) ([]IArbiusEngineEngineContestation, error) {
+	return _BulkTasks.Contract.GetBulkContestations(&_BulkTasks.CallOpts, taskids_)
+}
+
+// GetBulkContestations is a free data retrieval call binding the contract method 0x900a8b61.
+//
+// Solidity: function getBulkContestations(bytes32[] taskids_) view returns((address,uint64,uint32,uint256)[])
+func (_BulkTasks *BulkTasksCallerSession) GetBulkContestations(taskids_ [][32]byte) ([]IArbiusEngineEngineContestation, error) {
+	return _BulkTasks.Contract.GetBulkContestations(&_BulkTasks.CallOpts, taskids_)
+}
+
 // GetCommitments is a free data retrieval call binding the contract method 0x80452ec5.
 //
 // Solidity: function getCommitments(bytes32[] commitments_) view returns(uint256[])
@@ -306,15 +391,15 @@ func (_BulkTasks *BulkTasksCallerSession) GetCommitments(commitments_ [][32]byte
 // GetSolutions is a free data retrieval call binding the contract method 0x1fbeeddb.
 //
 // Solidity: function getSolutions(bytes32[] taskids_) view returns((address,uint64,bool,bytes)[])
-func (_BulkTasks *BulkTasksCaller) GetSolutions(opts *bind.CallOpts, taskids_ [][32]byte) ([]IArbiusSolution, error) {
+func (_BulkTasks *BulkTasksCaller) GetSolutions(opts *bind.CallOpts, taskids_ [][32]byte) ([]IArbiusEngineEngineSolution, error) {
 	var out []interface{}
 	err := _BulkTasks.contract.Call(opts, &out, "getSolutions", taskids_)
 
 	if err != nil {
-		return *new([]IArbiusSolution), err
+		return *new([]IArbiusEngineEngineSolution), err
 	}
 
-	out0 := *abi.ConvertType(out[0], new([]IArbiusSolution)).(*[]IArbiusSolution)
+	out0 := *abi.ConvertType(out[0], new([]IArbiusEngineEngineSolution)).(*[]IArbiusEngineEngineSolution)
 
 	return out0, err
 
@@ -323,14 +408,14 @@ func (_BulkTasks *BulkTasksCaller) GetSolutions(opts *bind.CallOpts, taskids_ []
 // GetSolutions is a free data retrieval call binding the contract method 0x1fbeeddb.
 //
 // Solidity: function getSolutions(bytes32[] taskids_) view returns((address,uint64,bool,bytes)[])
-func (_BulkTasks *BulkTasksSession) GetSolutions(taskids_ [][32]byte) ([]IArbiusSolution, error) {
+func (_BulkTasks *BulkTasksSession) GetSolutions(taskids_ [][32]byte) ([]IArbiusEngineEngineSolution, error) {
 	return _BulkTasks.Contract.GetSolutions(&_BulkTasks.CallOpts, taskids_)
 }
 
 // GetSolutions is a free data retrieval call binding the contract method 0x1fbeeddb.
 //
 // Solidity: function getSolutions(bytes32[] taskids_) view returns((address,uint64,bool,bytes)[])
-func (_BulkTasks *BulkTasksCallerSession) GetSolutions(taskids_ [][32]byte) ([]IArbiusSolution, error) {
+func (_BulkTasks *BulkTasksCallerSession) GetSolutions(taskids_ [][32]byte) ([]IArbiusEngineEngineSolution, error) {
 	return _BulkTasks.Contract.GetSolutions(&_BulkTasks.CallOpts, taskids_)
 }
 
