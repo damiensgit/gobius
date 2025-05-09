@@ -1100,12 +1100,13 @@ func (tm *BatchTransactionManager) processBatch(
 			return nil, nil, errbn
 		}
 
-		blockTime := time.Unix(int64(blockInfo.Time()), 0)
+		// Adjusted blockTime with a small safety margin to prevent hitting rate limits too soon
+		adjustedBlockTime := time.Unix(int64(blockInfo.Time()), 0).Add(-1 * time.Second) // 1-second safety margin
 
 		var validator *Validator = nil
 		validatorHighestMin := int64(-1)
 		for _, v := range tm.services.Validators.validators {
-			lastSubmission, maxSols, err := v.MaxSubmissions(blockTime)
+			lastSubmission, maxSols, err := v.MaxSubmissions(adjustedBlockTime) // Use adjustedBlockTime
 			if err != nil {
 				tm.services.Logger.Error().Err(err).Str("validator", v.ValidatorAddress().String()).Msg("failed to get max submissions for validator, skipping")
 				continue // Skip this validator if we can't determine max submissions
