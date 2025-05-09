@@ -10,19 +10,18 @@ interface IArbiusEngine {
         uint32 finish_start_index; // Match actual field name
         uint256 slashAmount;     // Match actual field name & type
     }
-    
+
     struct EngineSolution { // Match actual engine solution struct
         address validator;
         uint64 blocktime;
         bool claimed;
-        bytes cid;
     }
 
     function contestations(bytes32 taskId) external view returns (EngineContestation memory);
     function claimSolution(bytes32 taskid) external;
     function signalCommitment(bytes32 commitment) external;
     function commitments(bytes32 commitment) external view returns (uint256);
-    function solutions(bytes32 taskId) external view returns (EngineSolution memory);
+    function solutions(bytes32 taskId) external view returns (address validator, uint64 blocktime, bool claimed);
 }
 
 
@@ -36,8 +35,8 @@ contract BulkTasks {
         address solutionValidator;
         uint64 solutionBlocktime;
         bool solutionClaimed;
-        bytes solutionCid;
         bool solutionExists;
+
         // Contestation part
         address contestationValidator;
         uint64 contestationBlocktime;
@@ -55,14 +54,18 @@ contract BulkTasks {
     function claimSolutions(bytes32[] calldata _taskids) public {
         uint256 len = _taskids.length; // Cache array length
         for (uint256 i = 0; i < len; i++) {
-            engine.claimSolution(_taskids[i]); // Call claimSolution directly
+            try engine.claimSolution(_taskids[i]) {
+            } catch {
+            }
         }
     }
 
     function bulkSignalCommitment(bytes32[] calldata commitments_) public {
         uint256 len = commitments_.length; // Cache array length
         for (uint256 i = 0; i < len; i++) {
-            engine.signalCommitment(commitments_[i]); // Call signalCommitment directly
+            try engine.signalCommitment(commitments_[i]) {
+            } catch {
+            }
         }
     }
 
@@ -85,11 +88,11 @@ contract BulkTasks {
 
     /// @notice Get solution information for multiple task IDs.
     /// @param taskids_ Array of task IDs to query.
-    /// @return An array of Solution structs containing details for each task ID.
+    /// @return An array of Solution structs containing details for each task ID (without CIDs).
     function getSolutions(bytes32[] calldata taskids_)
         external
         view
-        returns (IArbiusEngine.EngineSolution[] memory)
+        returns (IArbiusEngine.EngineSolution[] memory) // This EngineSolution struct in IArbiusEngine does not have cid
     {
         uint256 len = taskids_.length;
         IArbiusEngine.EngineSolution[] memory solutionInfos = new IArbiusEngine.EngineSolution[](
@@ -97,7 +100,12 @@ contract BulkTasks {
         );
 
         for (uint256 i = 0; i < len; i++) {
-            solutionInfos[i] = engine.solutions(taskids_[i]);
+            // Call the modified engine.solutions() that doesn't return cid
+            // and populate the EngineSolution struct which also doesn't have cid.
+            (address sValidator, uint64 sBlocktime, bool sClaimed) = engine.solutions(taskids_[i]);
+            solutionInfos[i].validator = sValidator;
+            solutionInfos[i].blocktime = sBlocktime;
+            solutionInfos[i].claimed = sClaimed;
         }
         return solutionInfos;
     }
@@ -109,29 +117,23 @@ contract BulkTasks {
     function getBulkContestations(bytes32[] calldata taskids_)
         external
         view
-        // Return the locally defined struct array
         returns (IArbiusEngine.EngineContestation[] memory)
     {
         uint256 len = taskids_.length;
         IArbiusEngine.EngineContestation[] memory contestationInfos = new IArbiusEngine.EngineContestation[](len);
 
         for (uint256 i = 0; i < len; i++) {
-            // Fetch the data from the engine's public mapping
-            // Solidity allows assigning structs if they are compatible,
-            // but to be explicit and safe, assign field by field if direct assignment fails.
-            // Assuming engine.contestations returns a struct with the same fields:
             IArbiusEngine.EngineContestation memory engineContestation = engine.contestations(taskids_[i]);
 
-            // Assign fields to our local struct
             contestationInfos[i].validator = engineContestation.validator;
             contestationInfos[i].blocktime = engineContestation.blocktime;
-            contestationInfos[i].finish_start_index = engineContestation.finish_start_index; // Match field name from Engine
-            contestationInfos[i].slashAmount = engineContestation.slashAmount; // Match field name from Engine
+            contestationInfos[i].finish_start_index = engineContestation.finish_start_index; 
+            contestationInfos[i].slashAmount = engineContestation.slashAmount;
         }
         return contestationInfos;
     }
 
-      function getBulkCombinedTaskInfo(bytes32[] calldata taskIds)
+    function getBulkCombinedTaskInfo(bytes32[] calldata taskIds)
         external
         view
         returns (TaskSolutionWithContestationInfo[] memory)
@@ -143,21 +145,17 @@ contract BulkTasks {
             bytes32 currentTaskId = taskIds[i];
             allInfos[i].taskId = currentTaskId;
 
-            // Fetch Solution Data
-            IArbiusEngine.EngineSolution memory sol = engine.solutions(currentTaskId);
-            allInfos[i].solutionValidator = sol.validator;
-            allInfos[i].solutionBlocktime = sol.blocktime;
-            allInfos[i].solutionClaimed = sol.claimed;
-            allInfos[i].solutionCid = sol.cid;
-            allInfos[i].solutionExists = sol.blocktime > 0;
-
-            // Fetch Contestation Data
+            (address sValidator, uint64 sBlocktime, bool sClaimed) = engine.solutions(currentTaskId);
+            allInfos[i].solutionValidator = sValidator;
+            allInfos[i].solutionBlocktime = sBlocktime;
+            allInfos[i].solutionClaimed = sClaimed;
+            allInfos[i].solutionExists = sBlocktime > 0; 
+            
             IArbiusEngine.EngineContestation memory cont = engine.contestations(currentTaskId);
             allInfos[i].contestationValidator = cont.validator;
             allInfos[i].contestationBlocktime = cont.blocktime;
-            allInfos[i].contestationFinishStartIndex = cont.finish_start_index; 
-            allInfos[i].contestationSlashAmount = cont.slashAmount; 
-            // A contestation "exists" if its validator is not the zero address
+            allInfos[i].contestationFinishStartIndex = cont.finish_start_index;
+            allInfos[i].contestationSlashAmount = cont.slashAmount;
             allInfos[i].contestationExists = cont.validator != address(0);
         }
         return allInfos;
