@@ -1,5 +1,6 @@
 [profile.default]
 src = "contracts/src"
+test = "contracts/test"
 out = "contracts/artifacts"
 libs = ["contracts/lib"]
 allow_paths = ["./external/arbius/contract/contracts"]

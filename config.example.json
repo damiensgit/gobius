@@ -3,11 +3,6 @@
     "log_path": "log.txt",
     "log_level": 1,
     "cache_path": "cache",
-    "check_commitment": true,
-    "evil_mode": false,
-    "evil_mode_min": 2000,
-    "evil_mode_int": 1000,
-    "num_workers_per_gpu": 1,
     "solver": {
         "enabled": true,
         "commitments_and_solutions": "doboth",
@@ -21,15 +16,12 @@
             "max_batch_size": 10,
             "number_of_batches": 1
         },
-        "concurrent_batches": false,
         "profit_mode": "fixed",
         "min_profit": 0,
         "max_profit": 100,
-        "pause_stake_buffer_level": 0,
         "use_polling": true,
         "polling_time": "1m",
         "batch_mode": 1,
-        "no_checks": false,
         "error_max_retries": 5,
         "error_backoff": 425,
         "error_backoff_multiplier": 1.5,
@@ -60,15 +52,8 @@
     "batchtasks": {
         "enabled": true,
         "min_tasks_in_queue": 10,
-        "only_tasks": false,
         "batch_mode": "normal",
         "batch_size": 10,
-        "number_of_batches": 1,
-        "hoard_mode": false,
-        "hoard_mode_batch_size": 10,
-        "hoard_mode_number_of_batches": 1,
-        "hoard_min_gas_price": 0,
-        "hoard_max_queue_size": 1000,
         "private_keys": []
     },
     "strategies": {
@@ -87,8 +72,6 @@
     "blockchain": {
         "private_key": "CHANGEME",
         "rpc_url": "CHANGEME",
-        "sender_rpc_url": "",
-        "client_rpc_urls": [],
         "use_ethers_gas_oracle": false,
         "cache_nonce": false,
         "basefee_x": 2,
@@ -103,14 +86,9 @@
         "delay": 60,
         "validate_claims": true,
         "max_claim_gas": 0,
-        "sort_by_cost": false,
         "max_claims_buffer": 2000,
         "claim_min_reward": 0,
-        "claim_on_approach": false,
-        "stake_buffer_level": 0,
-        "min_batch_profit": 0,
-        "hoard_mode": false,
-        "hoard_max_queue_size": 0
+        "min_batch_profit": 0
     },
     "ml": {
         "strategy": "cog",
@@ -126,6 +104,20 @@
         "strategy": "http_client",
         "http_client": {
             "url": "/ip4/127.0.0.1/tcp/5001"
-        }
+        },
+        "pinata": {
+            "api_key": "",
+            "api_secret": "",
+            "jwt": "",
+            "base_url": "https://api.pinata.cloud"
+        },
+        "incentive_claim": true,
+        "claim_interval": "10s",
+        "oracle_url": "http://45.63.37.71:8444",
+        "timeout": "120s",
+        "use_bulk_claim": false,
+        "bulk_claim_batch_size": 10,
+        "max_single_claims_per_run": 10,
+        "min_aius_incentive_threshold": 0.0
     }
 }
