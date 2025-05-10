@@ -80,14 +80,10 @@
     },
     "claim": {
         "enabled": true,
-        "number_of_batches": 1,
         "max_claims_per_batch": 100,
         "min_claims_per_batch": 10,
         "delay": 60,
-        "validate_claims": true,
-        "max_claim_gas": 0,
-        "max_claims_buffer": 2000,
-        "claim_min_reward": 0,
+        "claim_min_reward": 0.1,
         "min_batch_profit": 0
     },
     "ml": {
