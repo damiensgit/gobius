@@ -453,7 +453,6 @@ Gobius requires a WebSocket or IPC connection to the Arbitrum network.
      "rpc_url": "wss://arbitrum-one-rpc.publicnode.com"  // Example WebSocket URL
    }
    ```
-
 2. You can use public WebSocket URLs or a provider like QuickNode for a more reliable connection.
    - **Public WebSocket**: `wss://arbitrum-one-rpc.publicnode.com`
    - **QuickNode**: Sign up at [QuickNode](https://www.quicknode.com/) and get your WebSocket RPC URL.
@@ -680,3 +679,4 @@ Here are some common problems users might encounter during setup:
 *   **Symptom**: Gobius fails to start after an update, potentially with database errors.
 *   **Cause**: An automatic database migration required by the update failed.
 *   **Solution**: Check the Gobius logs for specific database error messages. Report the issue with logs to the developers. If necessary, you may need to restore your database from the backup you made *before* updating and seek further assistance.
+

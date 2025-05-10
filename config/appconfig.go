@@ -25,6 +25,7 @@ type AppConfig struct {
 	LogLevel               int               `json:"log_level"`
 	CachePath              string            `json:"cache_path"`
 	CheckCommitment        bool              `json:"check_commitment"`
+	DryRunMode             bool              `json:"dry_run_mode"`
 	EvilMode               bool              `json:"evil_mode"`     // for testing purposes
 	EvilModeMinTime        int               `json:"evil_mode_min"` // for testing purposes
 	EvilModeRandInt        int               `json:"evil_mode_int"` // for testing purposes
@@ -366,6 +367,7 @@ func NewAppConfig(testnetType int) AppConfig {
 		CachePath:              "cache",
 		CheckCommitment:        true,
 		NumWorkersPerGPU:       1,
+		DryRunMode:             false,
 		EvilMode:               false,
 		EvilModeMinTime:        2000,
 		EvilModeRandInt:        1000,

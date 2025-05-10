@@ -940,16 +940,28 @@ func (bs *baseStrategy) handleValidationTask(workerId int, gpu *task.GPU, ts *Ta
 		workerLogger.Warn().Msgf(" Our:%s", ourCid)
 		workerLogger.Warn().Msgf(" Solv:%s (%s)", solversCid, solverAddr.Hex())
 		workerLogger.Warn().Msgf("=======================")
-		if contestationExists {
-			workerLogger.Warn().Msg("voting YEA on existing contestation...")
-			err = selectedValidator.VoteOnContestation(ts.TaskId, true)
+		if bs.services.Config.DryRunMode {
+			if contestationExists {
+				workerLogger.Info().Msg("[DRY RUN] would vote YEA on existing contestation for task")
+			} else {
+				workerLogger.Info().Msg("[DRY RUN] would submit NEW contestation for task")
+			}
 		} else {
-			workerLogger.Warn().Msg("submitting NEW contestation...")
-			err = selectedValidator.SubmitContestation(ts.TaskId)
+			if contestationExists {
+				workerLogger.Warn().Msg("voting YEA on existing contestation...")
+				err = selectedValidator.VoteOnContestation(ts.TaskId, true)
+			} else {
+				workerLogger.Warn().Msg("submitting NEW contestation...")
+				err = selectedValidator.SubmitContestation(ts.TaskId)
+			}
 		}
 	} else { // Match (and contestation must exist if actionNeeded is true)
-		workerLogger.Info().Msg("voting NAY on existing contestation...")
-		err = selectedValidator.VoteOnContestation(ts.TaskId, false)
+		if bs.services.Config.DryRunMode {
+			workerLogger.Info().Msg("[DRY RUN] would vote NAY on existing contestation for task")
+		} else {
+			workerLogger.Info().Msg("voting NAY on existing contestation...")
+			err = selectedValidator.VoteOnContestation(ts.TaskId, false)
+		}
 	}
 
 	if err != nil {
