@@ -8,7 +8,7 @@
         "commitments_and_solutions": "doboth",
         "wait_for_tasks_on_shutdown": true,
         "use_polling": true,
-        "polling_time": "2s",
+        "polling_time": "20s",
         "batch_mode": 0,
         "error_max_retries": 5,
         "error_backoff": 425,
