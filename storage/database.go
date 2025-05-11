@@ -247,7 +247,7 @@ func (ts *TaskStorageDB) DeleteClaims(tasks []task.TaskId) error {
 	for _, v := range tasks {
 		qtx.DeleteCommitment(ts.ctx, v)
 		qtx.DeleteSolution(ts.ctx, v)
-		qtx.DeletedClaimedTask(ts.ctx, v)
+		qtx.DeletedTask(ts.ctx, v)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -255,7 +255,6 @@ func (ts *TaskStorageDB) DeleteClaims(tasks []task.TaskId) error {
 	}
 
 	return nil
-
 }
 
 func (ts *TaskStorageDB) TotalTasks() (int64, error) {
@@ -550,7 +549,7 @@ func (ts *TaskStorageDB) DeleteTask(taskid task.TaskId) error {
 	return err
 }
 
-func (ts *TaskStorageDB) UpsertTaskToClaimable(taskid task.TaskId, txhash common.Hash, claimTime time.Time) error {
+func (ts *TaskStorageDB) UpsertTaskToClaimable(taskid task.TaskId, txhash common.Hash, claimTime time.Time) (time.Time, error) {
 	claimTime = claimTime.Add(ts.minclaimtime)
 
 	params := db.UpsertTaskToClaimableParams{
@@ -558,7 +557,9 @@ func (ts *TaskStorageDB) UpsertTaskToClaimable(taskid task.TaskId, txhash common
 		Txhash:    txhash,
 		Claimtime: claimTime.Unix(),
 	}
-	return ts.queries.UpsertTaskToClaimable(ts.ctx, params)
+	err := ts.queries.UpsertTaskToClaimable(ts.ctx, params)
+
+	return claimTime, err
 }
 
 func (ts *TaskStorageDB) GetAllTasks() ([]db.Task, error) {

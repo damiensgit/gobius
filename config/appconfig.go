@@ -20,17 +20,19 @@ const (
 )
 
 type AppConfig struct {
-	DBPath              string            `json:"db_path"`
-	LogPath             string            `json:"log_path"`
-	LogLevel            int               `json:"log_level"`
-	CachePath           string            `json:"cache_path"`
-	CheckCommitment     bool              `json:"check_commitment"`
-	EvilMode            bool              `json:"evil_mode"`     // for testing purposes
-	EvilModeMinTime     int               `json:"evil_mode_min"` // for testing purposes
-	EvilModeRandInt     int               `json:"evil_mode_int"` // for testing purposes
-	NumWorkersPerGPU    int               `json:"num_workers_per_gpu"`
-	PriceOracleContract ethcommon.Address `json:"price_oracle_contract"`
-	PopTaskRandom       bool              `json:"pop_task_random"`
+	DBPath                 string            `json:"db_path"`
+	LogPath                string            `json:"log_path"`
+	LogLevel               int               `json:"log_level"`
+	CachePath              string            `json:"cache_path"`
+	CheckCommitment        bool              `json:"check_commitment"`
+	DryRunMode             bool              `json:"dry_run_mode"`
+	EvilMode               bool              `json:"evil_mode"`     // for testing purposes
+	EvilModeMinTime        int               `json:"evil_mode_min"` // for testing purposes
+	EvilModeRandInt        int               `json:"evil_mode_int"` // for testing purposes
+	NumWorkersPerGPU       int               `json:"num_workers_per_gpu"`
+	PriceOracleContract    ethcommon.Address `json:"price_oracle_contract"`
+	PopTaskRandom          bool              `json:"pop_task_random"`
+	VerificationSampleRate int               `json:"verification_sample_rate"`
 
 	Miner SolverConfig `json:"solver"`
 
@@ -151,7 +153,6 @@ type SolverConfig struct {
 	PauseStakeBufferLevel           float64          `json:"pause_stake_buffer_level"`           // pause submitting commits/solutions if the buffer = (current stake - min stake) is below this level
 	UsePolling                      bool             `json:"use_polling"`                        // use polling to check profit and submit txes if false, new block triggers batching
 	PollingTime                     string           `json:"polling_time"`                       // polling interval for profit checks and batching as "1m", "5m", "1h", etc..
-	BatchMode                       int              `json:"batch_mode"`                         // 0: no batch, single commitment/solution cycle, 1 - normal batching using storage and polling, 2 - batch manually (not used!)
 	NoChecks                        bool             `json:"no_checks"`                          // perform no onchain checks on the tasks/commitments/solutions, just submit them
 	ErrorMaxRetries                 int              `json:"error_max_retries"`                  // max retries for tx errors
 	ErrorBackoffTime                float64          `json:"error_backoff"`                      // sleep time between retries
@@ -208,7 +209,6 @@ type Claimer struct {
 	MaxClaims       int     `json:"max_claims_per_batch"` // maximum number of claims per batch
 	MinClaims       int     `json:"min_claims_per_batch"` // minimum number of claims per batch
 	Delay           int     `json:"delay"`                // delay between claims in seconds
-	ValidateClaims  bool    `json:"validate_claims"`      // validate the claims onchain
 	MaxGas          float64 `json:"max_claim_gas"`        // maximum gas to use for a claim
 	SortByCost      bool    `json:"sort_by_cost"`         // sort the claims by cost
 	// Maximum amount of claims to buffer before submitting them regardless of min reward
@@ -237,16 +237,78 @@ type Cog struct {
 }
 
 type IPFS struct {
-	Strategy       string     `json:"strategy"`
-	HTTPClient     HTTPClient `json:"http_client"`
-	IncentiveClaim bool       `json:"incentive_claim"` // set to true to claim the incentive for pinning ipfs content
-	ClaimInterval  string     `json:"claim_interval"`  // how often to claim the incentive for pinning ipfs content
-	OracleURL      string     `json:"oracle_url"`
-	Timeout        string     `json:"timeout"`
+	Strategy                  IpfsStrategy `json:"strategy"`        // mock, http_client, pinata_client, mixed_client
+	HTTPClient                HTTPClient   `json:"http_client"`     // http client to use for ipfs pinning
+	Pinata                    Pinata       `json:"pinata"`          // pinata client to use for ipfs pinning
+	IncentiveClaim            bool         `json:"incentive_claim"` // set to true to claim the incentive for pinning ipfs content
+	ClaimInterval             string       `json:"claim_interval"`  // how often to claim the incentive for pinning ipfs content
+	OracleURL                 string       `json:"oracle_url"`      // oracle url to use for incentive claim
+	Timeout                   string       `json:"timeout"`
+	UseBulkClaim              bool         `json:"use_bulk_claim"`               // New: Option to use bulk IPFS claims
+	BulkClaimBatchSize        int          `json:"bulk_claim_batch_size"`        // New: Batch size for bulk IPFS claims
+	MaxSingleClaimsPerRun     int          `json:"max_single_claims_per_run"`    // Max single claims per processing run
+	MinAiusIncentiveThreshold float64      `json:"min_aius_incentive_threshold"` // Minimum AIUS value to claim incentive (0 = disabled)
+}
+
+type Pinata struct {
+	APIKey    string `json:"api_key"`
+	APISecret string `json:"api_secret"`
+	JWT       string `json:"jwt"`
+	BaseURL   string `json:"base_url"`
 }
 
 type HTTPClient struct {
 	URL string `json:"url"`
+}
+
+type IpfsStrategy int
+
+const (
+	MockClient IpfsStrategy = iota
+	HttpClient
+	PinataClient
+	MixedClient
+)
+
+func (c IpfsStrategy) MarshalJSON() ([]byte, error) {
+	return json.Marshal(c.String())
+}
+
+func (c *IpfsStrategy) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+
+	switch s {
+	case "mock":
+		*c = MockClient
+	case "http_client":
+		*c = HttpClient
+	case "pinata_client":
+		*c = PinataClient
+	case "mixed_client":
+		*c = MixedClient
+	default:
+		return errors.New("invalid IpfsStrategy")
+	}
+
+	return nil
+}
+
+func (c IpfsStrategy) String() string {
+	switch c {
+	case MockClient:
+		return "mock"
+	case HttpClient:
+		return "http_client"
+	case PinataClient:
+		return "pinata_client"
+	case MixedClient:
+		return "mixed_client"
+	default:
+		return "unknown"
+	}
 }
 
 type CommitmentOption int
@@ -299,16 +361,18 @@ func NewAppConfig(testnetType int) AppConfig {
 
 	// TODO: fill with more sensible defaults
 	cfg := AppConfig{
-		DBPath:           "storage.db",
-		LogPath:          "log.txt",
-		LogLevel:         0,
-		CachePath:        "cache",
-		CheckCommitment:  true,
-		NumWorkersPerGPU: 1,
-		EvilMode:         false,
-		EvilModeMinTime:  2000,
-		EvilModeRandInt:  1000,
-		PopTaskRandom:    false,
+		DBPath:                 "storage.db",
+		LogPath:                "log.txt",
+		LogLevel:               0,
+		CachePath:              "cache",
+		CheckCommitment:        true,
+		NumWorkersPerGPU:       1,
+		DryRunMode:             false,
+		EvilMode:               false,
+		EvilModeMinTime:        2000,
+		EvilModeRandInt:        1000,
+		PopTaskRandom:          false,
+		VerificationSampleRate: 0,
 
 		ValidatorConfig: ValidatorConfig{
 			InitialStake:            0,
@@ -358,7 +422,6 @@ func NewAppConfig(testnetType int) AppConfig {
 			PauseStakeBufferLevel:   0,
 			UsePolling:              true,
 			PollingTime:             "1m",
-			BatchMode:               1,
 			ErrorMaxRetries:         5,
 			ErrorBackoffTime:        425,
 			ErrorBackofMultiplier:   1.5,
@@ -376,7 +439,6 @@ func NewAppConfig(testnetType int) AppConfig {
 			MaxClaims:               50,
 			MinClaims:               10,
 			Delay:                   60,
-			ValidateClaims:          false,
 			ClaimOnApproachMinStake: false,
 			MinStakeBufferLevel:     0,
 			HoardMode:               false,
@@ -386,14 +448,14 @@ func NewAppConfig(testnetType int) AppConfig {
 			Strategy: "nop",
 		},
 		IPFS: IPFS{
-			Strategy:       "nop",
+			Strategy:       MockClient,
 			IncentiveClaim: false,
 			OracleURL:      "",
 			Timeout:        "10s",
 		},
 	}
 
-	data := baseConfigJsonData
+	data := baseConfigJsonDataMainnet
 
 	switch testnetType {
 	case 1:
@@ -472,4 +534,21 @@ func (cfg *AppConfig) ExportConfig(path string) error {
 	defer f.Close()
 
 	return json.NewEncoder(f).Encode(cfg)
+}
+
+func LoadConfigForTesting(file string, testnetType int) (*AppConfig, error) {
+	f, err := os.Open(file)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	cfg := NewAppConfig(testnetType)
+
+	err = json.NewDecoder(f).Decode(&cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	return &cfg, nil
 }

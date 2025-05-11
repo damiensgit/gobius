@@ -2,17 +2,20 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"gobius/bindings/engine"
 	"gobius/bindings/voter"
 	task "gobius/common"
-	"gobius/storage"
 	"gobius/utils"
 	"math/big"
-	"time"
 
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/rs/zerolog"
 )
+
+// engine wrapper for the engine contract for view functions only
+// do not add transaction functions to this wrapper
 
 var (
 	// as per the engine contract V5_1, calculation is (reward * modelRate * gaugeMultiplier) / (2 * 1e18 * 1e18);
@@ -141,6 +144,10 @@ func (m *EngineWrapper) GetValidatorStaked(validator common.Address) (*big.Int, 
 		return nil, errors.New("result is not the expected type")
 	}
 
+	if validators.Staked == nil {
+		return nil, errors.New("validator stake is nil")
+	}
+
 	return validators.Staked, nil
 }
 
@@ -223,56 +230,61 @@ func (m *EngineWrapper) GetContestation(taskId task.TaskId) (*struct {
 	return &res, nil
 }
 
-// returns true if the task is valid and can be claimed or false if not
-func (m *EngineWrapper) CanTaskIdBeClaimed(claim storage.ClaimTask, cooldownTimes map[common.Address]uint64) (bool, error) {
+// IsValidatorEligibleToVote checks if a validator can vote on a specific task contestation.
+// It returns true if eligible, false otherwise, along with the status code from the contract and any error.
+func (ew *EngineWrapper) IsValidatorEligibleToVote(validatorAddr common.Address, taskId task.TaskId) (bool, uint64, error) {
+	callOpts := &bind.CallOpts{} // Use default CallOpts
 
-	taskIdStr := claim.ID.String()
-	//taskIdByte, err := task.ConvertTaskIdString2Bytes(taskid.ID)
+	logger := ew.logger.With().Str("validator", validatorAddr.Hex()).Str("task", taskId.String()).Logger()
 
-	// TODO: add this check at claim time once to make sure we have enough staked
-	// require(
-	// 	validators[solutions[taskid_].validator].staked -
-	// 		validatorWithdrawPendingAmount[solutions[taskid_].validator] >=
-	// 		getValidatorMinimum(),
-	// 	"validator min staked too low"
-	// );
-
-	contestationDetails, err := m.GetContestation(claim.ID)
+	check := func() (interface{}, error) {
+		return ew.Engine.ValidatorCanVote(callOpts, validatorAddr, taskId)
+	}
+	result, err := utils.ExpRetry(logger, check, 3, 1000)
 	if err != nil {
-		m.logger.Error().Err(err).Str("task", taskIdStr).Msg("cloud not get contestation details")
-		return false, err
+		logger.Warn().Err(err).Msg("failed to check ValidatorCanVote during eligibility check")
+		return false, 99, err // Indicate error with a distinct code
 	}
 
-	if contestationDetails.Validator.String() != "0x0000000000000000000000000000000000000000" {
-		contestor := contestationDetails.Validator.String()
-
-		m.logger.Warn().Str("task", taskIdStr).Str("contestor", contestor).Str("slashedamount", contestationDetails.SlashAmount.String()).Msg("⚠️ task was contested ⚠️")
-
-		return false, nil
-	} else {
-		solution, err := m.GetSolution(claim.ID)
-		if err != nil {
-			m.logger.Error().Err(err).Str("task", taskIdStr).Msg("cloud not get solution details")
-			return false, err
-		}
-
-		solTime := time.Unix(int64(solution.Blocktime), 0)
-
-		// Check if user can even claim this task - if they lost a contestation then they forfeit all claims in the cooldown period
-		// which is the last constestation loss time + min claim solution time + the contestation vote period time
-		cooldownTime := cooldownTimes[solution.Validator]
-		if solution.Blocktime <= cooldownTime {
-			m.logger.Warn().Str("taskid", taskIdStr).Msg("⚠️ claim is lost due to lost contestation cooldown - removing from storage ⚠️")
-			return false, nil
-		}
-
-		m.logger.Debug().Str("taskid", taskIdStr).Bool("claimed", solution.Claimed).Time("solved", solTime).Str("validator", solution.Validator.String()).Msg("solution information")
-
-		if solution.Claimed {
-			return false, nil
-		}
+	voteStatusCode, ok := result.(*big.Int)
+	if !ok {
+		err := errors.New("ValidatorCanVote returned unexpected type")
+		logger.Error().Err(err).Msgf("type was %T", result)
+		return false, 98, err // Indicate type error
 	}
-	return true, nil
+
+	if voteStatusCode == nil {
+		err := errors.New("ValidatorCanVote returned nil status code")
+		logger.Error().Err(err).Msg("ValidatorCanVote returned nil status code")
+		return false, 97, err // Indicate nil return
+	}
+
+	statusCode := voteStatusCode.Uint64()
+	if statusCode == 0 {
+		// Validator is eligible
+		return true, 0, nil
+	}
+
+	// Validator is not eligible, log the reason
+	var reason string
+	switch statusCode {
+	case 1:
+		reason = "contestation doesn't exist"
+	case 2:
+		reason = "voting period ended"
+	case 3:
+		reason = "already voted"
+	case 4:
+		reason = "validator never staked"
+	case 5:
+		reason = "validator staked too long ago"
+	case 6:
+		reason = "validator staked too recently"
+	default:
+		reason = fmt.Sprintf("unknown status code: %d", statusCode)
+	}
+	logger.Debug().Str("reason", reason).Uint64("statusCode", statusCode).Msg("validator cannot vote")
+	return false, statusCode, nil
 }
 
 // V5:
@@ -323,30 +335,28 @@ func (m *EngineWrapper) GetModelReward(modelId [32]byte) (*big.Int, error) {
 		totalReward = totalReward.Mul(totalReward, gaugeMultiplier)
 		totalReward = totalReward.Div(totalReward, RewardDenominator)
 
+		/* replicate solidity calcs in go:
+		if (total > 0) {
+			uint256 treasuryReward = total -
+				(total * (1e18 - treasuryRewardPercentage)) /
+				1e18;
 
-		/* replicate this solidiy calcs in go:
-		  if (total > 0) {
-                uint256 treasuryReward = total -
-                    (total * (1e18 - treasuryRewardPercentage)) /
-                    1e18;
+			// v3
+			uint256 taskOwnerReward = total -
+				(total * (1e18 - taskOwnerRewardPercentage)) /
+				1e18;
 
-                // v3
-                uint256 taskOwnerReward = total -
-                    (total * (1e18 - taskOwnerRewardPercentage)) /
-                    1e18;
+			uint256 validatorReward = total - treasuryReward - taskOwnerReward; // v3
 
-                uint256 validatorReward = total - treasuryReward - taskOwnerReward; // v3
+			baseToken.transfer(treasury, treasuryReward);
+			baseToken.transfer(tasks[taskid_].owner, taskOwnerReward); // v3
+			baseToken.transfer(
+				solutions[taskid_].validator,
+				validatorReward
+			);
 
-                baseToken.transfer(treasury, treasuryReward);
-                baseToken.transfer(tasks[taskid_].owner, taskOwnerReward); // v3
-                baseToken.transfer(
-                    solutions[taskid_].validator,
-                    validatorReward 
-                );
-
-                emit RewardsPaid(total, treasuryReward, taskOwnerReward, validatorReward);
-            }*/
-
+			emit RewardsPaid(total, treasuryReward, taskOwnerReward, validatorReward);
+		}*/
 
 		return totalReward, nil
 	} else {

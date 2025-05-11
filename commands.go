@@ -1,17 +1,23 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"gobius/account"
+	"gobius/bindings/arbiusrouterv1"
 	"gobius/bindings/basetoken" // Added for BaseToken ABI
 	"gobius/bindings/engine"
 	"gobius/client"
 	task "gobius/common"
+	"gobius/ipfs"
 	"gobius/metrics"
+	"gobius/models"
 	"gobius/storage"
+	"io"
 	"log"
 	"math"
 	"math/big"
@@ -24,13 +30,18 @@ import (
 	"bytes" // Added for bytes.Equal
 	"gobius/bindings/bulktasks"
 
+	gpu "gobius/common"
+
 	"github.com/briandowns/spinner"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types" // Added for deriving addresses
-	"github.com/olekukonko/tablewriter"          // Added for table output
+	"github.com/google/uuid"
+	"github.com/ipfs/go-cid"            // Added for CID handling
+	"github.com/mr-tron/base58"         // Added for Base58 encoding
+	"github.com/olekukonko/tablewriter" // Added for table output
 	"github.com/rs/zerolog"
 )
 
@@ -444,7 +455,7 @@ func getBatchPricingInfo(ctx context.Context) error {
 	}
 
 	// convert basefee to gwei
-	basefeeinEth := services.Eth.ToFloat(basefee)
+	basefeeinEth := Eth.ToFloat(basefee)
 
 	//rewardInAIUS := tm.cumulativeGasUsed.rewardEMA.Average()
 	reward, err := services.Engine.Engine.GetReward(nil)
@@ -560,7 +571,7 @@ func verifyAllTasks(ctx context.Context, dryMode bool) error {
 				if !dryMode {
 					claimTime := time.Unix(int64(res.Blocktime), 0)
 
-					err = services.TaskStorage.UpsertTaskToClaimable(v.Taskid, common.Hash{}, claimTime)
+					_, err = services.TaskStorage.UpsertTaskToClaimable(v.Taskid, common.Hash{}, claimTime)
 					if err != nil {
 						services.Logger.Error().Err(err).Msg("error updating task in storage")
 					} else {
@@ -843,7 +854,7 @@ func verifySolutions(ctx context.Context) error {
 				// update the task in storage with claim information
 				// set empty txhash as we know the task exists in and will be updated
 				claimTime := time.Unix(int64(res.Blocktime), 0)
-				err = services.TaskStorage.UpsertTaskToClaimable(t.TaskId, common.Hash{}, claimTime)
+				_, err = services.TaskStorage.UpsertTaskToClaimable(t.TaskId, common.Hash{}, claimTime)
 				if err != nil {
 					services.Logger.Error().Err(err).Msg("error updating task in storage")
 				}
@@ -1156,6 +1167,82 @@ func depositMonitor(ctx context.Context, rpcClient *client.Client, startBlock, e
 
 }
 
+func sendTestPlaygroundTask(ctx context.Context) {
+	// Get the services from the context
+	services, ok := ctx.Value(servicesKey{}).(*Services)
+	if !ok {
+		log.Fatal("Could not get services from context")
+	}
+
+	ctr, err := arbiusrouterv1.NewArbiusRouterV1(services.Config.BaseConfig.ArbiusRouterAddress, services.OwnerAccount.Client.Client)
+	if err != nil {
+		services.Logger.Err(err).Msg("error creating arbius router")
+		return
+	}
+
+	// get the baseTokenBalance on owner account as balance may change between checks
+	baseTokenBalance, err := services.Basetoken.BalanceOf(nil, services.OwnerAccount.Address)
+	if err != nil {
+		services.Logger.Err(err).Msg("failed to get balance")
+		return
+	}
+
+	allowanceAddress := services.Config.BaseConfig.ArbiusRouterAddress
+
+	allowance, err := services.Basetoken.Allowance(nil, services.OwnerAccount.Address, allowanceAddress)
+	if err != nil {
+		services.Logger.Err(err).Msg("failed to get allowance")
+		return
+	}
+
+	services.Logger.Debug().Msgf("allowance amount: %s", services.Config.BaseConfig.BaseToken.FormatFixed(allowance))
+
+	// check if the allowance is less than the balance
+	if allowance.Cmp(baseTokenBalance) < 0 {
+		services.Logger.Info().Msgf("will need to increase allowance")
+
+		allowanceAmount := new(big.Int).Sub(abi.MaxUint256, allowance)
+
+		opts := services.OwnerAccount.GetOpts(0, nil, nil, nil)
+		// increase the allowance
+		tx, err := services.Basetoken.Approve(opts, allowanceAddress, allowanceAmount)
+		if err != nil {
+			services.Logger.Err(err).Msg("failed to approve allowance")
+			return
+		}
+		// Wait for the transaction to be mined
+		_, success, _, _ := services.OwnerAccount.WaitForConfirmedTx(tx)
+		if !success {
+			return
+		}
+
+		services.Logger.Info().Str("txhash", tx.Hash().String()).Msgf("allowance increased")
+	}
+
+	services.Logger.Info().Msgf("submitting task with input %s on model %s", services.AutoMineParams.Input, common.Bytes2Hex(services.AutoMineParams.Model[:]))
+
+	opts := services.OwnerAccount.GetOpts(0, nil, nil, nil)
+
+	tx, err := ctr.SubmitTask(opts, services.AutoMineParams.Version, services.AutoMineParams.Owner, services.AutoMineParams.Model, services.AutoMineParams.Fee, services.AutoMineParams.Input, big.NewInt(111), big.NewInt(1_000_000))
+	if err != nil {
+		services.Logger.Err(err).Msg("error submitting task")
+		return
+	}
+
+	_, success, _, err := services.OwnerAccount.WaitForConfirmedTx(tx)
+	if err != nil {
+		services.Logger.Err(err).Msg("error waiting for task submission")
+		return
+	}
+
+	if success {
+		services.Logger.Info().Str("tx", tx.Hash().String()).Msg("submitted task")
+	} else {
+		services.Logger.Err(err).Msg("task submission failed")
+	}
+
+}
+
 func fundTaskWallets(ctx context.Context, amount float64, minbal float64) {
 	// Get the services from the context
 	services, ok := ctx.Value(servicesKey{}).(*Services)
@@ -1176,16 +1263,15 @@ func fundTaskWallets(ctx context.Context, amount float64, minbal float64) {
 		services.Logger.Err(err).Str("account", services.OwnerAccount.Address.String()).Msg("could not get eth balance on account")
 		return
 	}
-
 	// convert ETH balance to float
-	balAsFloat := services.Eth.ToFloat(ethBalance)
+	balAsFloat := Eth.ToFloat(ethBalance)
 
 	if balAsFloat < amount*float64(len(services.Config.BatchTasks.PrivateKeys)) {
 		services.Logger.Err(err).Str("balance", fmt.Sprintf("%.4g", balAsFloat)).Msg("not enough eth balance to satisfy transfer")
 		return
 	}
 
-	amountAsBig := services.Eth.FromFloat(amount)
+	amountAsBig := Eth.FromFloat(amount)
 
 	// manually update the gas base fee
 	/*err = services.SenderOwnerAccount.Client.UpdateCurrentBasefee()
@@ -1196,7 +1282,7 @@ func fundTaskWallets(ctx context.Context, amount float64, minbal float64) {
 
 	for _, pk := range services.Config.BatchTasks.PrivateKeys {
 
-		account, err := account.NewAccount(pk, services.SenderOwnerAccount.Client, ctx, services.Config.Blockchain.CacheNonce, services.Logger)
+		account, err := account.NewAccount(pk, services.OwnerAccount.Client, ctx, services.Config.Blockchain.CacheNonce, services.Logger)
 		if err != nil {
 			services.Logger.Error().Err(err).Msg("error in new account")
 			return
@@ -1208,14 +1294,14 @@ func fundTaskWallets(ctx context.Context, amount float64, minbal float64) {
 		}
 
 		// convert ETH balance to float
-		balAsFloat := services.Eth.ToFloat(accountBal)
+		balAsFloat := Eth.ToFloat(accountBal)
 
 		if balAsFloat >= minbal {
 			services.Logger.Info().Msgf("%s balance of %.4g eth is at or greater than minbal %.4g eth", account.Address.String(), balAsFloat, minbal)
 			continue
 		}
 
-		services.SenderOwnerAccount.UpdateNonce()
+		services.OwnerAccount.UpdateNonce()
 		if err != nil {
 			services.Logger.Error().Err(err).Msg("error updating nonce")
 			return
@@ -1223,12 +1309,12 @@ func fundTaskWallets(ctx context.Context, amount float64, minbal float64) {
 
 		services.Logger.Info().Msgf("💼 transfering %.4g eth to address %s (with balance of %.4g eth)", amount, account.Address.String(), balAsFloat)
 
-		tx, err := services.SenderOwnerAccount.SendEther(nil, account.Address, amountAsBig)
+		tx, err := services.OwnerAccount.SendEther(nil, account.Address, amountAsBig)
 		if err != nil {
 			services.Logger.Error().Err(err).Msg("error sending transfer")
 			return
 		}
-		_, success, _, err := services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+		_, success, _, err := services.OwnerAccount.WaitForConfirmedTx(tx)
 
 		if err != nil {
 			services.Logger.Error().Err(err).Msg("error waiting for transfer")
@@ -1259,8 +1345,8 @@ func RunAutoTaskSubmit(appCtx context.Context, services *Services, interval time
 		return
 	}
 
-	feeFloat := services.Eth.ToFloat(autoParams.Fee) // Use ToFloat
-	feeFormatted := fmt.Sprintf("%.6f", feeFloat)    // Format to 6 decimal places
+	feeFloat := Eth.ToFloat(autoParams.Fee)       // Use ToFloat
+	feeFormatted := fmt.Sprintf("%.6f", feeFloat) // Format to 6 decimal places
 
 	logger.Info().
 		Str("sender", ownerAccount.Address.Hex()).
@@ -1498,7 +1584,7 @@ func getUnsolvedTasks(appQuit context.Context, services *Services, rpcClient *cl
 						_ = services.TaskStorage.DeleteProcessedSolutions([]task.TaskId{taskId})
 						// Add/Update task to claimable state (status 3)
 						claimTime := time.Unix(int64(sol.Blocktime), 0)
-						err = services.TaskStorage.UpsertTaskToClaimable(taskId, currentlog.TxHash, claimTime)
+						_, err = services.TaskStorage.UpsertTaskToClaimable(taskId, currentlog.TxHash, claimTime)
 						if err != nil {
 							log.Printf("WARN: Failed to upsert task %s to claimable: %v", taskId.String(), err)
 						} else {
@@ -2530,6 +2616,321 @@ func analyzeRewardRecovery(appQuit context.Context, services *Services, rpcClien
 	} else {
 		// logger.Info().Msg("No complete recovery periods observed within the scanned range.")
 		fmt.Println("No complete recovery periods observed within the scanned range.")
+	}
+
+	return nil
+}
+
+// cleanQueueLocal removes tasks from the local queue (status 0) if their on-chain owner
+// does not match the miner's OwnerAccount address.
+func cleanQueueLocal(appQuit context.Context, ctx context.Context) error {
+	// Get the services from the context
+	services, ok := ctx.Value(servicesKey{}).(*Services)
+	if !ok {
+		return fmt.Errorf("could not get services from context")
+	}
+
+	logger := services.Logger
+	ownerAddress := services.OwnerAccount.Address
+
+	logger.Info().Str("owner", ownerAddress.Hex()).Msg("Starting local task queue cleanup based on owner address...")
+
+	queuedTasks, err := services.TaskStorage.GetQueuedTasks()
+	if err != nil {
+		logger.Error().Err(err).Msg("Failed to get queued tasks from storage")
+		return err
+	}
+
+	if len(queuedTasks) == 0 {
+		logger.Info().Msg("Local task queue is empty, no cleanup needed.")
+		return nil
+	}
+
+	totalTasks := len(queuedTasks)
+	tasksToDelete := make([]task.TaskId, 0)
+	checkedCount := 0
+	mismatchCount := 0
+
+	s := spinner.New(spinner.CharSets[11], 500*time.Millisecond, spinner.WithWriter(os.Stderr))
+	s.Suffix = " checking tasks..."
+	s.FinalMSG = "task check completed!\n"
+	s.Start()
+	defer s.Stop()
+
+	for _, queuedTask := range queuedTasks {
+		select {
+		case <-appQuit.Done():
+			logger.Warn().Msg("Cleanup process cancelled by user.")
+			return fmt.Errorf("cleanup cancelled")
+		default:
+		}
+
+		checkedCount++
+		s.Suffix = fmt.Sprintf(" checking tasks [%d/%d] (mismatched: %d)...", checkedCount, totalTasks, mismatchCount)
+
+		// Get task info from the blockchain
+		taskInfo, err := services.Engine.Engine.Tasks(nil, queuedTask.TaskId)
+		if err != nil {
+			// Log error but continue; maybe the task doesn't exist on-chain anymore
+			logger.Warn().Err(err).Str("task", queuedTask.TaskId.String()).Msg("Failed to get task info from blockchain, skipping task.")
+			continue
+		}
+
+		// Compare owner address
+		if taskInfo.Owner != ownerAddress {
+			mismatchCount++
+			tasksToDelete = append(tasksToDelete, queuedTask.TaskId)
+			logger.Debug().Str("task", queuedTask.TaskId.String()).Str("expected_owner", ownerAddress.Hex()).Str("actual_owner", taskInfo.Owner.Hex()).Msg("Owner mismatch detected, marking task for deletion.")
+		}
+	}
+
+	s.Stop() // Stop spinner before final logs
+
+	if len(tasksToDelete) > 0 {
+		logger.Info().Int("count", len(tasksToDelete)).Msg("Deleting tasks with mismatched owners from local storage...")
+		// Delete tasks individually as DeleteTasks is not available
+		deletedCount := 0
+		failedCount := 0
+		for _, taskID := range tasksToDelete {
+			err = services.TaskStorage.DeleteTask(taskID)
+			if err != nil {
+				logger.Error().Err(err).Str("task", taskID.String()).Msg("Failed to delete task from storage")
+				failedCount++
+			} else {
+				deletedCount++
+			}
+		}
+
+		if failedCount > 0 {
+			logger.Warn().Int("deleted", deletedCount).Int("failed", failedCount).Msg("Finished deleting tasks with some errors.")
+			// Return an error if any deletion failed
+			return fmt.Errorf("failed to delete %d tasks", failedCount)
+		} else {
+			logger.Info().Int("deleted_count", deletedCount).Msg("Successfully deleted tasks with mismatched owners.")
+		}
+	} else {
+		logger.Info().Msg("No tasks found with mismatched owners. Local queue is clean.")
+	}
+
+	logger.Info().Msg("Local task queue cleanup finished.")
+	return nil
+}
+
+// getIpfsLink fetches the on-chain solution CID for a task and prints a Pinata gateway link.
+func getIpfsLink(ctx context.Context, taskIdStr string) error {
+	// Get the services from the context
+	services, ok := ctx.Value(servicesKey{}).(*Services)
+	if !ok {
+		return fmt.Errorf("could not get services from context")
+	}
+	logger := services.Logger // Use logger from services
+
+	logger.Info().Str("task_id", taskIdStr).Msg("fetching IPFS link...")
+
+	taskId, err := task.ConvertTaskIdString2Bytes(taskIdStr)
+	if err != nil {
+		logger.Error().Err(err).Str("task_id", taskIdStr).Msg("invalid Task ID format")
+		return fmt.Errorf("invalid Task ID format: %w", err)
+	}
+
+	solution, err := services.Engine.GetSolution(taskId)
+	if err != nil {
+		logger.Error().Err(err).Str("task_id", taskIdStr).Msg("failed to get solution from chain")
+		return fmt.Errorf("failed to get solution from chain: %w", err)
+	}
+
+	if solution.Blocktime == 0 {
+		logger.Warn().Str("task_id", taskIdStr).Msg("no solution found on-chain for this task ID")
+		fmt.Println("no solution found on-chain for this task ID.")
+		return nil // Not an error, just no solution yet
+	}
+
+	rawCidBytes := solution.Cid[:]
+
+	if len(rawCidBytes) == 0 || bytes.Equal(rawCidBytes, make([]byte, 34)) {
+		logger.Error().Str("task_id", taskIdStr).Msg("on-chain solution exists but CID is empty or zeroed")
+		return fmt.Errorf("on-chain solution exists but CID is empty or zeroed")
+	}
+
+	parsedCid, err := cid.Cast(rawCidBytes)
+	if err != nil {
+		// If Cast fails, it might be just the multihash value without the prefix bytes.
+		// Let's try decoding the common case (SHA2-256 -> 0x12 prefix, 32 bytes hash -> 0x20 length)
+		// Assuming the Engine returns 34 bytes: [0x12, 0x20, 32_byte_hash]
+		if len(rawCidBytes) == 34 && rawCidBytes[0] == 0x12 && rawCidBytes[1] == 0x20 {
+			// Construct CID v1 manually (common case for IPFS)
+			parsedCid = cid.NewCidV1(cid.DagProtobuf, rawCidBytes) // Use DagProtobuf for typical IPFS data
+			logger.Debug().Str("task_id", taskIdStr).Msg("raw bytes looked like multihash, created CID v1 DagProtobuf")
+		} else {
+			// Attempt Base58 encoding directly as a fallback, might be needed if Engine format changes
+			logger.Warn().Err(err).Str("raw_cid_hex", hex.EncodeToString(rawCidBytes)).Msg("could not cast raw bytes to CID object, attempting direct Base58 encoding")
+			cidBase58 := base58.Encode(rawCidBytes)
+			ipfsUrl := fmt.Sprintf("https://gateway.pinata.cloud/ipfs/%s", cidBase58)
+			fmt.Println(ipfsUrl)
+			return nil
+		}
+	}
+
+	cidBase58 := parsedCid.String() // CID object's String() method returns Base58
+
+	ipfsUrl := fmt.Sprintf("https://gateway.pinata.cloud/ipfs/%s", cidBase58)
+
+	fmt.Println(ipfsUrl)
+	logger.Info().Str("task_id", taskIdStr).Str("url", ipfsUrl).Msg("successfully generated IPFS link")
+
+	return nil
+}
+
+// modelRepl provides an interactive REPL to test models locally.
+func modelRepl(appCtx context.Context, args []string) error {
+	if len(args) < 2 {
+		return errors.New("modelrepl requires a model ID argument (e.g., wai-v120)")
+	}
+	modelIdArg := args[1]
+
+	// Get services from context
+	services, ok := appCtx.Value(servicesKey{}).(*Services)
+	if !ok {
+		return errors.New("could not get services from context")
+	}
+	logger := services.Logger.With().Str("command", "modelrepl").Str("model_id_arg", modelIdArg).Logger()
+
+	// Find the model hex ID from the alias/key used in config
+	var modelHexId string
+	for id, modelCfg := range services.Config.BaseConfig.Models {
+		if id == modelIdArg {
+			modelHexId = modelCfg.ID
+			break
+		}
+	}
+	if modelHexId == "" {
+		logger.Error().Msg("model ID not found in BaseConfig.Models mapping")
+		return fmt.Errorf("model alias '%s' not found in config. Check BaseConfig.Models", modelIdArg)
+	}
+	logger = logger.With().Str("model_hex_id", modelHexId).Logger()
+
+	ipfsClient, err := ipfs.NewMockIPFSClient(*services.Config, true)
+
+	if err != nil {
+		logger.Fatal().Err(err).Msg("error connecting to IPFS")
+	}
+
+	models.InitModelRegistry(ipfsClient, services.Config, logger)
+
+	logger.Info().Msg("loading model...")
+
+	// Get the actual model implementation from the registry
+	model := models.ModelRegistry.GetModel(modelHexId)
+	if model == nil {
+		logger.Error().Msg("model not found in registry or not enabled")
+		return fmt.Errorf("model with hex ID %s not found or enabled", modelHexId)
+	}
+
+	// Find the first configured GPU endpoint for this model ID
+	cogConfig, ok := services.Config.ML.Cog[modelHexId]
+	if !ok || len(cogConfig.URL) == 0 {
+		logger.Error().Msg("No GPU URLs configured for this model ID in ML.Cog section")
+		return fmt.Errorf("no GPU URLs configured for model %s (hex ID: %s)", modelIdArg, modelHexId)
+	}
+
+	// Use the first configured GPU URL
+	gpuUrl := cogConfig.URL[0]
+	mockGpu := gpu.GPU{
+		ID:   0,
+		Url:  gpuUrl,
+		Mock: false,
+	}
+	logger.Info().Str("gpu_url", gpuUrl).Msg("using first configured GPU endpoint for inference")
+
+	reader := bufio.NewReader(os.Stdin)
+	logger.Info().Msg("model REPL started. enter prompt or type 'exit' to quit.")
+
+	for {
+		fmt.Print("> ")
+		userInput, err := reader.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				logger.Info().Msg("EOF received, exiting REPL.")
+				break // Exit loop on EOF
+			}
+			logger.Error().Err(err).Msg("error reading input")
+			continue
+		}
+
+		userInput = strings.TrimSpace(userInput)
+
+		if strings.ToLower(userInput) == "exit" {
+			logger.Info().Msg("exiting REPL.")
+			break
+		}
+
+		if userInput == "" {
+			continue // Skip empty input
+		}
+
+		logger.Info().Str("prompt", userInput).Msg("processing prompt...")
+
+		seed := uint64(rand.Int63()) // Generate a random seed for each run
+		preprocessedInput := map[string]any{
+			"prompt":          userInput,
+			"negative_prompt": "",
+		}
+
+		hydratedInput, err := model.HydrateInput(preprocessedInput, seed)
+		if err != nil {
+			logger.Error().Err(err).Msg("Failed to hydrate input")
+			fmt.Println("Error preparing input:", err)
+			continue
+		}
+
+		// run inference
+		taskId := fmt.Sprintf("repl-%s", uuid.New().String())
+		startTime := time.Now()
+
+		// Use a context for the GetFiles call, respecting potential app shutdown
+		files, err := model.GetFiles(appCtx, &mockGpu, taskId, hydratedInput)
+		if err != nil {
+			logger.Error().Err(err).Msg("model inference failed")
+			fmt.Println("error during model inference:", err)
+			continue
+		}
+		elapsed := time.Since(startTime)
+		logger.Info().Dur("duration", elapsed).Msg("inference complete")
+
+		// save output files
+		if len(files) == 0 {
+			logger.Warn().Msg("model did not return any output files.")
+			fmt.Println("model returned no output files.")
+			continue
+		}
+
+		for i, file := range files {
+			// Generate a unique local filename
+			// Use the filename suggested by the model template if available
+			suggestedFilename := fmt.Sprintf("output-%d.bin", i+1) // Default binary extension
+			if file.Name != "" {
+				suggestedFilename = file.Name
+			}
+
+			localFilename := fmt.Sprintf("repl_output_%s_%s", time.Now().Format("20060102150405"), suggestedFilename)
+
+			// Read the buffer content
+			fileBytes, err := io.ReadAll(file.Buffer)
+			if err != nil {
+				logger.Error().Err(err).Str("suggested_filename", suggestedFilename).Msg("failed to read file buffer")
+				fmt.Printf("error reading buffer for %s: %v\n", suggestedFilename, err)
+				continue
+			}
+
+			err = os.WriteFile(localFilename, fileBytes, 0644)
+			if err != nil {
+				logger.Error().Err(err).Str("filename", localFilename).Msg("failed to write output file")
+				fmt.Printf("error writing file %s: %v\n", localFilename, err)
+			} else {
+				logger.Info().Str("filename", localFilename).Int("bytes", len(fileBytes)).Msg("saved output file")
+				fmt.Printf("saved output to: %s\n", localFilename)
+			}
+		}
 	}
 
 	return nil

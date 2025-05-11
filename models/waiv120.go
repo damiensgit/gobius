@@ -97,15 +97,15 @@ func NewWaiV120MainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig,
 	}
 
 	http := &http.Client{
-		// Timeout is now handled per-request via context
-		// Timeout: time.Second * 120,
+		Transport: &http.Transport{MaxIdleConnsPerHost: 10}, // Use a dedicated transport
 	}
+
+	// Set default timeouts first
+	timeout := 120 * time.Second    // Default inference timeout
+	ipfsTimeout := 30 * time.Second // Default IPFS timeout
 
 	// Use model.ID (the hex string CID) as the key for the Cog map
 	cogConfig, ok := appConfig.ML.Cog[model.ID]
-	// Set default timeouts first
-	var timeout time.Duration = 120 * time.Second    // Default inference timeout
-	var ipfsTimeout time.Duration = 30 * time.Second // Default IPFS timeout
 	if ok {
 		// Parse inference timeout only if the string is not empty
 		if cogConfig.HttpTimeout != "" {
@@ -128,10 +128,6 @@ func NewWaiV120MainnetModel(client ipfs.IPFSClient, appConfig *config.AppConfig,
 				ipfsTimeout = parsedIpfsTimeout
 			}
 		} // Else: IpfsTimeout is empty, silently use the default
-
-	} else {
-		logger.Error().Str("model", model.ID).Msg("model ID not found in ML.Cog config")
-		return nil
 	}
 
 	m := &WaiV120MainnetModel{
@@ -339,33 +335,39 @@ func (m *WaiV120MainnetModel) GetFiles(ctx context.Context, gpu *common.GPU, tas
 
 	body, err := io.ReadAll(postResp.Body)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to read model response body: %w", err)
 	}
 
 	var resp WaiV120ModelResponse
 	err = json.Unmarshal(body, &resp)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to unmarshal model response: %w", err)
 	}
 
 	if len(resp.Output) != 1 {
-		return nil, err
+		return nil, fmt.Errorf("model returned %d outputs, expected 1", len(resp.Output))
 	}
 
-        // Remove the "data:image/png;base64," prefix
-        resp.Output[0] = strings.TrimPrefix(resp.Output[0], "data:image/png;base64,")
+	// Remove the "data:image/png;base64," prefix
+	resp.Output[0] = strings.TrimPrefix(resp.Output[0], "data:image/png;base64,")
 
-        // Assuming body is a base64 encoded string
-        buf, err := base64.StdEncoding.DecodeString(resp.Output[0])
-        if err != nil {
-                return nil, err
-        }
+	// Assuming body is a base64 encoded string
+	buf, err := base64.StdEncoding.DecodeString(resp.Output[0])
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode base64 image data: %w", err)
+	}
 
-        fileName := fmt.Sprintf("%d.%s.png", gpu.ID, uuid.New().String())
-        path := filepath.Join(m.config.CachePath, fileName)
-        buffer := bytes.NewBuffer(buf)
+	// Add check for empty buffer after successful decoding
+	if len(buf) == 0 {
+		// This can happen if resp.Output[0] was an empty string after trimming the prefix.
+		return nil, errors.New("model returned empty image data after base64 decoding")
+	}
 
-        return []ipfs.IPFSFile{{Name: "out-1.png", Path: path, Buffer: buffer}}, nil
+	fileName := fmt.Sprintf("%d.%s.png", gpu.ID, uuid.New().String())
+	path := filepath.Join(m.config.CachePath, fileName)
+	buffer := bytes.NewBuffer(buf)
+
+	return []ipfs.IPFSFile{{Name: "out-1.png", Path: path, Buffer: buffer}}, nil
 }
 
 func (m *WaiV120MainnetModel) GetCID(ctx context.Context, gpu *common.GPU, taskid string, input any) ([]byte, error) {
@@ -404,16 +406,20 @@ func (m *WaiV120MainnetModel) GetCID(ctx context.Context, gpu *common.GPU, taski
 	}, 3, 1000)
 
 	if err != nil {
-		return nil, errors.New("cannot pin files to retrieve cid")
+		// If the error after retries is specifically ErrGpuBusy, return it directly.
+		if errors.Is(err, ErrResourceBusy) {
+			m.logger.Warn().Str("task", taskid).Str("gpu", gpu.Url).Msg("GPU remained busy after retries")
+		}
+		// Otherwise, return the potentially wrapped error from ExpRetry
+		return nil, fmt.Errorf("failed to pin files to IPFS after retries: %w", err)
 	}
 	cidBytes, err := base58.Decode(cid58.(string))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to decode base58 CID string: %w", err)
 	}
 
 	return cidBytes, nil
 }
-
 
 func (m *WaiV120MainnetModel) Validate(gpu *common.GPU, taskid string) error {
 

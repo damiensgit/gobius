@@ -43,22 +43,10 @@ func ExpRetry(logger zerolog.Logger, fn func() (any, error), tries int, base flo
 				break
 			}
 			continue
-			// } else if strings.Contains(err.Error(), "non existent commitment") { // non existent commitment means no commitment was found for this task yet
-
-			// 	//continue
-			// } else if strings.Contains(err.Error(), "commitment must be in past") { // we're submitting swithin 1 block from commitment
-			// 	//log.Printf("Error: %v", err)
-			// 	//continue
 		}
-		//non existent commitment
-		//seconds := math.Pow(base, float64(retry))
-
 		sleepDuration := time.Duration(backoff) * time.Millisecond
 
 		logger.Warn().Dur("sleep_duration", sleepDuration).Err(err).Msg("retry request failed, retrying")
-
-		//time.Sleep(time.Duration(seconds * float64(time.Second)))
-
 		time.Sleep(sleepDuration)
 		backoff *= 1.5 // Double the backoff time
 	}
@@ -125,18 +113,26 @@ func ExpRetryWithNonceContext(ctx context.Context, logger zerolog.Logger, fn fun
 	nonce := uint64(0)
 
 	for range tries {
+		// exit if context is cancelled
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return result, fmt.Errorf("context cancelled: %w (last error: %v)", ctxErr, err)
+		}
 		result, err = fn(nonce)
 		if err == nil {
 			return result, nil
 		}
-		if strings.Contains(err.Error(), "solution already submitted") {
-			return result, err
-		} else if strings.Contains(err.Error(), "nonce too low") || strings.Contains(err.Error(), "nonce too high") {
 
-			// on nova error msg about nonce too high is like this:
-			//nonce too high: address 0xF141fBA5aaf8688724F29DfB2bBC6EE244537328, tx: 693061 state: 693059 693059-693061=-2
-			// on nova error msg about nonce too low is like this:
-			///nonce too low: address 0x6c3Db6ef57735B8b62D0bdDa32c94389933d2f5d, tx: 316308 state: 316309 316309-316308=1
+		if strings.Contains(err.Error(), "execution reverted") {
+			// Check if it's the specific "solution rate limit" revert error
+			if strings.Contains(strings.ToLower(err.Error()), "solution rate limit") {
+				// Log it, but allow it to fall through to the retry logic
+				logger.Warn().Err(err).Msg("execution reverted due to solution rate limit, will retry")
+			} else {
+				// For other "execution reverted" errors, return immediately
+				logger.Error().Err(err).Msg("contract execution reverted (no retry)")
+				return result, err
+			}
+		} else if strings.Contains(err.Error(), "nonce too low") || strings.Contains(err.Error(), "nonce too high") {
 			parts := strings.Split(err.Error(), "state: ")
 			if len(parts) < 2 {
 				logger.Warn().Msg("state not found in error message for nonce adjustment")
@@ -154,29 +150,20 @@ func ExpRetryWithNonceContext(ctx context.Context, logger zerolog.Logger, fn fun
 			duration := time.Duration(rand.Intn(30)) * time.Millisecond
 			//duration := time.Duration(300+rand.Intn(250)+25*totalNonceRetries) * time.Millisecond
 			time.Sleep(duration)
-			logger.Warn().Err(err).Int("retries", totalNonceRetries).Dur("sleep_duration", duration).Msg("Nonce error, retrying")
+			logger.Warn().Err(err).Int("retries", totalNonceRetries).Dur("sleep_duration", duration).Msg("nonce error, retrying")
 			tries++
 			totalNonceRetries++
 			if totalNonceRetries > 25 {
 				break
 			}
 			continue
-			// } else if strings.Contains(err.Error(), "non existent commitment") {
-			// 	// non existent commitment means no commitment was found for this task yet
-			// 	log.Printf("Error: %v", err)
-			// 	time.Sleep(time.Duration(100) * time.Millisecond)
-			// 	continue
-			// } else if strings.Contains(err.Error(), "commitment must be in past") {
-			// 	// we're submitting a solution within 1 block from commitment
-			// 	log.Printf("Error: %v", err)
-			// 	continue
 		}
 		sleepDuration := time.Duration(backoff) * time.Millisecond
 
 		logger.Warn().Err(err).Dur("sleep_duration", sleepDuration).Msg("retry request failed, retrying")
 
 		time.Sleep(sleepDuration)
-		backoff *= backoffMultiplier // Double the backoff time
+		backoff *= backoffMultiplier
 	}
 
 	logger.Error().Int("tries", tries).Msg("retry request failed after multiple attempts")

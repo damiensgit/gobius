@@ -17,6 +17,11 @@ type ArbiusRouterContract interface {
 
 	// Claim IPFS incentive
 	ClaimIncentive(opts *bind.TransactOpts, taskid_ [32]byte, sigs_ []arbiusrouterv1.Signature) (*types.Transaction, error)
+
+	// Bulk claim IPFS incentive
+	BulkClaimIncentive(opts *bind.TransactOpts, taskIds [][32]byte, sigsPerTask []arbiusrouterv1.Signature, amount *big.Int) (*types.Transaction, error)
+
+	ParseIncentiveClaimed(vlog types.Log) (*arbiusrouterv1.ArbiusRouterV1IncentiveClaimed, error)
 }
 
 // RouterContractWrapper implements the interface using actual contract binding
@@ -32,14 +37,23 @@ func NewRouterContractWrapper(arbiusRouter *arbiusrouterv1.ArbiusRouterV1, clien
 	}
 }
 
+func (r *RouterContractWrapper) ParseIncentiveClaimed(vlog types.Log) (*arbiusrouterv1.ArbiusRouterV1IncentiveClaimed, error) {
+	return r.arbiusRouter.ParseIncentiveClaimed(vlog)
+}
+
 func (r *RouterContractWrapper) Incentives(opts *bind.CallOpts, taskId [32]byte) (*big.Int, error) {
 	// Call the actual contract method
 	return r.arbiusRouter.Incentives(opts, taskId)
 }
 
-func (r *RouterContractWrapper) ClaimIncentive(opts *bind.TransactOpts, taskid_ [32]byte, sigs_ []arbiusrouterv1.Signature) (*types.Transaction, error) {
+func (r *RouterContractWrapper) ClaimIncentive(opts *bind.TransactOpts, taskid [32]byte, sigs []arbiusrouterv1.Signature) (*types.Transaction, error) {
 	// Call the actual contract method (assuming it exists)
-	return r.arbiusRouter.ClaimIncentive(opts, taskid_, sigs_)
+	return r.arbiusRouter.ClaimIncentive(opts, taskid, sigs)
+}
+
+func (r *RouterContractWrapper) BulkClaimIncentive(opts *bind.TransactOpts, taskIds [][32]byte, sigsPerTask []arbiusrouterv1.Signature, amount *big.Int) (*types.Transaction, error) {
+	// Call the actual contract method (assuming it exists)
+	return r.arbiusRouter.BulkClaimIncentive(opts, taskIds, sigsPerTask, amount)
 }
 
 // MockIPFSIncentiveContract implements the interface with mock responses
@@ -92,4 +106,30 @@ func (m *MockRouterContract) ClaimIncentive(opts *bind.TransactOpts, taskid_ [32
 		big.NewInt(0),    // gas price
 		nil,              // data
 	), nil
+}
+
+func (m *MockRouterContract) BulkClaimIncentive(opts *bind.TransactOpts, taskIds [][32]byte, sigsPerTask []arbiusrouterv1.Signature, amount *big.Int) (*types.Transaction, error) {
+	// Return configured error or success
+	// loop through taskIds and return error if any
+	for _, taskId := range taskIds {
+		if err, exists := m.claimResults[taskId]; exists {
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Mock transaction for successful claims
+	return types.NewTransaction(
+		0,                // nonce
+		common.Address{}, // to
+		big.NewInt(0),    // amount
+		0,                // gas limit
+		big.NewInt(0),    // gas price
+		nil,              // data
+	), nil
+}
+
+func (m *MockRouterContract) ParseIncentiveClaimed(vlog types.Log) (*arbiusrouterv1.ArbiusRouterV1IncentiveClaimed, error) {
+	return nil, nil
 }

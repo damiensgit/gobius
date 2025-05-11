@@ -6,7 +6,6 @@ import (
 	"gobius/utils"
 	"math"
 	"math/big"
-	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -80,8 +79,8 @@ func NewMetricsManager(ctx context.Context, d time.Duration) *GasMetrics {
 }
 
 // TODO: refactor this into a service factory/broker system?
-func (gm *GasMetrics) Start(appQuit context.Context, wg *sync.WaitGroup) {
-	go gm.updateMetrics(time.Duration(60)*time.Second, appQuit, wg)
+func (gm *GasMetrics) Start(ctx context.Context) {
+	gm.updateMetrics(time.Duration(60)*time.Second, ctx)
 }
 
 func (gm *GasMetrics) String() string {
@@ -110,14 +109,11 @@ func (gm *GasMetrics) PrintPrice() string {
 	return gm.rewardEMA.String()
 }
 
-func (gm *GasMetrics) updateMetrics(pollingtime time.Duration, appQuit context.Context, wg *sync.WaitGroup) {
-	if wg != nil {
-		defer wg.Done()
-	}
+func (gm *GasMetrics) updateMetrics(pollingtime time.Duration, ctx context.Context) {
 	ticker := time.NewTicker(pollingtime)
 	for {
 		select {
-		case <-appQuit.Done():
+		case <-ctx.Done():
 			gm.services.Logger.Info().Msg("metrics updater shutting down")
 			ticker.Stop()
 			return
@@ -139,7 +135,7 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration, appQuit context.C
 
 			// convert basefee to gwei
 
-			basefeeingwei := gm.services.Eth.ToFloat(new(big.Int).Mul(basefee, big.NewInt(1e9)))
+			basefeeingwei := Eth.ToFloat(new(big.Int).Mul(basefee, big.NewInt(1e9)))
 
 			if basefeeingwei < 10 {
 				gm.AddBasefee(basefeeingwei)
@@ -269,7 +265,7 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration, appQuit context.C
 							continue
 						}
 						// convert ETH balance to float
-						balAsFloat := gm.services.Eth.ToFloat(ethBalance)
+						balAsFloat := Eth.ToFloat(ethBalance)
 
 						// we want to hit this target so only sell enough to get us there
 						if balAsFloat < gm.services.Config.ValidatorConfig.SellEthBalanceTarget {
@@ -354,7 +350,7 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration, appQuit context.C
 					if tx != nil {
 						gm.services.Logger.Info().Msg("approving AIUS to be sold")
 
-						_, success, _, _ := gm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+						_, success, _, _ := gm.services.OwnerAccount.WaitForConfirmedTx(tx)
 
 						if !success {
 							continue
@@ -370,7 +366,7 @@ func (gm *GasMetrics) updateMetrics(pollingtime time.Duration, appQuit context.C
 						continue
 					}
 
-					_, success, _, _ := gm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+					_, success, _, _ := gm.services.OwnerAccount.WaitForConfirmedTx(tx)
 					if !success {
 						continue
 					}
@@ -395,7 +391,7 @@ func (tm *GasMetrics) transferBasetokens(to common.Address, amount float64) bool
 
 	amountAsBig := tm.services.Config.BaseConfig.BaseToken.FromFloat(amount)
 
-	tx, err := tm.services.SenderOwnerAccount.NonceManagerWrapper(5, 425, 1.5, true, func(opts *bind.TransactOpts) (interface{}, error) {
+	tx, err := tm.services.OwnerAccount.NonceManagerWrapper(5, 425, 1.5, true, func(opts *bind.TransactOpts) (interface{}, error) {
 		opts.GasLimit = 0
 		return tm.services.Basetoken.Transfer(opts, to, amountAsBig)
 	})
@@ -405,7 +401,7 @@ func (tm *GasMetrics) transferBasetokens(to common.Address, amount float64) bool
 		return false
 	}
 
-	_, success, _, err := tm.services.SenderOwnerAccount.WaitForConfirmedTx(tx)
+	_, success, _, err := tm.services.OwnerAccount.WaitForConfirmedTx(tx)
 
 	if err != nil {
 		tm.services.Logger.Error().Err(err).Msg("error waiting for transfer")
@@ -442,7 +438,7 @@ func (gm *GasMetrics) AddCommitment(gas *big.Int) {
 	gm.AddTotal(gas)
 
 	totalCostInUSD := fmt.Sprintf("%0.4f$", gm.services.Config.BaseConfig.BaseToken.ToFloat(gas)*gm.lastEthPrice)
-	gm.services.Logger.Info().Str("cost", totalCostInUSD).Msg("batch commitment tx cost in USD")
+	gm.services.Logger.Info().Str("cost", totalCostInUSD).Msg("commitment tx cost")
 
 	gm.Commitments.Add(gm.Commitments, gas)
 }
@@ -451,7 +447,7 @@ func (gm *GasMetrics) AddSolution(gas *big.Int) {
 	gm.AddTotal(gas)
 
 	totalCostInUSD := fmt.Sprintf("%0.4f$", gm.services.Config.BaseConfig.BaseToken.ToFloat(gas)*gm.lastEthPrice)
-	gm.services.Logger.Info().Str("cost", totalCostInUSD).Msg("batch solution tx cost")
+	gm.services.Logger.Info().Str("cost", totalCostInUSD).Msg("solution tx cost")
 
 	gm.Solutions.Add(gm.Solutions, gas)
 }
@@ -460,7 +456,7 @@ func (gm *GasMetrics) AddClaim(gas *big.Int) {
 	gm.AddTotal(gas)
 
 	totalCostInUSD := fmt.Sprintf("%0.4f$", gm.services.Config.BaseConfig.BaseToken.ToFloat(gas)*gm.lastEthPrice)
-	gm.services.Logger.Info().Str("cost", totalCostInUSD).Msg("batch claim tx cost")
+	gm.services.Logger.Info().Str("cost", totalCostInUSD).Msg("claim tx cost")
 
 	gm.Claims.Add(gm.Claims, gas)
 }
@@ -469,7 +465,7 @@ func (gm *GasMetrics) AddTasks(gas *big.Int) {
 	gm.AddTotal(gas)
 
 	totalCostInUSD := fmt.Sprintf("%0.4f$", gm.services.Config.BaseConfig.BaseToken.ToFloat(gas)*gm.lastEthPrice)
-	gm.services.Logger.Info().Str("cost", totalCostInUSD).Msg("batch tasks tx cost")
+	gm.services.Logger.Info().Str("cost", totalCostInUSD).Msg("tasks tx cost")
 
 	gm.Tasks.Add(gm.Tasks, gas)
 }

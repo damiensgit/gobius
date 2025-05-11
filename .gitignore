@@ -24,3 +24,7 @@ bin/*
 .task/
 !config.example.json
 !sepolia.example.json
+!playground.example.json
+contracts/cache
+broadcast/*
+ipfs/ipfs_config.json

@@ -63,7 +63,15 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
 
 2. **Git**: Install Git if you haven't already. You can download it from [https://git-scm.com/](https://git-scm.com/).
 
-3. **IPFS**: Gobius requires IPFS for model and data storage.
+3. **C Compiler (Linux/macOS)**: Gobius uses a database library (`go-sqlite3`) that requires a C compiler (like `gcc`) to build correctly.
+   - **Ubuntu/Debian**: Install the necessary build tools:
+     ```bash
+     sudo apt update && sudo apt install gcc build-essential
+     ```
+   - **macOS**: Xcode Command Line Tools usually include `gcc`. Install them if you haven't: `xcode-select --install`
+   - **Windows**: The Go build process on Windows typically handles this automatically if you've installed Go correctly.
+
+4. **IPFS**: Gobius requires IPFS for model and data storage.
 
    **Recommendation**: It's highly recommended to run the IPFS daemon on the **same server** where you are running Gobius. This simplifies network configuration.
 
@@ -165,12 +173,11 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
 
    **Editing `config.json` - Important Note:**
 
-   The JSON snippet below shows the **most common fields** you will need to edit in your `config.json` file. Your actual `config.json` (copied from `config.example.json`) contains **many more settings**. You should **edit the fields shown below within your full `config.json` file**, leaving the other fields at their default values unless you understand their purpose. **Do NOT simply copy and paste this entire snippet** - it is only a partial example highlighting key configuration points.
+   The JSON snippet below shows the **most common fields** you will need to edit in your `config.json` file. Your actual `config.json` (copied from `config.example.json`) contains **many more settings**. You should **edit the fields shown below within your full `config.json` file**, leaving the other fields at their default values (or values from `config.example.json`) unless you understand their purpose. **Do NOT simply copy and paste this entire snippet** - it is only a partial example highlighting key configuration points.
 
    ```json
    {
      "db_path": "storage.db",
-     "privatekey": "YOUR_MAIN_OPERATIONAL_PRIVATE_KEY_NO_0X",  // Key for sending tx, paying gas (ETH)
      "ipfs": {
        "strategy": "http_client",
        "http_client": {
@@ -178,10 +185,8 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
        }
      },
      "blockchain": {
-       "private_key": "YOUR_MAIN_OPERATIONAL_PRIVATE_KEY_NO_0X",  // Same key as top-level privatekey
-       "rpc_url": "wss://arbitrum-one-rpc.publicnode.com",  // WebSocket Arbitrum RPC URL
-       "sender_rpc_url": "",  // Optional separate RPC for transaction sending
-       "client_rpc_urls": [],  // Optional additional RPCs for redundancy
+       "private_key": "YOUR_MAIN_OPERATIONAL_PRIVATE_KEY_NO_0X",
+       "rpc_url": "wss://arbitrum-one-rpc.publicnode.com",
        "cache_nonce": false,
        "basefee_x": 2  // Multiplier for base fee estimation
      },
@@ -209,16 +214,16 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
        }
      },
      "validator_config": {
-       "private_keys": ["YOUR_VALIDATOR_PRIVATE_KEY_NO_0X"], // Key(s) for validator(s)
+       "private_keys": ["YOUR_VALIDATOR_PRIVATE_KEY_NO_0X"],
        "stake_check": true,
-       "stake_check_interval": "120s", // How often to check stake/health
-       "min_basetoken_threshold": 10, // Min AIUS to keep on validator
-       "stake_buffer_percent": 2, // Target stake buffer % above min stake
-       "stake_buffer_topup_percent": 1, // Top-up trigger % above min stake
-       "initial_stake": 0 // Set > 0 to manually manage stake amount (disables auto top-up)
-       // ... other advanced settings ...
+       "stake_check_interval": "120s",
+       "min_basetoken_threshold": 10,
+       "stake_buffer_percent": 2,
+       "stake_buffer_topup_percent": 1,
+       "initial_stake": 0
      },
      "batchtasks": {
+       "enabled": true,
        "private_keys": []
      }
    }
@@ -238,13 +243,13 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
 
    The `blockchain` section is crucial for configuring how Gobius connects to the Arbitrum One network and manages transaction sending:
 
-   -   **`private_key`**: This should match the top-level `privatekey` field and contains the private key for your main operational account (without the `0x` prefix). This account pays gas fees and sends transactions.
+   -   **`private_key`**: This field within the `blockchain` section contains the private key for your main operational account (without the `0x` prefix). This account pays gas fees and sends transactions, including validator stake top-ups.
    -   **`rpc_url`**: The RPC endpoint Gobius uses to connect to the Arbitrum One network. This **must be a WebSocket URL** (starting with `wss://`), not an HTTP URL. Reliable options include:
         -   Public WebSocket endpoints: `wss://arbitrum-one-rpc.publicnode.com`
         -   Providers like QuickNode, Infura, Alchemy, etc. (requires account setup)
-   -   **`sender_rpc_url`** (optional): A separate RPC endpoint specifically for sending transactions. Leave empty to use the main `rpc_url` for everything.
-   -   **`client_rpc_urls`** (optional): An array of backup RPC endpoints for redundancy. Only necessary for high-availability setups.
+   -   **`cache_nonce`**: (Default in example: `false`, code default may differ - `true` is often recommended for reliability) If true, Gobius will cache and manage the nonce for the `blockchain.private_key` account locally, which can improve reliability with some RPC providers.
    -   **`basefee_x`**: A multiplier applied to base fee estimates for gas pricing. The default of 2 is suitable for most users.
+   -   Other fields like `sender_rpc_url` (for a separate transaction sending RPC) and `client_rpc_urls` (for RPC redundancy) can be added from the `config/appconfig.go` structure if needed for advanced setups, but are not included in `config.example.json`.
 
    > **Note**: Stable, reliable RPC connections are essential for Gobius to work properly. If using public endpoints, you might experience occasional connection issues. For serious mining operations, consider a paid RPC service like QuickNode for better reliability.
 
@@ -255,7 +260,7 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
    -   **Minimum Stake**: The primary requirement is holding the network's minimum stake. As of writing, this is **420,926,548,100,086,163,465 wei** (approximately **421 AIUS**). You can always check the current minimum stake directly on the Arbius network or through community resources.
    -   **Buffer for Fees and Top-ups**: It is highly recommended to keep an **additional buffer** of AIUS in the validator wallet, beyond the minimum stake. A buffer of **at least 10%** (around 42 AIUS or more) is suggested.
    -   **Why the Buffer?**
-        -   **Task Fees**: If using `automine`, each generated task requires a fee (`automine.fee`), which depletes the validator's balance.
+        -   **Task Fees**: If using `automine`, each generated task requires a fee (`automine.fee`), which depletes the balance of the account submitting the task (this will be the Main Operational Account specified in `blockchain.private_key` if `batchtasks.private_keys` is empty, or an account from `batchtasks.private_keys` if configured). If your validator account is also serving this role, its balance will be affected.
         -   **Gas Costs**: All transactions (submitting solutions, claiming rewards, topping up stake) require gas fees, paid in **ETH (on Arbitrum)**.
         -   **Stake Top-ups**: Gobius might automatically top up the stake if it falls slightly (due to penalties or configuration). The buffer ensures funds are available for this.
    -   **`min_basetoken_threshold`**: This setting in `validator_config` helps enforce a minimum reserve, but you should still ensure the *total* balance is sufficient for both the stake and the buffer.
@@ -302,8 +307,8 @@ This guide will now walk you through setting up Gobius for mining on the Arbius 
    ```
 
    -   **`min_profit`**: This value determines the minimum estimated profit (in AIUS) required for the miner to actively perform work (like submitting commitments or processing solution batches). The profit calculation is generally based on a standard batch size (e.g., 200 tasks).
-        -   If the calculated profit for an action is less than `min_profit`, the miner will pause those specific actions (committing/solving) until profitability improves. 
-        -   **Important**: This setting does **not** affect the claiming of already completed solutions; claiming is managed separately by the `claim` section settings.
+        -   If the calculated profit for an action is less than `min_profit`, the miner will pause those specific actions (committing/solving) and potentially claiming within the main processing loop until profitability improves.
+        -   **Important**: While claiming has its own settings in the `claim` section, the main batch processing loop (active when `solver.enabled` and `solver.use_polling` are true, which are typical defaults) first checks `min_profit` before proceeding to most operations, including claims processed within that loop. A separate, more direct claiming mechanism might operate if `solver.enabled` is false or under specific non-default configurations.
         -   To **force the miner to work** even if the current estimated profit is negative, set `min_profit` to a negative value (e.g., `-10`).
         -   The default value is `0`, meaning the miner will only work if the estimated profit is zero or positive.
 
@@ -324,7 +329,7 @@ Gobius interacts with several smart contracts deployed on the Arbitrum One netwo
 
 These addresses are typically loaded automatically and do not require changes for basic operation. They are provided for reference only.
 
-The `Bulk Tasks` contract is part of the Gobius project and has been deployed to mainnet for convenience. While using the provided address is recommended, advanced users can deploy their own version of the contract (source available in the `/contracts` folder). If you deploy your own, you **must** update the `bulkTasksAddress` field in your `config/config.json` file with the new contract address.
+The `Bulk Tasks` contract is part of the Gobius project and has been deployed to mainnet for convenience. While using the provided address is recommended, advanced users can deploy their own version of the contract (source available in the `/contracts` folder). If you deploy your own, you **must** update the `bulkTasksAddress` field in your `config/config.mainnet.json` file with the new contract address. (Note: Verify this configuration method, as `bulkTasksAddress` may not be a standard JSON config option).
 
 ## Updating Gobius
 
@@ -372,6 +377,52 @@ When new versions of Gobius are released, you'll want to update your local repos
 - For more detailed information, refer to the [README.md](README.md).
 - If you encounter issues, check the [Troubleshooting](#troubleshooting-common-issues) section in this guide.
 
+## IPFS Incentive Claiming (Advanced)
+
+Gobius supports claiming AIUS incentives for making data available on IPFS. These settings are configured within the `ipfs` section of your `config.json` file.
+**Note:** The following fields reflect the defaults in `config.example.json`. If you are customizing, ensure your `config.json` has these or your desired values.
+
+```json
+"ipfs": {
+  "strategy": "http_client", // Or "pinata_client", "mixed_client"
+  "http_client": {
+    "url": "/ip4/127.0.0.1/tcp/5001"
+  },
+  "pinata": {
+      "api_key": "",
+      "api_secret": "",
+      "jwt": "", // Preferred for Pinata
+      "base_url": "https://api.pinata.cloud"
+  },
+  "incentive_claim": true,
+  "claim_interval": "10s",
+  "oracle_url": "http://45.63.37.71:8444",
+  "use_bulk_claim": false,
+  "bulk_claim_batch_size": 10,
+  "max_single_claims_per_run": 10,
+  "min_aius_incentive_threshold": 0.0,
+  "timeout": "120s"
+}
+```
+
+-   **`strategy`**: (Default in example: `"http_client"`) Defines the IPFS pinning service strategy. Can be `"http_client"` (for a local or self-hosted IPFS node), `"pinata_client"` (for Pinata service), or `"mixed_client"` (to use both).
+-   **`http_client.url`**: (Default in example: `"/ip4/127.0.0.1/tcp/5001"`) The API URL of your local/remote IPFS node if using `http_client` strategy.
+-   **`pinata`**: Configuration block for Pinata service if `strategy` involves `pinata_client`.
+    -   **`pinata.api_key`**: Your Pinata API key (legacy).
+    -   **`pinata.api_secret`**: Your Pinata API secret (legacy).
+    -   **`pinata.jwt`**: Your Pinata JWT (recommended method for authentication). If provided, API key/secret are usually ignored.
+    -   **`pinata.base_url`**: (Default: `"https://api.pinata.cloud"`) The base URL for Pinata API.
+-   **`incentive_claim`**: (Default: `true`) If set to `true`, the miner will attempt to claim additional AIUS incentives for tasks it successfully solves, provided those tasks were submitted through the Arbius router and were designated as having an IPFS replication incentive.
+-   **`claim_interval`**: (Default: `"10s"`) How often the miner checks for and processes these IPFS incentive claims (e.g., `"10s"`, `"5m"`, `"1h"`).
+-   **`oracle_url`**: (Default: `"http://45.63.37.71:8444"`) The URL of the IPFS Oracle service that provides signatures necessary for these incentive claims. **Ensure this points to a trusted and operational oracle.**
+-   **`use_bulk_claim`**: (Default: `false`) Set to `true` to batch multiple of these IPFS incentive claims into a single transaction, which can save on gas fees.
+-   **`bulk_claim_batch_size`**: (Default: `10`) If `use_bulk_claim` is true, this determines the number of incentive claims to include in a single bulk transaction.
+-   **`max_single_claims_per_run`**: (Default: `10`) If `use_bulk_claim` is false, this limits how many individual incentive claim transactions are sent per processing cycle of the IPFS claimer.
+-   **`min_aius_incentive_threshold`**: (Default: `0.0`) The minimum AIUS value an IPFS replication incentive must have for the miner to attempt to claim it. Set to `0` to disable this threshold and attempt to claim any available incentive for eligible solved tasks.
+-   **`timeout`**: (Default: `"120s"`) Oracle timeout for IPFS operations related to these incentive claims (e.g., `"30s"`, `"2m"`).
+
+Ensure your IPFS setup (local node or Pinata account) is robust and the oracle is correctly configured if you enable `incentive_claim`.
+
 ## Cog Setup
 
 To use Cog models, you need to specify the URLs of the models in your configuration.
@@ -402,7 +453,6 @@ Gobius requires a WebSocket or IPC connection to the Arbitrum network.
      "rpc_url": "wss://arbitrum-one-rpc.publicnode.com"  // Example WebSocket URL
    }
    ```
-
 2. You can use public WebSocket URLs or a provider like QuickNode for a more reliable connection.
    - **Public WebSocket**: `wss://arbitrum-one-rpc.publicnode.com`
    - **QuickNode**: Sign up at [QuickNode](https://www.quicknode.com/) and get your WebSocket RPC URL.
@@ -586,15 +636,7 @@ Here are some common problems users might encounter during setup:
 *   **Symptom**: Gobius fails to start with a fatal error mentioning `CGO_ENABLED=0` and `go-sqlite3 requires cgo to work`.
     Example log: `{"level":"fatal","error":"Binary was compiled with 'CGO_ENABLED=0', go-sqlite3 requires cgo to work..."}`
 *   **Cause**: Gobius was built on a system missing a C compiler (`gcc`), which is required by the `go-sqlite3` library. Go automatically disables CGO when a C compiler is not found during the build.
-*   **Solution**: Install the necessary C compiler and build tools, then rebuild Gobius.
-    ```bash
-    # On Debian/Ubuntu
-    sudo apt update && sudo apt install gcc build-essential
-    
-    # Then navigate back to the gobius directory and rebuild
-    cd path/to/gobius
-    go build
-    ```
+*   **Solution**: Install the necessary C compiler and build tools as described in the Prerequisites section, then rebuild Gobius.
 
 **3. Configuration (`config.json`) Errors**
 
@@ -637,3 +679,4 @@ Here are some common problems users might encounter during setup:
 *   **Symptom**: Gobius fails to start after an update, potentially with database errors.
 *   **Cause**: An automatic database migration required by the update failed.
 *   **Solution**: Check the Gobius logs for specific database error messages. Report the issue with logs to the developers. If necessary, you may need to restore your database from the backup you made *before* updating and seek further assistance.
+
