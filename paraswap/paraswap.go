@@ -165,17 +165,17 @@ func (p *ParaswapManager) GetPrice(srcToken, destToken *erc20.TokenERC20, amount
 
 	if found && time.Since(entry.Timestamp) < p.priceCacheTTL {
 		p.logger.Debug().
-			Str("srcToken", srcTokenAddr).
-			Str("destToken", destTokenAddr).
+			Str("src_token", srcTokenAddr).
+			Str("dest_token", destTokenAddr).
 			Str("amount", amountStr).
-			Msg("Paraswap GetPrice cache hit")
+			Msg("paraswap getprice cache hit")
 		return entry.Response, nil
 	}
 	p.logger.Debug().
-		Str("srcToken", srcTokenAddr).
-		Str("destToken", destTokenAddr).
+		Str("src_token", srcTokenAddr).
+		Str("dest_token", destTokenAddr).
 		Str("amount", amountStr).
-		Msg("Paraswap GetPrice cache miss or expired")
+		Msg("paraswap getprice cache miss or expired")
 
 	params := url.Values{}
 	params.Add("srcToken", srcTokenAddr)
@@ -192,7 +192,7 @@ func (p *ParaswapManager) GetPrice(srcToken, destToken *erc20.TokenERC20, amount
 
 	p.logger.Debug().
 		Str("url", url).
-		Msg("Paraswap API request")
+		Msg("paraswap getprice API request")
 
 	// Use context-aware HTTP request
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -204,8 +204,8 @@ func (p *ParaswapManager) GetPrice(srcToken, destToken *erc20.TokenERC20, amount
 	if err != nil {
 		// Check for context deadline exceeded
 		if errors.Is(err, context.DeadlineExceeded) {
-			p.logger.Error().Err(err).Msg("Paraswap API request timed out")
-			return nil, fmt.Errorf("paraswap API request timed out: %w", err)
+			p.logger.Error().Err(err).Msg("paraswap getprice API request timed out")
+			return nil, fmt.Errorf("paraswap getprice API request timed out: %w", err)
 		}
 		return nil, fmt.Errorf("failed to get price: %w", err)
 	}
@@ -233,10 +233,10 @@ func (p *ParaswapManager) GetPrice(srcToken, destToken *erc20.TokenERC20, amount
 	}
 	p.priceCacheMutex.Unlock()
 	p.logger.Debug().
-		Str("srcToken", srcTokenAddr).
-		Str("destToken", destTokenAddr).
+		Str("src_token", srcTokenAddr).
+		Str("dest_token", destTokenAddr).
 		Str("amount", amountStr).
-		Msg("Paraswap GetPrice cache updated")
+		Msg("paraswap getprice cache updated")
 
 	return &priceResp, nil
 }
@@ -273,8 +273,8 @@ func (p *ParaswapManager) GetTransaction(priceRoute *PriceResponse) (*Transactio
 	if err != nil {
 		// Check for context deadline exceeded
 		if errors.Is(err, context.DeadlineExceeded) {
-			p.logger.Error().Err(err).Msg("Paraswap API request timed out")
-			return nil, fmt.Errorf("paraswap API transaction request timed out: %w", err)
+			p.logger.Error().Err(err).Msg("paraswap transaction API request timed out")
+			return nil, fmt.Errorf("paraswap transaction API request timed out: %w", err)
 		}
 		return nil, fmt.Errorf("failed to get transaction: %w", err)
 	}
@@ -316,7 +316,7 @@ func (p *ParaswapManager) executeSwap(srcToken, destToken string, amount *big.In
 
 	p.logger.Debug().
 		Str("url", url).
-		Msg("Paraswap API request")
+		Msg("paraswap swap API request")
 
 	// Use context-aware HTTP request
 	ctx, cancel := context.WithTimeout(context.Background(), p.apiTimeout) // Use configured timeout
@@ -330,8 +330,8 @@ func (p *ParaswapManager) executeSwap(srcToken, destToken string, amount *big.In
 	if err != nil {
 		// Check for context deadline exceeded
 		if errors.Is(err, context.DeadlineExceeded) {
-			p.logger.Error().Err(err).Msg("Paraswap API swap request timed out")
-			return nil, fmt.Errorf("paraswap API swap request timed out: %w", err)
+			p.logger.Error().Err(err).Msg("paraswap swap API request timed out")
+			return nil, fmt.Errorf("paraswap swap API request timed out: %w", err)
 		}
 		return nil, fmt.Errorf("failed to get swap data: %w", err)
 	}
@@ -345,10 +345,10 @@ func (p *ParaswapManager) executeSwap(srcToken, destToken string, amount *big.In
 	p.logger.Debug().
 		Int("status", resp.StatusCode).
 		Str("body", string(body)).
-		Msg("Paraswap API response")
+		Msg("paraswap swap API response")
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("paraswap swap API request failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var swapResp struct {
