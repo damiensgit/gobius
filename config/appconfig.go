@@ -47,6 +47,9 @@ type AppConfig struct {
 	ML         ML         `json:"ml"`
 	IPFS       IPFS       `json:"ipfs"`
 	BaseConfig BaseConfig `json:"baseconfig"`
+
+	ParaswapCacheTTL string `json:"paraswap_cache_ttl"`
+	ParaswapTimeout  string `json:"paraswap_timeout"`
 }
 
 type TelegramBot struct {
@@ -141,7 +144,6 @@ type BatchConfig struct {
 }
 
 type SolverConfig struct {
-	Enabled                         bool             `json:"enabled"`
 	WaitForTasksOnShutdown          bool             `json:"wait_for_tasks_on_shutdown"` // If true, allow running tasks to finish on shutdown
 	CommitmentsAndSolutions         CommitmentOption `json:"commitments_and_solutions"`  // one of: "donothing", "doboth", "docommitments", "dosolutions"
 	CommitmentBatch                 BatchConfig      `json:"commitment_batch"`
@@ -190,11 +192,6 @@ type Blockchain struct {
 	BasefeeX      float64  `json:"basefee_x"`             // basefee multiplier
 	ForceGas      bool     `json:"gas_override"`          // force the use of a specific gas price
 	GasOverride   float64  `json:"gas_override_gwei"`     // gas price to use if gas override is enabled in gwei
-}
-
-type RPC struct {
-	Host string `json:"host"`
-	Port int    `json:"port"`
 }
 
 type Input struct {
@@ -410,7 +407,6 @@ func NewAppConfig(testnetType int) AppConfig {
 			MaxClaimQueue:            0, // 0 disables this check
 		},
 		Miner: SolverConfig{
-			Enabled:                 false,
 			WaitForTasksOnShutdown:  false,
 			CommitmentBatch:         BatchConfig{MinBatchSize: 10, MaxBatchSize: 10, NumberOfBatches: 1},
 			SolutionBatch:           BatchConfig{MinBatchSize: 10, MaxBatchSize: 10, NumberOfBatches: 1},
@@ -425,7 +421,8 @@ func NewAppConfig(testnetType int) AppConfig {
 			ErrorMaxRetries:         5,
 			ErrorBackoffTime:        425,
 			ErrorBackofMultiplier:   1.5,
-			MetricsSampleRate:       "10s",
+			MetricsSampleRate:       "60s",
+			EnableGasEstimationMode: true,
 		},
 		Blockchain: Blockchain{
 			PrivateKey: "",
@@ -453,6 +450,10 @@ func NewAppConfig(testnetType int) AppConfig {
 			OracleURL:      "",
 			Timeout:        "10s",
 		},
+
+		// Default Paraswap settings
+		ParaswapCacheTTL: "5m",
+		ParaswapTimeout:  "30s",
 	}
 
 	data := baseConfigJsonDataMainnet

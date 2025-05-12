@@ -21,11 +21,12 @@
         "max_profit": 100,
         "use_polling": true,
         "polling_time": "1m",
-        "batch_mode": 1,
         "error_max_retries": 5,
         "error_backoff": 425,
         "error_backoff_multiplier": 1.5,
-        "metrics_sample_rate": "10s"
+        "metrics_sample_rate": "60s",
+        "enable_gas_estimation_mode": true,
+        "gas_estimation_margin": 100
     },
     "validator_config": {
         "initial_stake": 0,
