@@ -1,7 +1,9 @@
 package paraswap
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"gobius/account"
 	"gobius/bindings/basetoken"
@@ -12,6 +14,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -40,6 +44,10 @@ type ParaswapManager struct {
 	baseToken         *erc20.TokenERC20
 	baseTokenContract *basetoken.BaseToken
 	logger            zerolog.Logger
+	priceCache        map[priceCacheKey]priceCacheEntry
+	priceCacheMutex   sync.RWMutex
+	priceCacheTTL     time.Duration
+	apiTimeout        time.Duration
 }
 
 type PriceResponse struct {
@@ -72,12 +80,32 @@ type TransactionResponse struct {
 	ChainID  int    `json:"chainId"`
 }
 
-func NewParaswapManager(account *account.Account, baseTokenContract *basetoken.BaseToken, baseToken *erc20.TokenERC20, logger zerolog.Logger) *ParaswapManager {
+// priceCacheKey defines the key structure for the price cache.
+type priceCacheKey struct {
+	SrcToken     string
+	DestToken    string
+	Amount       string
+	Side         string // Include side as it affects the price
+	SrcDecimals  string
+	DestDecimals string
+}
+
+// priceCacheEntry defines the structure for cache entries.
+type priceCacheEntry struct {
+	Response  *PriceResponse
+	Timestamp time.Time
+}
+
+func NewParaswapManager(account *account.Account, baseTokenContract *basetoken.BaseToken, baseToken *erc20.TokenERC20, logger zerolog.Logger, cacheTTL time.Duration, apiTimeout time.Duration) *ParaswapManager {
 	return &ParaswapManager{
 		account:           account,
 		baseToken:         baseToken,
 		baseTokenContract: baseTokenContract,
 		logger:            logger,
+		priceCache:        make(map[priceCacheKey]priceCacheEntry),
+		priceCacheMutex:   sync.RWMutex{},
+		priceCacheTTL:     cacheTTL,   // Store the cache TTL
+		apiTimeout:        apiTimeout, // Store the API timeout
 	}
 }
 
@@ -110,15 +138,52 @@ func (p *ParaswapManager) GetPrices() (aiusPrice float64, ethPrice float64, err 
 	return aiusPrice, ethPrice, nil
 }
 
-// TODO: make this a context bound http call via NewRequestWithContext
+// TODO: make this a context bound http call via NewRequestWithContext - Partially addressed by adding context
 func (p *ParaswapManager) GetPrice(srcToken, destToken *erc20.TokenERC20, amount *big.Int) (*PriceResponse, error) {
+	// Use a default context for now, consider allowing caller to pass one in
+	ctx, cancel := context.WithTimeout(context.Background(), p.apiTimeout) // Use configured timeout
+	defer cancel()
+
+	srcTokenAddr := srcToken.Address.String()
+	destTokenAddr := destToken.Address.String()
+	amountStr := amount.String()
+	srcDecimalsStr := strconv.Itoa(int(srcToken.Decimals))
+	destDecimalsStr := strconv.Itoa(int(destToken.Decimals))
+	side := "SELL" // Assuming SELL side for caching key uniqueness
+
+	// Define cache key
+	key := priceCacheKey{
+		SrcToken:  srcTokenAddr,
+		DestToken: destTokenAddr,
+		Amount:    amountStr,
+		Side:      side,
+	}
+
+	p.priceCacheMutex.RLock()
+	entry, found := p.priceCache[key]
+	p.priceCacheMutex.RUnlock()
+
+	if found && time.Since(entry.Timestamp) < p.priceCacheTTL {
+		p.logger.Debug().
+			Str("src_token", srcTokenAddr).
+			Str("dest_token", destTokenAddr).
+			Str("amount", amountStr).
+			Msg("paraswap getprice cache hit")
+		return entry.Response, nil
+	}
+	p.logger.Debug().
+		Str("src_token", srcTokenAddr).
+		Str("dest_token", destTokenAddr).
+		Str("amount", amountStr).
+		Msg("paraswap getprice cache miss or expired")
+
 	params := url.Values{}
-	params.Add("srcToken", srcToken.Address.String())
-	params.Add("destToken", destToken.Address.String())
-	params.Add("amount", amount.String())
-	params.Add("srcDecimals", strconv.Itoa(int(srcToken.Decimals)))
-	params.Add("destDecimals", strconv.Itoa(int(destToken.Decimals)))
-	params.Add("side", "SELL")
+	params.Add("srcToken", srcTokenAddr)
+	params.Add("destToken", destTokenAddr)
+	params.Add("amount", amountStr)
+	params.Add("srcDecimals", srcDecimalsStr)
+	params.Add("destDecimals", destDecimalsStr)
+	params.Add("side", side)
 	params.Add("network", chainID)
 	params.Add("version", "6.2")
 	params.Add("slippage", "100") // 1% slippage
@@ -127,17 +192,28 @@ func (p *ParaswapManager) GetPrice(srcToken, destToken *erc20.TokenERC20, amount
 
 	p.logger.Debug().
 		Str("url", url).
-		Msg("Paraswap API request")
+		Msg("paraswap getprice API request")
 
-	resp, err := http.Get(url)
+	// Use context-aware HTTP request
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get price: %v", err)
+		return nil, fmt.Errorf("failed to create price request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		// Check for context deadline exceeded
+		if errors.Is(err, context.DeadlineExceeded) {
+			p.logger.Error().Err(err).Msg("paraswap getprice API request timed out")
+			return nil, fmt.Errorf("paraswap getprice API request timed out: %w", err)
+		}
+		return nil, fmt.Errorf("failed to get price: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %v", err)
+		return nil, fmt.Errorf("failed to read price response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -149,10 +225,27 @@ func (p *ParaswapManager) GetPrice(srcToken, destToken *erc20.TokenERC20, amount
 		return nil, fmt.Errorf("failed to parse price response: %v", err)
 	}
 
+	// --- Update Cache ---
+	p.priceCacheMutex.Lock()
+	p.priceCache[key] = priceCacheEntry{
+		Response:  &priceResp,
+		Timestamp: time.Now(),
+	}
+	p.priceCacheMutex.Unlock()
+	p.logger.Debug().
+		Str("src_token", srcTokenAddr).
+		Str("dest_token", destTokenAddr).
+		Str("amount", amountStr).
+		Msg("paraswap getprice cache updated")
+
 	return &priceResp, nil
 }
 
 func (p *ParaswapManager) GetTransaction(priceRoute *PriceResponse) (*TransactionResponse, error) {
+	// Use a default context for now, consider allowing caller to pass one in
+	ctx, cancel := context.WithTimeout(context.Background(), p.apiTimeout) // Use configured timeout
+	defer cancel()
+
 	data := map[string]interface{}{
 		"priceRoute":  priceRoute.PriceRoute,
 		"srcToken":    priceRoute.PriceRoute.SrcToken,
@@ -169,22 +262,27 @@ func (p *ParaswapManager) GetTransaction(priceRoute *PriceResponse) (*Transactio
 		return nil, fmt.Errorf("failed to marshal transaction data: %v", err)
 	}
 
-	req, err := http.NewRequest("POST", fmt.Sprintf("%s/transactions/%s", paraswapAPI, chainID), strings.NewReader(string(jsonData)))
+	req, err := http.NewRequestWithContext(ctx, "POST", fmt.Sprintf("%s/transactions/%s", paraswapAPI, chainID), strings.NewReader(string(jsonData))) // Use context
 	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %v", err)
+		return nil, fmt.Errorf("failed to create transaction request: %w", err)
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get transaction: %v", err)
+		// Check for context deadline exceeded
+		if errors.Is(err, context.DeadlineExceeded) {
+			p.logger.Error().Err(err).Msg("paraswap transaction API request timed out")
+			return nil, fmt.Errorf("paraswap transaction API request timed out: %w", err)
+		}
+		return nil, fmt.Errorf("failed to get transaction: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %v", err)
+		return nil, fmt.Errorf("failed to read transaction response: %w", err)
 	}
 
 	if resp.StatusCode != http.StatusOK {
@@ -218,26 +316,39 @@ func (p *ParaswapManager) executeSwap(srcToken, destToken string, amount *big.In
 
 	p.logger.Debug().
 		Str("url", url).
-		Msg("Paraswap API request")
+		Msg("paraswap swap API request")
 
-	resp, err := http.Get(url)
+	// Use context-aware HTTP request
+	ctx, cancel := context.WithTimeout(context.Background(), p.apiTimeout) // Use configured timeout
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get swap data: %v", err)
+		return nil, fmt.Errorf("failed to create swap request: %w", err)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		// Check for context deadline exceeded
+		if errors.Is(err, context.DeadlineExceeded) {
+			p.logger.Error().Err(err).Msg("paraswap swap API request timed out")
+			return nil, fmt.Errorf("paraswap swap API request timed out: %w", err)
+		}
+		return nil, fmt.Errorf("failed to get swap data: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %v", err)
+		return nil, fmt.Errorf("failed to read swap response: %w", err)
 	}
 
 	p.logger.Debug().
 		Int("status", resp.StatusCode).
 		Str("body", string(body)).
-		Msg("Paraswap API response")
+		Msg("paraswap swap API response")
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API request failed with status %d: %s", resp.StatusCode, string(body))
+		return nil, fmt.Errorf("paraswap swap API request failed with status %d: %s", resp.StatusCode, string(body))
 	}
 
 	var swapResp struct {
@@ -301,7 +412,9 @@ func (p *ParaswapManager) Allowance(balance float64) (*types.Transaction, error)
 	minAllowance := p.baseToken.FromFloat(balance)
 	augustusAddr := common.HexToAddress(AUGUSTUS_ADDRESS)
 
-	allowance, err := p.baseTokenContract.Allowance(nil, p.account.Address, augustusAddr)
+	// Use a background context for read-only call
+	callOpts := &bind.CallOpts{Context: context.Background()}
+	allowance, err := p.baseTokenContract.Allowance(callOpts, p.account.Address, augustusAddr)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get allowance: %v", err)
 	}

@@ -179,12 +179,26 @@ func NewApplicationContext(rpc *client.Client, sql *sql.DB, logger zerolog.Logge
 		validators.validators = append(validators.validators, va)
 	}
 
-	// required for auto sell, and optionally for price oracle
+	paraswapCacheTTL, err := time.ParseDuration(cfg.ParaswapCacheTTL)
+	if err != nil {
+		logger.Warn().Err(err).Str("value", cfg.ParaswapCacheTTL).Msg("failed to parse paraswap_cache_ttl, using default 5m")
+		paraswapCacheTTL = 5 * time.Minute // Default
+	}
+
+	paraswapTimeout, err := time.ParseDuration(cfg.ParaswapTimeout)
+	if err != nil {
+		logger.Warn().Err(err).Str("value", cfg.ParaswapTimeout).Msg("failed to parse paraswap_timeout, using default 30s")
+		paraswapTimeout = 30 * time.Second // Default
+	}
+
 	paraswapManager := paraswap.NewParaswapManager(
 		ownerAccount,
 		baseTokenContract,
 		cfg.BaseConfig.BaseToken,
-		logger)
+		logger,
+		paraswapCacheTTL,
+		paraswapTimeout,
+	)
 
 	var oracleProvider IPriceOracle
 	var leverOracle ILeverOracle
