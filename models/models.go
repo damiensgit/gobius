@@ -78,33 +78,39 @@ var ModelRegistry *ModelFactory
 func InitModelRegistry(client ipfs.IPFSClient, config *config.AppConfig, logger zerolog.Logger) {
 	ModelRegistry = NewModelFactory()
 
-	// Register Qwen Mainnet
-	modelQwenMainnet := NewQwenMainnetModel(client, config, logger)
-	if modelQwenMainnet != nil {
-		ModelRegistry.RegisterModel(modelQwenMainnet)
-	}
+	// // Register Qwen Mainnet
+	// modelQwenMainnet := NewQwenMainnetModel(client, config, logger)
+	// if modelQwenMainnet != nil {
+	// 	ModelRegistry.RegisterModel(modelQwenMainnet)
+	// }
 
-	modelWaiV120Mainnet := NewWaiV120MainnetModel(client, config, logger)
-	if modelWaiV120Mainnet != nil {
-		ModelRegistry.RegisterModel(modelWaiV120Mainnet)
-	}
+	// modelWaiV120Mainnet := NewWaiV120MainnetModel(client, config, logger)
+	// if modelWaiV120Mainnet != nil {
+	// 	ModelRegistry.RegisterModel(modelWaiV120Mainnet)
+	// }
 
-	// Sepolia testnet model
-	modelQwenTest := NewQwenTestModel(client, config, logger)
-	if modelQwenTest != nil {
-		ModelRegistry.RegisterModel(modelQwenTest)
-	}
+	// // Sepolia testnet model
+	// modelQwenTest := NewQwenTestModel(client, config, logger)
+	// if modelQwenTest != nil {
+	// 	ModelRegistry.RegisterModel(modelQwenTest)
+	// }
 
-	// Register Kandinsky2
-	modelKandinsky2 := NewKandinsky2Model(client, config, logger)
-	if modelKandinsky2 != nil {
-		ModelRegistry.RegisterModel(modelKandinsky2)
-	}
+	// // Register Kandinsky2
+	// modelKandinsky2 := NewKandinsky2Model(client, config, logger)
+	// if modelKandinsky2 != nil {
+	// 	ModelRegistry.RegisterModel(modelKandinsky2)
+	// }
 
-	// Register Metabaron-Uncensored-8B
-	modelMetabaron := NewMetabaronModel(client, config, logger)
-	if modelMetabaron != nil {
-		ModelRegistry.RegisterModel(modelMetabaron)
+	// // Register Metabaron-Uncensored-8B
+	// modelMetabaron := NewMetabaronModel(client, config, logger)
+	// if modelMetabaron != nil {
+	// 	ModelRegistry.RegisterModel(modelMetabaron)
+	// }
+
+	// Register ESMFold V1
+	modelESMFoldV1 := NewESMFoldV1Model(client, config, logger)
+	if modelESMFoldV1 != nil {
+		ModelRegistry.RegisterModel(modelESMFoldV1)
 	}
 
 }

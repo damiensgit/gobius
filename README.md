@@ -186,7 +186,7 @@ Basic usage:
 | `--config` | Path to the configuration file | "config.json" | No |
 | `--skipvalidation` | Skip safety checks and validation of the model and miner version | false | No |
 | `--loglevel` | Set logging verbosity (1 = default) | 1 | No |
-| `--testnet` | Run using testnet (1 = local, 2 = nova testnet) | 0 | No |
+| `--testnet` | Run using testnet (1 = local, 2 = Arbitrum Sepolia testnet) | 0 | No |
 | `--taskscanner` | Scan blocks for unsolved tasks in pst 12 hours | 0 | No |
 
 #### Example Commands
