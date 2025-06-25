@@ -27,6 +27,18 @@
         "rate": "0",
         "cid": "0x12208dc17f4317285392e6811ca31c9efeb3b8511ebac1bd14b935ecf2c1b60c1b09"
       }
+    },
+    "esmfold-v1": {
+      "id": "0xbf632554a7a1c5162ef6150b17a79f30b90850f7e0c56391da0ec810306d021b",
+      "mineable": true,
+      "contracts": {},
+      "params": {
+        "addr": "0xD7d5bCaC95d26aB06333238E57219B15270DFc8d",
+        "fee": "0",
+        "rate": "0",
+        "cid": "0x12200e4c49b7ee8a0955a773e657444880712f639341237ad63a5f59303a343f4e4e"
+      }
     }
+    
   }
 }
