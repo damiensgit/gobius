@@ -34,6 +34,7 @@ type ESMFoldV1Model struct {
 	client              *http.Client
 	logger              zerolog.Logger
 	ipfs                ipfs.IPFSClient
+	inputFields         []map[string]any
 }
 
 var _ ModelInterface = (*ESMFoldV1Model)(nil)
@@ -48,20 +49,20 @@ var ESMFoldV1ModelTemplate = Model{
 			"git":         "https://github.com/facebookresearch/esm",
 			"docker":      "https://hub.docker.com/r/cody8295/esmfold-arbius",
 			"version":     1,
-		},
-		"input": []map[string]any{
-			{
-				"variable":    "sequence",
-				"type":        "string",
-				"required":    true,
-				"default":     "",
-				"description": "Amino acid sequence to predict protein structure from",
+			"input": []map[string]any{
+				{
+					"variable":    "sequence",
+					"type":        "string",
+					"required":    true,
+					"default":     "",
+					"description": "Amino acid sequence to predict protein structure from",
+				},
 			},
-		},
-		"output": []map[string]any{
-			{
-				"filename": "result.pdb",
-				"type":     "text",
+			"output": []map[string]any{
+				{
+					"filename": "result.pdb",
+					"type":     "text",
+				},
 			},
 		},
 	},
@@ -85,8 +86,54 @@ func NewESMFoldV1Model(client ipfs.IPFSClient, appConfig *config.AppConfig, logg
 	timeout := 600 * time.Second
 	ipfsTimeout := 30 * time.Second
 
+	// Use model.ID (the hex string CID) as the key for the Cog map
+	cogConfig, ok := appConfig.ML.Cog[model.ID]
+	if ok {
+		// Parse inference timeout only if the string is not empty
+		if cogConfig.HttpTimeout != "" {
+			parsedTimeout, err := time.ParseDuration(cogConfig.HttpTimeout)
+			if err != nil {
+				logger.Warn().Err(err).Str("model", model.ID).Str("config_timeout", cogConfig.HttpTimeout).Msg("failed to parse model timeout from cog config, using default 120s")
+				// Keep default timeout
+			} else {
+				timeout = parsedTimeout
+			}
+		} // Else: HttpTimeout is empty, silently use the default
+
+		// Parse IPFS timeout only if the string is not empty
+		if cogConfig.IpfsTimeout != "" {
+			parsedIpfsTimeout, err := time.ParseDuration(cogConfig.IpfsTimeout)
+			if err != nil {
+				logger.Warn().Err(err).Str("model", model.ID).Str("config_ipfs_timeout", cogConfig.IpfsTimeout).Msg("failed to parse IPFS timeout from cog config, using default 30s")
+				// Keep default ipfsTimeout
+			} else {
+				ipfsTimeout = parsedIpfsTimeout
+			}
+		} // Else: IpfsTimeout is empty, silently use the default
+	}
+
+	// perform validation on the template
+	templateMeta, ok := ESMFoldV1ModelTemplate.Template.(map[string]any)
+	if !ok {
+		logger.Error().Str("model", model.ID).Msg("invalid template format")
+		return nil
+	}
+
+	meta, ok := templateMeta["meta"].(map[string]any)
+	if !ok {
+		logger.Error().Str("model", model.ID).Msg("invalid meta format in template")
+		return nil
+	}
+
+	inputFields, ok := meta["input"].([]map[string]any)
+	if !ok {
+		logger.Error().Str("model", model.ID).Msg("invalid input format in template meta")
+		return nil
+	}
+
 	m := &ESMFoldV1Model{
-		Model:               ESMFoldV1ModelTemplate,
+		Model: ESMFoldV1ModelTemplate,
+
 		timeoutDuration:     timeout,
 		ipfsTimeoutDuration: ipfsTimeout,
 		config:              appConfig,
@@ -96,9 +143,10 @@ func NewESMFoldV1Model(client ipfs.IPFSClient, appConfig *config.AppConfig, logg
 				MinTime: 0,
 			},
 		},
-		ipfs:   client,
-		client: http,
-		logger: logger,
+		ipfs:        client,
+		client:      http,
+		logger:      logger,
+		inputFields: inputFields,
 	}
 	m.Model.ID = model.ID
 	return m
@@ -107,22 +155,7 @@ func NewESMFoldV1Model(client ipfs.IPFSClient, appConfig *config.AppConfig, logg
 func (m *ESMFoldV1Model) HydrateInput(preprocessedInput map[string]any, seed uint64) (InputHydrationResult, error) {
 	input := make(map[string]any)
 
-	templateMeta, ok := m.Model.Template.(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("invalid template format")
-	}
-
-	meta, ok := templateMeta["meta"].(map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("invalid meta format in template")
-	}
-
-	inputFields, ok := meta["input"].([]map[string]any)
-	if !ok {
-		return nil, fmt.Errorf("invalid input format in template meta")
-	}
-
-	for _, field := range inputFields {
+	for _, field := range m.inputFields {
 		varName := field["variable"].(string)
 		fieldType := field["type"].(string)
 		required, _ := field["required"].(bool)
